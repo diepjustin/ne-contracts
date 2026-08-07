@@ -1,0 +1,13 @@
+# Raw scrape output — large (~16 MB) and regenerable via scripts/scrape.py.
+# The published page uses the normalized data.json instead.
+data/*.csv
+data/*.db
+data/scrape_state.txt
+
+# Python
+venv/
+__pycache__/
+*.pyc
+
+# OS
+.DS_Store

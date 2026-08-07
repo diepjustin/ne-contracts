@@ -1,0 +1,380 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>University of Nebraska Contracts &amp; Purchase Orders</title>
+<meta name="description" content="Searchable database of University of Nebraska contracts and purchase orders from the Nebraska State Contracts Database.">
+<style>
+  :root {
+    --bg: #ffffff; --panel: #f6f7f9; --border: #d9dde3; --text: #14181d;
+    --muted: #626b76; --accent: #d00000; --accent-soft: #fdecec;
+    --row-alt: #fafbfc; --shadow: 0 1px 3px rgba(0,0,0,.08);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14171a; --panel: #1c2025; --border: #2c323a; --text: #e6e9ed;
+      --muted: #949dab; --accent: #ff6b6b; --accent-soft: #2a1c1d;
+      --row-alt: #181c20; --shadow: 0 1px 3px rgba(0,0,0,.4);
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  header {
+    padding: 22px 20px 16px; border-bottom: 1px solid var(--border);
+  }
+  h1 { margin: 0 0 4px; font-size: 21px; letter-spacing: -.01em; }
+  .sub { color: var(--muted); font-size: 13.5px; }
+  .sub a { color: inherit; }
+
+  .controls {
+    display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end;
+    padding: 14px 20px; background: var(--panel); border-bottom: 1px solid var(--border);
+    position: sticky; top: 0; z-index: 5;
+  }
+  .field { display: flex; flex-direction: column; gap: 4px; }
+  .field label { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); font-weight: 600; }
+  input, select, button {
+    font: inherit; padding: 7px 9px; border: 1px solid var(--border);
+    border-radius: 6px; background: var(--bg); color: var(--text);
+  }
+  input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  #q { min-width: 260px; }
+  .num { width: 108px; }
+  .yr  { width: 78px; }
+  button {
+    cursor: pointer; font-weight: 600; background: var(--bg);
+  }
+  button:hover { border-color: var(--accent); color: var(--accent); }
+  #reset { color: var(--muted); font-weight: 500; }
+
+  .status {
+    padding: 9px 20px; font-size: 13.5px; color: var(--muted);
+    border-bottom: 1px solid var(--border); display: flex; gap: 14px; flex-wrap: wrap;
+  }
+  .status b { color: var(--text); }
+
+  #scroller { overflow: auto; height: calc(100vh - 218px); }
+  table { border-collapse: collapse; width: 100%; font-size: 13.5px; }
+  thead th {
+    position: sticky; top: 0; background: var(--panel); z-index: 2;
+    text-align: left; padding: 9px 10px; font-size: 11px; text-transform: uppercase;
+    letter-spacing: .05em; color: var(--muted); border-bottom: 1px solid var(--border);
+    cursor: pointer; white-space: nowrap; user-select: none;
+  }
+  thead th:hover { color: var(--accent); }
+  thead th .ind { opacity: .45; font-weight: 400; }
+  td { padding: 7px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  tbody tr:nth-child(even) { background: var(--row-alt); }
+  .amt { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .dt  { white-space: nowrap; font-variant-numeric: tabular-nums; color: var(--muted); }
+  .vendor { min-width: 200px; }
+  .doc a { color: var(--accent); text-decoration: none; font-variant-numeric: tabular-nums; }
+  .doc a:hover { text-decoration: underline; }
+  .pill {
+    display: inline-block; padding: 1px 7px; border-radius: 20px;
+    font-size: 11px; font-weight: 600; border: 1px solid var(--border); white-space: nowrap;
+  }
+  .pill.active { color: #0a7d3f; border-color: #0a7d3f55; background: #0a7d3f14; }
+  .pill.expired { color: var(--muted); }
+  mark { background: var(--accent-soft); color: inherit; padding: 0 1px; border-radius: 2px; }
+  .empty { padding: 50px 20px; text-align: center; color: var(--muted); }
+  #load { padding: 50px 20px; text-align: center; color: var(--muted); }
+  footer { padding: 14px 20px; font-size: 12.5px; color: var(--muted); border-top: 1px solid var(--border); }
+  footer a { color: inherit; }
+  @media (max-width: 720px) {
+    .hide-sm { display: none; }
+    #scroller { height: calc(100vh - 300px); }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>University of Nebraska Contracts &amp; Purchase Orders</h1>
+  <div class="sub">
+    Scraped from the <a href="https://statecontracts.nebraska.gov/" target="_blank" rel="noopener">Nebraska State Contracts Database</a>.
+    Covers UNL and University of Nebraska Central Administration.
+  </div>
+</header>
+
+<div class="controls">
+  <div class="field">
+    <label for="q">Search vendor or document #</label>
+    <input id="q" type="search" placeholder="e.g. amazon, fisher scientific, 4800185035" autocomplete="off">
+  </div>
+  <div class="field">
+    <label for="type">Type</label>
+    <select id="type"><option value="">All</option></select>
+  </div>
+  <div class="field">
+    <label for="status">Status</label>
+    <select id="status"><option value="">All</option></select>
+  </div>
+  <div class="field">
+    <label for="entity">Campus</label>
+    <select id="entity"><option value="">All</option></select>
+  </div>
+  <div class="field">
+    <label for="y0">Begins after</label>
+    <input id="y0" class="yr" type="number" placeholder="1977" inputmode="numeric">
+  </div>
+  <div class="field">
+    <label for="y1">Begins before</label>
+    <input id="y1" class="yr" type="number" placeholder="2030" inputmode="numeric">
+  </div>
+  <div class="field">
+    <label for="min">Min $</label>
+    <input id="min" class="num" type="number" placeholder="0" inputmode="numeric">
+  </div>
+  <div class="field">
+    <label for="max">Max $</label>
+    <input id="max" class="num" type="number" placeholder="any" inputmode="numeric">
+  </div>
+  <div class="field">
+    <label>&nbsp;</label>
+    <button id="csv">Export CSV</button>
+  </div>
+  <div class="field">
+    <label>&nbsp;</label>
+    <button id="reset">Reset</button>
+  </div>
+</div>
+
+<div class="status" id="status-bar"><span>Loading data…</span></div>
+
+<div id="load">Loading 32,000+ records…</div>
+
+<div id="scroller" hidden>
+  <table>
+    <thead><tr>
+      <th data-k="0">Document # <span class="ind"></span></th>
+      <th data-k="7" class="hide-sm">Type <span class="ind"></span></th>
+      <th data-k="1">Vendor <span class="ind"></span></th>
+      <th data-k="2" class="amt">Amount <span class="ind"></span></th>
+      <th data-k="3">Begins <span class="ind"></span></th>
+      <th data-k="4" class="hide-sm">Ends <span class="ind"></span></th>
+      <th data-k="5">Status <span class="ind"></span></th>
+      <th data-k="6" class="hide-sm">Campus <span class="ind"></span></th>
+    </tr></thead>
+    <tbody id="rows"></tbody>
+  </table>
+  <div class="empty" id="empty" hidden>No records match those filters.</div>
+</div>
+
+<footer>
+  Public records from the Nebraska Department of Administrative Services, published under
+  <a href="https://nebraskalegislature.gov/laws/statutes.php?statute=84-602.04" target="_blank" rel="noopener">Neb. Rev. Stat. § 84-602.04</a>.
+  Amounts are as recorded by the state and may include amendments. <span id="built"></span>
+</footer>
+
+<script>
+(function () {
+  "use strict";
+
+  var ROW_H = 33, BUF = 8;
+  var D = null, vlow = null;
+  // Default to largest-first: it is the most useful landing view, and it avoids
+  // opening on the handful of typo dates in the state's own records (e.g. year 2223).
+  var view = [], sortKey = 2, sortDir = -1, term = "";
+
+  var $ = function (id) { return document.getElementById(id); };
+  var scroller = $("scroller"), tbody = $("rows");
+
+  var fmtMoney = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 2 });
+
+  function fmtDate(n) {
+    if (!n) return "";
+    var s = String(n);
+    return s.slice(4, 6) + "/" + s.slice(6, 8) + "/" + s.slice(0, 4);
+  }
+
+  function esc(s) {
+    return String(s).replace(/[&<>"]/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c];
+    });
+  }
+
+  function highlight(s) {
+    if (!term) return esc(s);
+    var i = s.toLowerCase().indexOf(term);
+    if (i < 0) return esc(s);
+    return esc(s.slice(0, i)) + "<mark>" + esc(s.slice(i, i + term.length)) + "</mark>" + esc(s.slice(i + term.length));
+  }
+
+  function detailUrl(r) {
+    var u = D.url, e = encodeURIComponent;
+    return u.detailBase + "?A=" + e(u.A) + "&D=" + e(u.D[r[6]]) + "&DN=" + e(r[8]) +
+           "&N=" + e(u.N[r[6]]) + "&DT=" + e(u.DT[r[7]]) + "&V=" + e(D.vtok[r[1]]);
+  }
+
+  function fill(sel, list) {
+    list.forEach(function (name, i) {
+      var o = document.createElement("option");
+      o.value = i; o.textContent = name;
+      sel.appendChild(o);
+    });
+  }
+
+  function apply() {
+    var q = $("q").value.trim().toLowerCase();
+    term = q;
+    var ti = $("type").value, si = $("status").value, ei = $("entity").value;
+    var y0 = parseInt($("y0").value, 10), y1 = parseInt($("y1").value, 10);
+    var mn = parseFloat($("min").value), mx = parseFloat($("max").value);
+
+    // Vendors are deduped, so match the 14.9k vendor names once rather than
+    // the 32.4k rows — then membership is a cheap integer lookup per row.
+    var vhit = null;
+    if (q) {
+      vhit = new Uint8Array(vlow.length);
+      for (var i = 0; i < vlow.length; i++) if (vlow[i].indexOf(q) >= 0) vhit[i] = 1;
+    }
+
+    var d0 = isNaN(y0) ? 0 : y0 * 10000;
+    var d1 = isNaN(y1) ? 0 : y1 * 10000 + 9999;
+
+    var out = [], rows = D.rows;
+    for (var j = 0; j < rows.length; j++) {
+      var r = rows[j];
+      if (ti !== "" && r[7] !== +ti) continue;
+      if (si !== "" && r[5] !== +si) continue;
+      if (ei !== "" && r[6] !== +ei) continue;
+      if (d0 && r[3] && r[3] < d0) continue;
+      if (d1 && r[3] && r[3] > d1) continue;
+      if (!isNaN(mn) && r[2] < mn) continue;
+      if (!isNaN(mx) && r[2] > mx) continue;
+      if (q && !vhit[r[1]] && r[0].toLowerCase().indexOf(q) < 0) continue;
+      out.push(r);
+    }
+
+    var k = sortKey, dir = sortDir;
+    out.sort(function (a, b) {
+      var x = k === 1 ? D.vendors[a[1]] : a[k];
+      var y = k === 1 ? D.vendors[b[1]] : b[k];
+      return x < y ? -dir : x > y ? dir : 0;
+    });
+
+    view = out;
+    render();
+    summarize();
+  }
+
+  function summarize() {
+    $("status-bar").innerHTML =
+      "<span><b>" + view.length.toLocaleString() + "</b> of " + D.rows.length.toLocaleString() + " records</span>";
+  }
+
+  // Only the visible slice is in the DOM; spacer rows hold the scrollbar height.
+  function render() {
+    $("empty").hidden = view.length > 0;
+    var top = scroller.scrollTop;
+    // On the very first paint the scroller was just unhidden and layout has not
+    // flushed, so clientHeight reads 0 and we would render only BUF rows.
+    var h = scroller.clientHeight || window.innerHeight;
+    var start = Math.max(0, Math.floor(top / ROW_H) - BUF);
+    var end = Math.min(view.length, Math.ceil((top + h) / ROW_H) + BUF);
+
+    var html = "";
+    if (start > 0) html += '<tr style="height:' + start * ROW_H + 'px"></tr>';
+
+    for (var i = start; i < end; i++) {
+      var r = view[i];
+      var link = r[9] ? D.url.viewBase + r[9] : detailUrl(r);
+      html += "<tr>" +
+        '<td class="doc"><a href="' + esc(link) + '" target="_blank" rel="noopener">' + highlight(r[0]) + "</a></td>" +
+        '<td class="hide-sm">' + esc(D.meta.types[r[7]] === "Contract" ? "Contract" : "PO") + "</td>" +
+        '<td class="vendor">' + highlight(D.vendors[r[1]]) + "</td>" +
+        '<td class="amt">' + fmtMoney.format(r[2]) + "</td>" +
+        '<td class="dt">' + fmtDate(r[3]) + "</td>" +
+        '<td class="dt hide-sm">' + fmtDate(r[4]) + "</td>" +
+        '<td><span class="pill ' + (r[5] === 0 ? "active" : "expired") + '">' + D.meta.statuses[r[5]] + "</span></td>" +
+        '<td class="hide-sm">' + (r[6] === 0 ? "UNL" : "Central Admin") + "</td>" +
+        "</tr>";
+    }
+
+    if (end < view.length) html += '<tr style="height:' + (view.length - end) * ROW_H + 'px"></tr>';
+    tbody.innerHTML = html;
+  }
+
+  function exportCsv() {
+    var head = ["Document Number", "Type", "Vendor", "Amount", "Begin Date", "End Date", "Status", "Campus", "URL"];
+    var lines = [head.join(",")];
+    for (var i = 0; i < view.length; i++) {
+      var r = view[i];
+      var link = r[9] ? D.url.viewBase + r[9] : detailUrl(r);
+      lines.push([
+        r[0], D.meta.types[r[7]], D.vendors[r[1]], r[2],
+        fmtDate(r[3]), fmtDate(r[4]), D.meta.statuses[r[5]], D.meta.entities[r[6]], link
+      ].map(function (c) {
+        c = String(c);
+        return /[",\n]/.test(c) ? '"' + c.replace(/"/g, '""') + '"' : c;
+      }).join(","));
+    }
+    var blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8" });
+    var a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "nebraska-filtered-" + view.length + "-records.csv";
+    a.click();
+    URL.revokeObjectURL(a.href);
+  }
+
+  var timer;
+  function debounced() { clearTimeout(timer); timer = setTimeout(apply, 140); }
+
+  fetch("data.json").then(function (r) {
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    return r.json();
+  }).then(function (json) {
+    D = json;
+    vlow = D.vendors.map(function (v) { return v.toLowerCase(); });
+
+    fill($("type"), D.meta.types);
+    fill($("status"), D.meta.statuses);
+    fill($("entity"), ["UNL", "Central Administration"]);
+
+    $("load").hidden = true;
+    scroller.hidden = false;
+    if (D.meta.built) $("built").textContent = "Data scraped " + D.meta.built + ".";
+    var th = document.querySelector('thead th[data-k="2"]');
+    if (th) th.querySelector(".ind").textContent = "↓";
+
+    ["q", "y0", "y1", "min", "max"].forEach(function (id) {
+      $(id).addEventListener("input", debounced);
+    });
+    ["type", "status", "entity"].forEach(function (id) {
+      $(id).addEventListener("change", apply);
+    });
+    $("csv").addEventListener("click", exportCsv);
+    $("reset").addEventListener("click", function () {
+      ["q", "y0", "y1", "min", "max"].forEach(function (id) { $(id).value = ""; });
+      ["type", "status", "entity"].forEach(function (id) { $(id).value = ""; });
+      apply();
+    });
+
+    scroller.addEventListener("scroll", render, { passive: true });
+    window.addEventListener("resize", render);
+
+    document.querySelectorAll("thead th").forEach(function (th) {
+      th.addEventListener("click", function () {
+        var k = +th.dataset.k;
+        if (k === sortKey) sortDir = -sortDir; else { sortKey = k; sortDir = 1; }
+        document.querySelectorAll("thead .ind").forEach(function (s) { s.textContent = ""; });
+        th.querySelector(".ind").textContent = sortDir > 0 ? "↑" : "↓";
+        apply();
+        scroller.scrollTop = 0;
+      });
+    });
+
+    apply();
+    requestAnimationFrame(render); // re-measure once layout has settled
+  }).catch(function (e) {
+    $("load").textContent = "Could not load data.json — " + e.message;
+  });
+})();
+</script>
+</body>
+</html>

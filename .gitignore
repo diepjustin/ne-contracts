@@ -4,6 +4,9 @@ data/*.csv
 data/*.db
 data/scrape_state.txt
 
+# data/scrape_meta.json is deliberately NOT ignored — it is two lines of
+# provenance behind the "Last updated" line on the page.
+
 # Python
 venv/
 __pycache__/

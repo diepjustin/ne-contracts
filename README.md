@@ -35,6 +35,11 @@ python3 scripts/scrape.py purchase-order    # -> data/nu_purchase_orders.csv
 Output columns: `Document Number`, `Document Type`, `Entity Code`, `Entity Name`,
 `Vendor`, `Amount`, `Begin Date`, `End Date`, `Status`, `Detail URL`, `View URL`.
 
+Each run also stamps its completion time into `data/scrape_meta.json`, keyed by document
+type, which is where the "Last updated" line on the page comes from. Since the two types
+are scraped separately, `build_site.py` publishes the **older** of the two stamps — the
+dataset is only as current as its stalest half.
+
 `View URL` links straight to the scanned document. It is blank for 4.2% of records
 (1,367 of 32,409), where the state has not uploaded a file ("Documents not available
 for immediate viewing").
@@ -70,7 +75,7 @@ compression is lossless.
 Publishing needs no configuration: this folder lives in the `diepjustin.github.io`
 user site, which already serves `main` at the repo root, so pushing updates the live
 page. To refresh the data, re-run the scraper, re-run `build_site.py`, then commit
-`data.json`.
+`data.json` and `data/scrape_meta.json`.
 
 ## Data caveats
 

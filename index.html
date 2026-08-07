@@ -26,9 +26,24 @@
   header {
     padding: 22px 20px 16px; border-bottom: 1px solid var(--border);
   }
+  .head-row {
+    display: flex; align-items: flex-start; justify-content: space-between;
+    gap: 10px 24px; flex-wrap: wrap;
+  }
   h1 { margin: 0 0 4px; font-size: 21px; letter-spacing: -.01em; }
   .sub { color: var(--muted); font-size: 13.5px; }
   .sub a { color: inherit; }
+  .updated {
+    color: var(--muted); font-size: 11px; text-transform: uppercase;
+    letter-spacing: .06em; font-weight: 600; text-align: right; flex-shrink: 0;
+  }
+  .updated b {
+    display: block; margin-top: 3px; color: var(--text); font-size: 13px;
+    text-transform: none; letter-spacing: 0; font-weight: 600; white-space: nowrap;
+  }
+  @media (max-width: 640px) {
+    .updated, .updated b { text-align: left; }
+  }
 
   .controls {
     display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end;
@@ -94,10 +109,15 @@
 <body>
 
 <header>
-  <h1>University of Nebraska Contracts &amp; Purchase Orders</h1>
-  <div class="sub">
-    Scraped from the <a href="https://statecontracts.nebraska.gov/" target="_blank" rel="noopener">Nebraska State Contracts Database</a>.
-    Covers UNL and University of Nebraska Central Administration.
+  <div class="head-row">
+    <div>
+      <h1>University of Nebraska Contracts &amp; Purchase Orders</h1>
+      <div class="sub">
+        Scraped from the <a href="https://statecontracts.nebraska.gov/" target="_blank" rel="noopener">Nebraska State Contracts Database</a>.
+        Covers UNL and University of Nebraska Central Administration.
+      </div>
+    </div>
+    <div class="updated" id="updated" hidden></div>
   </div>
 </header>
 
@@ -168,7 +188,7 @@
 <footer>
   Public records from the Nebraska Department of Administrative Services, published under
   <a href="https://nebraskalegislature.gov/laws/statutes.php?statute=84-602.04" target="_blank" rel="noopener">Neb. Rev. Stat. § 84-602.04</a>.
-  Amounts are as recorded by the state and may include amendments. <span id="built"></span>
+  Amounts are as recorded by the state and may include amendments.
 </footer>
 
 <script>
@@ -190,6 +210,35 @@
     if (!n) return "";
     var s = String(n);
     return s.slice(4, 6) + "/" + s.slice(6, 8) + "/" + s.slice(0, 4);
+  }
+
+  function showUpdated() {
+    var el = $("updated"), when, text;
+
+    if (D.meta.scraped) {
+      // Full timestamp with a UTC offset — render it in the reader's own timezone.
+      when = new Date(D.meta.scraped);
+      if (isNaN(when)) return;
+      text = when.toLocaleString(undefined, {
+        month: "short", day: "numeric", year: "numeric",
+        hour: "numeric", minute: "2-digit", timeZoneName: "short"
+      });
+    } else if (D.meta.built) {
+      // Payloads built before scrape times were recorded carry only a date.
+      // Split it by hand: new Date("YYYY-MM-DD") is parsed as UTC midnight,
+      // which renders as the previous day anywhere west of Greenwich.
+      var p = String(D.meta.built).split("-");
+      if (p.length !== 3) return;
+      when = new Date(+p[0], +p[1] - 1, +p[2]);
+      if (isNaN(when)) return;
+      text = when.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+    } else {
+      return;
+    }
+
+    el.textContent = "Last updated";
+    el.appendChild(document.createElement("b")).textContent = text;
+    el.hidden = false;
   }
 
   function esc(s) {
@@ -338,7 +387,7 @@
 
     $("load").hidden = true;
     scroller.hidden = false;
-    if (D.meta.built) $("built").textContent = "Data scraped " + D.meta.built + ".";
+    showUpdated();
     var th = document.querySelector('thead th[data-k="2"]');
     if (th) th.querySelector(".ind").textContent = "↓";
 

@@ -31,6 +31,7 @@ DATA = {
     "Contract": os.path.join(ROOT, "data", "nu_contracts.csv"),
     "Purchase Order": os.path.join(ROOT, "data", "nu_purchase_orders.csv"),
 }
+SCRAPE_META = os.path.join(ROOT, "data", "scrape_meta.json")
 OUT_DIR = ROOT
 OUT_JSON = os.path.join(OUT_DIR, "data.json")
 
@@ -59,6 +60,32 @@ def to_amount(raw):
         return round(float(raw.replace("$", "").replace(",", "").strip()), 2)
     except ValueError:
         return 0.0
+
+
+def scraped_at():
+    """When the source data was last pulled, as an ISO-8601 string, or None.
+
+    Each document type is scraped by its own run, so the dataset is only as
+    current as its stalest half — report the oldest of the completion times.
+    Returns None when any type is unstamped (data predating scrape_meta.json),
+    so the page can fall back rather than overstate freshness.
+    """
+    try:
+        with open(SCRAPE_META, encoding="utf-8") as f:
+            stamps = json.load(f)
+    except (OSError, ValueError):
+        return None
+
+    if not set(DATA) <= set(stamps):
+        return None
+
+    try:
+        # min() raises TypeError if the stamps mix offset-aware and naive times.
+        oldest = min(datetime.datetime.fromisoformat(stamps[k]) for k in DATA)
+    except (TypeError, ValueError):
+        return None
+
+    return oldest.isoformat(timespec="seconds")
 
 
 def main():
@@ -127,6 +154,10 @@ def main():
         sys.exit(f"expected exactly one A constant, got {len(const_A)}")
     A = const_A.pop()
 
+    scraped = scraped_at()
+    if not scraped:
+        print(f"warning: no complete scrape times in {SCRAPE_META} — page will fall back to the build date")
+
     payload = {
         "meta": {
             "entities": ENTITIES,
@@ -134,6 +165,7 @@ def main():
             "types": TYPES,
             "count": len(rows),
             "built": datetime.date.today().isoformat(),
+            "scraped": scraped,
         },
         "url": {
             "detailBase": DETAIL_BASE,

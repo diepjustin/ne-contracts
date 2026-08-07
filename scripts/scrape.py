@@ -4,6 +4,8 @@ from urllib3.util.retry import Retry
 from bs4 import BeautifulSoup
 from concurrent.futures import ThreadPoolExecutor
 import argparse
+import datetime
+import json
 import threading
 import time
 import csv
@@ -25,6 +27,11 @@ DOC_TYPES = {
     "purchase-order": ("Purchase Order", "data/nu_purchase_orders.csv"),
     "contract": ("Contract", "data/nu_contracts.csv"),
 }
+
+# Completion times, one per document type, so the published page can say how
+# fresh its data is. Each doc type is scraped by a separate run, so this file
+# accumulates a stamp per type rather than being overwritten wholesale.
+SCRAPE_META = "data/scrape_meta.json"
 
 # Set to True to append to an existing CSV instead of overwriting
 APPEND_MODE = False
@@ -230,6 +237,25 @@ def scrape_entity(session, entity_name, entity_val, status, doc_type, writer):
     return total
 
 
+def record_scrape_time(doc_type):
+    """Stamp this document type's completion time, preserving stamps for other types."""
+    stamps = {}
+    if os.path.exists(SCRAPE_META):
+        try:
+            with open(SCRAPE_META, encoding="utf-8") as f:
+                stamps = json.load(f)
+        except (OSError, ValueError):
+            stamps = {}  # unreadable or corrupt: start fresh rather than fail the scrape
+
+    # Local time with an explicit UTC offset, so the browser can render it in
+    # the reader's own timezone without guessing where the scrape ran.
+    stamps[doc_type] = datetime.datetime.now().astimezone().isoformat(timespec="seconds")
+
+    with open(SCRAPE_META, "w", encoding="utf-8") as f:
+        json.dump(stamps, f, indent=2, sort_keys=True)
+    return stamps[doc_type]
+
+
 def main():
     parser = argparse.ArgumentParser(description="Scrape NU documents from the Nebraska State Contracts Database.")
     parser.add_argument("doc_type", nargs="?", default="purchase-order", choices=sorted(DOC_TYPES),
@@ -262,8 +288,11 @@ def main():
                 grand_total += count
                 f.flush()
 
+    stamp = record_scrape_time(doc_type)
+
     print(f"\nDone. Total records: {grand_total}")
     print(f"Saved to: {output_csv}")
+    print(f"Scrape time recorded: {stamp}")
 
 
 if __name__ == "__main__":

@@ -7,6 +7,18 @@ data/scrape_state.txt
 # data/scrape_meta.json is deliberately NOT ignored — it is two lines of
 # provenance behind the "Last updated" line on the page.
 
+# Working output of scripts/extract_text.py — an append-only checkpoint log
+# that grows as documents are processed, not something to commit while
+# prototyping.
+data/doc_text.jsonl
+
+# search.sqlite itself is NOT committed -- only its chunked form is
+# (search.sqlite.NNN + config.json, built by scripts/chunk_search_db.py),
+# since that's what the page actually serves. Keeping both would double
+# ~527 MB of published data for no benefit. Regenerable from
+# data/doc_text.jsonl if the chunks ever need rebuilding.
+prototype-search/search.sqlite
+
 # Python
 venv/
 __pycache__/

@@ -3,15 +3,21 @@
 The raw CSVs are ~76% URLs, most of it repeated on every row. The Nebraska detail
 URL has six query params, and only two actually vary per record:
 
-    A   one global constant
-    D   determined by entity (UNL vs Central Administration)
+    A   determined by entity
+    D   determined by entity
     N   determined by entity
-    DT  determined by document type (Contract vs Purchase Order)
+    DT  determined by document type
     DN  unique per row
     V   1:1 with vendor, so derivable from the vendor index
 
 So we ship the varying parts and rebuild the rest in the browser. Every URL is
 round-trip verified against the original before the payload is written.
+
+Document types are discovered from the data rather than declared. Higher
+Education uses two readable ones ("Contract", "Purchase Order"); State agencies
+use the source system's internal codes ("O4", "ZO", "OP", ...), and how many
+exist isn't knowable up front. DT stays keyed by type alone -- verified against
+live data that a given code maps to the same DT in every agency.
 """
 
 import csv
@@ -27,9 +33,11 @@ from urllib.parse import urlparse, parse_qs
 # data.json sit at the folder root because that root is the published URL.
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+# Keyed by dataset name, matching the stamps scrape.py writes to scrape_meta.json.
 DATA = {
-    "Contract": os.path.join(ROOT, "data", "nu_contracts.csv"),
-    "Purchase Order": os.path.join(ROOT, "data", "nu_purchase_orders.csv"),
+    "contract": os.path.join(ROOT, "data", "nu_contracts.csv"),
+    "purchase-order": os.path.join(ROOT, "data", "nu_purchase_orders.csv"),
+    "state": os.path.join(ROOT, "data", "state_agencies.csv"),
 }
 SCRAPE_META = os.path.join(ROOT, "data", "scrape_meta.json")
 OUT_DIR = ROOT
@@ -38,9 +46,21 @@ OUT_JSON = os.path.join(OUT_DIR, "data.json")
 DETAIL_BASE = "https://statecontracts.nebraska.gov/Search/SearchDocuments"
 VIEW_BASE = "https://statecontracts.nebraska.gov/Search/ViewDocument?D="
 
-ENTITIES = ["University of Nebraska Lincoln", "University of Nebraska Central Administration"]
+def load_entities():
+    """Every entity the scraper knows about, alphabetized.
+
+    Sorted here rather than in the page: index.html renders the dropdown in
+    whatever order this list arrives in, so sorting once at build time is all
+    the ordering the UI needs.
+    """
+    sys.path.insert(0, os.path.join(ROOT, "scripts"))
+    from scrape import HIGHER_ED_ENTITIES, STATE_ENTITIES  # noqa: E402
+
+    return sorted(set(HIGHER_ED_ENTITIES) | set(STATE_ENTITIES))
+
+
+ENTITIES = load_entities()
 STATUSES = ["Active", "Expired"]
-TYPES = ["Contract", "Purchase Order"]
 
 
 def to_ymd(mdy):
@@ -95,16 +115,24 @@ def main():
 
     vendors = {}       # name -> index
     vendor_tokens = {} # index -> V param
+    const_A = {}       # entity index -> A
     const_D = {}       # entity index -> D
     const_N = {}       # entity index -> N
     const_DT = {}      # type index -> DT
-    const_A = set()
+
+    types = []         # discovered from the data, in first-seen order
+    type_index = {}
+
+    def type_idx(code):
+        if code not in type_index:
+            type_index[code] = len(types)
+            types.append(code)
+        return type_index[code]
 
     rows = []
     sources = []       # parallel to rows: original URLs, for round-trip verification
 
-    for doc_type, path in DATA.items():
-        ti = TYPES.index(doc_type)
+    for path in DATA.values():
         with open(path, newline="", encoding="utf-8") as f:
             for r in csv.DictReader(f):
                 ent = r["Entity Name"]
@@ -112,6 +140,8 @@ def main():
                     sys.exit(f"unexpected entity {ent!r} in {path}")
                 ei = ENTITIES.index(ent)
                 si = STATUSES.index(r["Status"])
+                # Per row, not per file: one State CSV mixes many type codes.
+                ti = type_idx(r["Document Type"])
 
                 name = r["Vendor"]
                 if name not in vendors:
@@ -123,7 +153,7 @@ def main():
                 if detail:
                     q = parse_qs(urlparse(detail).query)
                     dn = q.get("DN", [""])[0]
-                    const_A.add(q.get("A", [""])[0])
+                    const_A.setdefault(ei, q.get("A", [""])[0])
                     const_D.setdefault(ei, q.get("D", [""])[0])
                     const_N.setdefault(ei, q.get("N", [""])[0])
                     const_DT.setdefault(ti, q.get("DT", [""])[0])
@@ -150,19 +180,19 @@ def main():
                 ])
                 sources.append((detail, view))
 
-    if len(const_A) != 1:
-        sys.exit(f"expected exactly one A constant, got {len(const_A)}")
-    A = const_A.pop()
-
     scraped = scraped_at()
     if not scraped:
         print(f"warning: no complete scrape times in {SCRAPE_META} — page will fall back to the build date")
 
+    # An entity with no rows (nothing scraped, or the state genuinely has no
+    # documents for it) contributes no token. Empty string keeps the arrays
+    # aligned with the entity indices rows refer to; nothing can dereference
+    # those slots, since no row points at them.
     payload = {
         "meta": {
             "entities": ENTITIES,
             "statuses": STATUSES,
-            "types": TYPES,
+            "types": types,
             "count": len(rows),
             "built": datetime.date.today().isoformat(),
             "scraped": scraped,
@@ -170,10 +200,10 @@ def main():
         "url": {
             "detailBase": DETAIL_BASE,
             "viewBase": VIEW_BASE,
-            "A": A,
-            "D": [const_D[i] for i in range(len(ENTITIES))],
-            "N": [const_N[i] for i in range(len(ENTITIES))],
-            "DT": [const_DT[i] for i in range(len(TYPES))],
+            "A": [const_A.get(i, "") for i in range(len(ENTITIES))],
+            "D": [const_D.get(i, "") for i in range(len(ENTITIES))],
+            "N": [const_N.get(i, "") for i in range(len(ENTITIES))],
+            "DT": [const_DT.get(i, "") for i in range(len(types))],
         },
         "vendors": [n for n, _ in sorted(vendors.items(), key=lambda kv: kv[1])],
         "vtok": [vendor_tokens.get(i, "") for i in range(len(vendors))],
@@ -207,7 +237,7 @@ def verify(payload, sources):
 
         if detail:
             rebuilt = (
-                f"{u['detailBase']}?A={quote(u['A'], safe='')}"
+                f"{u['detailBase']}?A={quote(u['A'][ei], safe='')}"
                 f"&D={quote(u['D'][ei], safe='')}"
                 f"&DN={quote(dn, safe='')}"
                 f"&N={quote(u['N'][ei], safe='')}"

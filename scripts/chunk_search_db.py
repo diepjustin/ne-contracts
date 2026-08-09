@@ -25,7 +25,15 @@ CONFIG_JSON = os.path.join(SEARCH_DIR, "config.json")
 # Must be a multiple of the database's page_size (see build_search_index.py).
 SERVER_CHUNK_SIZE = 10 * 1024 * 1024
 SUFFIX_LENGTH = 3
-REQUEST_CHUNK_SIZE = 1024  # must match PAGE_SIZE in build_search_index.py
+
+# Bytes fetched per HTTP range request. Doesn't need to match the database's
+# actual page_size (1024, see build_search_index.py) -- larger values fetch
+# more pages per request, trading wasted bandwidth for fewer round trips.
+# Live testing on GitHub Pages showed cold queries are latency-bound (11-18s
+# to fetch only 5-11MB), so cutting request count matters more than bytes
+# here. 1024 was the httpvfs docs' example value, not a measured choice for
+# this dataset -- 32x larger as a first experiment.
+REQUEST_CHUNK_SIZE = 32 * 1024
 
 
 def main():

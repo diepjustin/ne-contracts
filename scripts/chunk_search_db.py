@@ -29,11 +29,17 @@ SUFFIX_LENGTH = 3
 # Bytes fetched per HTTP range request. Doesn't need to match the database's
 # actual page_size (1024, see build_search_index.py) -- larger values fetch
 # more pages per request, trading wasted bandwidth for fewer round trips.
-# Live testing on GitHub Pages showed cold queries are latency-bound (11-18s
-# to fetch only 5-11MB), so cutting request count matters more than bytes
-# here. 1024 was the httpvfs docs' example value, not a measured choice for
-# this dataset -- 32x larger as a first experiment.
-REQUEST_CHUNK_SIZE = 32 * 1024
+#
+# Tried 32768 live: "termination for convenience" and "insurance" both got
+# meaningfully faster, but "volleyball" -- a common single term whose
+# postings are scattered across tens of MB rather than clustered -- hung
+# indefinitely (30s+, log frozen) instead of the 11.3s it took at 1024. The
+# exponential prefetch (32 KiB -> 64 -> 128 -> 256...) that helps clustered
+# reads runs away on scattered ones, fetching an ever-growing chunk at each
+# new jump. Reverted to 1024, the one value confirmed safe for all three
+# test queries, until a size can be found that helps without this failure
+# mode -- or the prefetch growth itself gets capped.
+REQUEST_CHUNK_SIZE = 1024
 
 
 def main():

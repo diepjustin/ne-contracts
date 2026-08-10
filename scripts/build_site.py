@@ -3,12 +3,17 @@
 The raw CSVs are ~76% URLs, most of it repeated on every row. The Nebraska detail
 URL has six query params, and only two actually vary per record:
 
-    A   determined by entity
-    D   determined by entity
-    N   determined by entity
-    DT  determined by document type
-    DN  unique per row
-    V   1:1 with vendor, so derivable from the vendor index
+    A, D, N   vary together, but not by anything we can name
+    DT        determined by document type
+    DN        unique per row
+    V         1:1 with vendor, so derivable from the vendor index
+
+A, D and N looked entity-determined at two-entity scale and again across five,
+but at full scale twelve agencies carry more than one N and three N values span
+agencies -- so any rule stated in terms of entity is wrong somewhere. Rather
+than guess a better key, the three are stored as one deduplicated table of the
+combinations that actually occur (98 of them across 295,895 rows) with a small
+index per row. That is correct whatever the state keys them on.
 
 So we ship the varying parts and rebuild the rest in the browser. Every URL is
 round-trip verified against the original before the payload is written.
@@ -63,6 +68,29 @@ ENTITIES = load_entities()
 STATUSES = ["Active", "Expired"]
 
 
+def incomplete_coverage():
+    """Datasets still missing entities, as ["<entity> (<label>)", ...].
+
+    Read from the scrapers' own checkpoints rather than declared by hand, so
+    the page stops warning about a gap the moment that gap is actually filled.
+    Without this, an entity whose scrape never finished looks identical to one
+    the state simply has no records for -- which would quietly invite the wrong
+    conclusion about an agency's spending.
+    """
+    sys.path.insert(0, os.path.join(ROOT, "scripts"))
+    from scrape import (HIGHER_ED_ENTITIES, STATE_ENTITIES, STATUSES,  # noqa: E402
+                        load_progress, progress_file)
+
+    labels = {"contract": "contracts", "purchase-order": "purchase orders", "state": "records"}
+    gaps = []
+    for dataset in DATA:
+        entities = STATE_ENTITIES if dataset == "state" else HIGHER_ED_ENTITIES
+        done = load_progress(os.path.join(ROOT, progress_file(dataset)))
+        missing = sorted({e for e in entities for s in STATUSES if (e, s) not in done})
+        gaps += [f"{e} ({labels[dataset]})" for e in missing]
+    return gaps
+
+
 def to_ymd(mdy):
     """MM/DD/YYYY -> integer YYYYMMDD, or 0 if unparseable."""
     parts = mdy.split("/")
@@ -115,10 +143,16 @@ def main():
 
     vendors = {}       # name -> index
     vendor_tokens = {} # index -> V param
-    const_A = {}       # entity index -> A
-    const_D = {}       # entity index -> D
-    const_N = {}       # entity index -> N
     const_DT = {}      # type index -> DT
+
+    adn = []           # the (A, D, N) combinations that actually occur
+    adn_index = {}
+
+    def adn_idx(triple):
+        if triple not in adn_index:
+            adn_index[triple] = len(adn)
+            adn.append(list(triple))
+        return adn_index[triple]
 
     types = []         # discovered from the data, in first-seen order
     type_index = {}
@@ -149,13 +183,12 @@ def main():
                 vi = vendors[name]
 
                 dn = ""
+                ui = 0  # index into the (A, D, N) table; unused when no detail URL
                 detail = r["Detail URL"]
                 if detail:
                     q = parse_qs(urlparse(detail).query)
                     dn = q.get("DN", [""])[0]
-                    const_A.setdefault(ei, q.get("A", [""])[0])
-                    const_D.setdefault(ei, q.get("D", [""])[0])
-                    const_N.setdefault(ei, q.get("N", [""])[0])
+                    ui = adn_idx((q.get("A", [""])[0], q.get("D", [""])[0], q.get("N", [""])[0]))
                     const_DT.setdefault(ti, q.get("DT", [""])[0])
                     v = q.get("V", [""])[0]
                     if vi in vendor_tokens and vendor_tokens[vi] != v:
@@ -177,6 +210,7 @@ def main():
                     ti,
                     dn,
                     view[len(VIEW_BASE):] if view else "",
+                    ui,
                 ])
                 sources.append((detail, view))
 
@@ -184,10 +218,6 @@ def main():
     if not scraped:
         print(f"warning: no complete scrape times in {SCRAPE_META} — page will fall back to the build date")
 
-    # An entity with no rows (nothing scraped, or the state genuinely has no
-    # documents for it) contributes no token. Empty string keeps the arrays
-    # aligned with the entity indices rows refer to; nothing can dereference
-    # those slots, since no row points at them.
     payload = {
         "meta": {
             "entities": ENTITIES,
@@ -196,13 +226,15 @@ def main():
             "count": len(rows),
             "built": datetime.date.today().isoformat(),
             "scraped": scraped,
+            "incomplete": incomplete_coverage(),
         },
         "url": {
             "detailBase": DETAIL_BASE,
             "viewBase": VIEW_BASE,
-            "A": [const_A.get(i, "") for i in range(len(ENTITIES))],
-            "D": [const_D.get(i, "") for i in range(len(ENTITIES))],
-            "N": [const_N.get(i, "") for i in range(len(ENTITIES))],
+            # Each entry is one [A, D, N] combination; rows carry its index.
+            "adn": adn,
+            # A type with no detail URL anywhere contributes nothing; the empty
+            # string keeps this aligned with the type indices rows refer to.
             "DT": [const_DT.get(i, "") for i in range(len(types))],
         },
         "vendors": [n for n, _ in sorted(vendors.items(), key=lambda kv: kv[1])],
@@ -233,14 +265,15 @@ def verify(payload, sources):
     u = payload["url"]
     checked = 0
     for row, (detail, view) in zip(payload["rows"], sources):
-        _, vi, _, _, _, _, ei, ti, dn, vtok = row
+        _, vi, _, _, _, _, ei, ti, dn, vtok, ui = row
 
         if detail:
+            a, d, n = u["adn"][ui]
             rebuilt = (
-                f"{u['detailBase']}?A={quote(u['A'][ei], safe='')}"
-                f"&D={quote(u['D'][ei], safe='')}"
+                f"{u['detailBase']}?A={quote(a, safe='')}"
+                f"&D={quote(d, safe='')}"
                 f"&DN={quote(dn, safe='')}"
-                f"&N={quote(u['N'][ei], safe='')}"
+                f"&N={quote(n, safe='')}"
                 f"&DT={quote(u['DT'][ti], safe='')}"
                 f"&V={quote(payload['vtok'][vi], safe='')}"
             )

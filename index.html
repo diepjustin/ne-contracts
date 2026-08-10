@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>University of Nebraska Contracts &amp; Purchase Orders</title>
-<meta name="description" content="Searchable database of University of Nebraska contracts and purchase orders from the Nebraska State Contracts Database.">
+<title>Nebraska State Contracts &amp; Purchase Orders</title>
+<meta name="description" content="Searchable database of Nebraska state agency and university contracts and purchase orders from the Nebraska State Contracts Database.">
 <style>
   :root {
     --bg: #ffffff; --panel: #f6f7f9; --border: #d9dde3; --text: #14181d;
@@ -32,6 +32,12 @@
   }
   h1 { margin: 0 0 4px; font-size: 21px; letter-spacing: -.01em; }
   .sub { color: var(--muted); font-size: 13.5px; }
+  .gap-note {
+    margin-top: 12px; padding: 9px 12px; border-radius: 5px; font-size: 12.5px;
+    line-height: 1.5; color: var(--text);
+    background: var(--accent-soft); border: 1px solid var(--accent);
+  }
+  .gap-note b { font-weight: 600; }
   .sub a { color: inherit; }
   .updated {
     color: var(--muted); font-size: 11px; text-transform: uppercase;
@@ -111,14 +117,15 @@
 <header>
   <div class="head-row">
     <div>
-      <h1>University of Nebraska Contracts &amp; Purchase Orders</h1>
+      <h1>Nebraska State Contracts &amp; Purchase Orders</h1>
       <div class="sub">
         Scraped from the <a href="https://statecontracts.nebraska.gov/" target="_blank" rel="noopener">Nebraska State Contracts Database</a>.
-        Covers UNL and University of Nebraska Central Administration.
+        Covers all state agencies, boards and commissions, plus the University of Nebraska and Nebraska State College systems.
       </div>
     </div>
     <div class="updated" id="updated" hidden></div>
   </div>
+  <div class="gap-note" id="gaps" hidden></div>
 </header>
 
 <div class="controls">
@@ -135,7 +142,7 @@
     <select id="status"><option value="">All</option></select>
   </div>
   <div class="field">
-    <label for="entity">Campus</label>
+    <label for="entity">Agency</label>
     <select id="entity"><option value="">All</option></select>
   </div>
   <div class="field">
@@ -178,7 +185,7 @@
       <th data-k="3">Begins <span class="ind"></span></th>
       <th data-k="4" class="hide-sm">Ends <span class="ind"></span></th>
       <th data-k="5">Status <span class="ind"></span></th>
-      <th data-k="6" class="hide-sm">Campus <span class="ind"></span></th>
+      <th data-k="6" class="hide-sm">Agency <span class="ind"></span></th>
     </tr></thead>
     <tbody id="rows"></tbody>
   </table>
@@ -241,6 +248,22 @@
     el.hidden = false;
   }
 
+  // Says out loud which entities have not been fully collected yet. Without it,
+  // an entity mid-collection is indistinguishable from one the state holds no
+  // records for, and a reader would reasonably draw the wrong conclusion about
+  // what it spends. The list comes from the scrapers' checkpoints, so this note
+  // disappears on its own once collection finishes.
+  function showGaps() {
+    var gaps = D.meta.incomplete;
+    if (!gaps || !gaps.length) return;
+    var el = $("gaps");
+    el.innerHTML =
+      "<b>Still being collected.</b> These are not yet fully represented below, " +
+      "so a low or zero count for them reflects collection in progress rather than " +
+      "what the state holds: " + esc(gaps.join("; ")) + ".";
+    el.hidden = false;
+  }
+
   function esc(s) {
     return String(s).replace(/[&<>"]/g, function (c) {
       return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c];
@@ -254,10 +277,30 @@
     return esc(s.slice(0, i)) + "<mark>" + esc(s.slice(i, i + term.length)) + "</mark>" + esc(s.slice(i + term.length));
   }
 
+  // The state publishes a document-type code rather than a name. Two of them
+  // are unambiguous, because the site's own Higher Education filter produces
+  // exactly those: CN is what a Contract search returns, PO a Purchase Order
+  // search. The rest ("O4", "ZO", "OM", ...) come from State agency searches,
+  // which offer no such filter and no key -- so they render as-is rather than
+  // be given a label we would be guessing at.
+  var TYPE_LABELS = { CN: "Contract", PO: "Purchase Order" };
+
+  function typeLabel(t) {
+    return TYPE_LABELS[t] || t;
+  }
+
+  // Full labels are too wide for the table's Type column.
+  function shortType(t) {
+    return t === "PO" ? "PO" : typeLabel(t);
+  }
+
   function detailUrl(r) {
     var u = D.url, e = encodeURIComponent;
-    return u.detailBase + "?A=" + e(u.A) + "&D=" + e(u.D[r[6]]) + "&DN=" + e(r[8]) +
-           "&N=" + e(u.N[r[6]]) + "&DT=" + e(u.DT[r[7]]) + "&V=" + e(D.vtok[r[1]]);
+    // A, D and N vary together in ways no entity-level rule captures, so each
+    // row carries an index into the table of combinations that actually occur.
+    var adn = u.adn[r[10]];
+    return u.detailBase + "?A=" + e(adn[0]) + "&D=" + e(adn[1]) + "&DN=" + e(r[8]) +
+           "&N=" + e(adn[2]) + "&DT=" + e(u.DT[r[7]]) + "&V=" + e(D.vtok[r[1]]);
   }
 
   function fill(sel, list) {
@@ -335,13 +378,13 @@
       var link = r[9] ? D.url.viewBase + r[9] : detailUrl(r);
       html += "<tr>" +
         '<td class="doc"><a href="' + esc(link) + '" target="_blank" rel="noopener">' + highlight(r[0]) + "</a></td>" +
-        '<td class="hide-sm">' + esc(D.meta.types[r[7]] === "Contract" ? "Contract" : "PO") + "</td>" +
+        '<td class="hide-sm">' + esc(shortType(D.meta.types[r[7]])) + "</td>" +
         '<td class="vendor">' + highlight(D.vendors[r[1]]) + "</td>" +
         '<td class="amt">' + fmtMoney.format(r[2]) + "</td>" +
         '<td class="dt">' + fmtDate(r[3]) + "</td>" +
         '<td class="dt hide-sm">' + fmtDate(r[4]) + "</td>" +
         '<td><span class="pill ' + (r[5] === 0 ? "active" : "expired") + '">' + D.meta.statuses[r[5]] + "</span></td>" +
-        '<td class="hide-sm">' + (r[6] === 0 ? "UNL" : "Central Admin") + "</td>" +
+        '<td class="hide-sm">' + esc(D.meta.entities[r[6]]) + "</td>" +
         "</tr>";
     }
 
@@ -356,7 +399,7 @@
       var r = view[i];
       var link = r[9] ? D.url.viewBase + r[9] : detailUrl(r);
       lines.push([
-        r[0], D.meta.types[r[7]], D.vendors[r[1]], r[2],
+        r[0], typeLabel(D.meta.types[r[7]]), D.vendors[r[1]], r[2],
         fmtDate(r[3]), fmtDate(r[4]), D.meta.statuses[r[5]], D.meta.entities[r[6]], link
       ].map(function (c) {
         c = String(c);
@@ -381,13 +424,14 @@
     D = json;
     vlow = D.vendors.map(function (v) { return v.toLowerCase(); });
 
-    fill($("type"), D.meta.types);
+    fill($("type"), D.meta.types.map(typeLabel));
     fill($("status"), D.meta.statuses);
-    fill($("entity"), ["UNL", "Central Administration"]);
+    fill($("entity"), D.meta.entities);
 
     $("load").hidden = true;
     scroller.hidden = false;
     showUpdated();
+    showGaps();
     var th = document.querySelector('thead th[data-k="2"]');
     if (th) th.querySelector(".ind").textContent = "↓";
 

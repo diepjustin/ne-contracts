@@ -56,17 +56,10 @@ DATASETS = {
 # accumulates a stamp per dataset rather than being overwritten wholesale.
 SCRAPE_META = "data/scrape_meta.json"
 
-# Which (entity, status) combos a state run has finished. State covers 83
-# agencies over many hours, so a run that stops partway needs to know where to
-# pick up. Higher Education runs are short enough not to bother.
-STATE_PROGRESS = "data/state_scrape_progress.json"
-
-# Set to True to append to an existing CSV instead of overwriting
-APPEND_MODE = False
-
-# Skip specific (entity_name, status) combos — useful when resuming
-SKIP_COMBOS = set()
-# e.g. SKIP_COMBOS = {("University of Nebraska Lincoln", "Active")}
+# Which (entity, status) combos each dataset has finished, so a run that stops
+# partway knows where to pick up. Every dataset gets this: a Higher Education
+# purchase-order run was lost an hour in to a single connection timeout, which
+# is exactly the failure a checkpoint exists to absorb.
 
 # Pacing, set from measurement rather than guesswork. A page of 25 records
 # costs one results request plus 25 detail requests, so detail fetches are
@@ -86,6 +79,9 @@ SKIP_COMBOS = set()
 MAX_WORKERS = 15
 DETAIL_DELAY = 0.15
 PAGE_DELAY = 0.3
+
+# Generous, because a few searches genuinely are this slow (see scrape_entity).
+SEARCH_TIMEOUT = 300
 
 # Detail-fetch latency is the early warning that we are asking too much: if the
 # site starts straining, responses slow down before they start failing. Each
@@ -253,7 +249,11 @@ def scrape_entity(session, entity_name, entity_val, status, entity_type, doc_typ
         data["DocType"] = doc_type
 
     time.sleep(PAGE_DELAY)
-    resp = session.post(RESULTS_URL, data=data, timeout=60)
+    # The initial search is by far the slowest request: the site computes the
+    # whole result set before returning page 1, and the largest combos measured
+    # 108-144s. A 60s limit killed those runs outright, and the retries just
+    # re-ran the same slow query. Paging through the computed set is fast.
+    resp = session.post(RESULTS_URL, data=data, timeout=SEARCH_TIMEOUT)
     resp.raise_for_status()
 
     page = 1
@@ -304,7 +304,7 @@ def scrape_entity(session, entity_name, entity_val, status, entity_type, doc_typ
 
         page += 1
         time.sleep(PAGE_DELAY)
-        resp = session.get(f"{RESULTS_URL}?page={page}", timeout=60)
+        resp = session.get(f"{RESULTS_URL}?page={page}", timeout=SEARCH_TIMEOUT)
         resp.raise_for_status()
 
     median = drain_latency()
@@ -337,19 +337,23 @@ def record_scrape_time(dataset):
     return stamps[dataset]
 
 
-def load_progress():
-    """(entity, status) combos a previous state run finished, as a set of tuples."""
-    if not os.path.exists(STATE_PROGRESS):
+def progress_file(dataset):
+    return f"data/{dataset}_scrape_progress.json"
+
+
+def load_progress(path):
+    """(entity, status) combos a previous run of this dataset finished."""
+    if not os.path.exists(path):
         return set()
     try:
-        with open(STATE_PROGRESS, encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             return {tuple(pair) for pair in json.load(f)}
     except (OSError, ValueError):
         return set()  # unreadable or corrupt: treat as a fresh start
 
 
-def save_progress(done):
-    with open(STATE_PROGRESS, "w", encoding="utf-8") as f:
+def save_progress(path, done):
+    with open(path, "w", encoding="utf-8") as f:
         json.dump(sorted(list(pair) for pair in done), f, indent=2)
 
 
@@ -397,8 +401,12 @@ STATE_PRIORITY = [
 ]
 
 
-def state_combos(entities):
-    """(entity_name, entity_val, status) for a state run, biggest agencies first."""
+def combos(entities):
+    """(entity_name, entity_val, status) to scrape, biggest known agencies first.
+
+    Ordering only decides what has landed if a run stops early -- the checkpoint
+    makes the end result identical either way.
+    """
     ordered = sorted(entities, key=lambda n: (STATE_PRIORITY.index(n) if n in STATE_PRIORITY else len(STATE_PRIORITY), n))
     return [(name, entities[name], status) for name in ordered for status in STATUSES]
 
@@ -410,19 +418,15 @@ def main():
     parser.add_argument("--entity", action="append", default=None,
                         help="Only scrape these entities, by display name (repeatable).")
     parser.add_argument("--hours", type=float, default=None,
-                        help="Stop cleanly after this many hours, checkpointing as normal. State runs only.")
+                        help="Stop cleanly after this many hours, checkpointing as normal.")
     parser.add_argument("--status", action="store_true",
-                        help="Print progress counts and exit -- no network calls. State runs only.")
+                        help="Print progress counts and exit -- no network calls.")
+    parser.add_argument("--fresh", action="store_true",
+                        help="Discard any saved progress and re-scrape this dataset from scratch.")
     args = parser.parse_args()
 
     entity_type, doc_type, output_csv = DATASETS[args.dataset]
     is_state = args.dataset == "state"
-
-    # Resume machinery only exists for the state run -- Higher Education is a
-    # handful of entities that finish in one sitting.
-    for flag, name in ((args.hours, "--hours"), (args.status, "--status")):
-        if flag and not is_state:
-            parser.error(f"{name} only applies to the 'state' dataset")
 
     entities = STATE_ENTITIES if is_state else HIGHER_ED_ENTITIES
 
@@ -434,22 +438,25 @@ def main():
         entities = {name: entities[name] for name in args.entity}
 
     os.makedirs("data", exist_ok=True)
+    progress_path = progress_file(args.dataset)
 
-    if not is_state:
-        run_higher_ed(entities, entity_type, doc_type, output_csv, args.dataset)
-        return
+    if args.fresh:
+        for p in (progress_path, output_csv):
+            if os.path.exists(p):
+                os.remove(p)
+        print(f"--fresh: cleared {progress_path} and {output_csv}")
 
-    done = load_progress()
-    todo = [c for c in state_combos(entities) if (c[0], c[2]) not in done]
+    done = load_progress(progress_path)
+    all_combos = combos(entities)
+    todo = [c for c in all_combos if (c[0], c[2]) not in done]
 
     if args.status:
-        total = len(state_combos(entities))
-        print(f"TOTAL={total}")
-        print(f"DONE={total - len(todo)}")
+        print(f"TOTAL={len(all_combos)}")
+        print(f"DONE={len(all_combos) - len(todo)}")
         print(f"REMAINING={len(todo)}")
         return
 
-    print(f"{len(todo):,} (entity, status) combos remaining of {len(state_combos(entities)):,}")
+    print(f"{len(todo):,} (entity, status) combos remaining of {len(all_combos):,}")
 
     dropped = drop_unfinished_rows(output_csv, done)
     if dropped:
@@ -479,9 +486,9 @@ def main():
             # Only marked done once the combo's rows are all on disk, so an
             # interrupted combo is re-scraped rather than half-recorded.
             done.add((entity_name, status))
-            save_progress(done)
+            save_progress(progress_path, done)
 
-    remaining = len([c for c in state_combos(entities) if (c[0], c[2]) not in done])
+    remaining = len([c for c in all_combos if (c[0], c[2]) not in done])
     if remaining:
         print(f"\nStopped with {remaining:,} combos remaining. Re-run to resume.")
     else:
@@ -490,37 +497,6 @@ def main():
 
     print(f"Records this run: {grand_total:,}")
     print(f"Saved to: {output_csv}")
-
-
-def run_higher_ed(entities, entity_type, doc_type, output_csv, dataset):
-    """The original per-doc-type scrape, unchanged in behavior."""
-    file_mode = "a" if APPEND_MODE else "w"
-    write_header = not APPEND_MODE or not os.path.exists(output_csv)
-
-    with open(output_csv, file_mode, newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        if write_header:
-            writer.writerow(CSV_HEADER)
-
-        session = build_session()
-
-        grand_total = 0
-        for entity_name, entity_val in entities.items():
-            for status in STATUSES:
-                if (entity_name, status) in SKIP_COMBOS:
-                    print(f"\nSkipping: {entity_name} | {status}")
-                    continue
-                count = scrape_entity(
-                    session, entity_name, entity_val, status, entity_type, doc_type, writer
-                )
-                grand_total += count
-                f.flush()
-
-    stamp = record_scrape_time(dataset)
-
-    print(f"\nDone. Total records: {grand_total}")
-    print(f"Saved to: {output_csv}")
-    print(f"Scrape time recorded: {stamp}")
 
 
 if __name__ == "__main__":

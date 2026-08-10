@@ -7,9 +7,10 @@ data/scrape_state.txt
 # data/scrape_meta.json is deliberately NOT ignored — it is two lines of
 # provenance behind the "Last updated" line on the page.
 
-# Resume state for the multi-hour state-agency scrape — meaningful only
-# alongside the (ignored) CSV it tracks.
-data/state_scrape_progress.json
+# Resume state for the long scrapes — meaningful only alongside the (ignored)
+# CSVs they track. What they imply about coverage is baked into data.json's
+# meta.incomplete at build time, so the published page carries it regardless.
+data/*_scrape_progress.json*
 
 # Working output of scripts/extract_text.py — an append-only checkpoint log
 # that grows as documents are processed, not something to commit while

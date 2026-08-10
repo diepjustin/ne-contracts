@@ -68,6 +68,23 @@ ENTITIES = load_entities()
 STATUSES = ["Active", "Expired"]
 
 
+def type_groups(codes):
+    """Each code's category ("Contract" / "Purchase Order"), parallel to `codes`.
+
+    The raw code stays the canonical value -- it keys the DT lookup and shows in
+    the table -- but nobody can filter on "Z8", so the page offers these instead.
+    A code missing from the map groups as itself rather than being guessed at.
+    """
+    with open(os.path.join(ROOT, "scripts", "type_groups.json"), encoding="utf-8") as f:
+        mapping = {k: v for k, v in json.load(f).items() if not k.startswith("_")}
+
+    unknown = [c for c in codes if c not in mapping]
+    if unknown:
+        print(f"warning: no group for document type(s) {unknown} — "
+              f"add them to scripts/type_groups.json; they will filter under their raw code")
+    return [mapping.get(c, c) for c in codes]
+
+
 def incomplete_coverage():
     """Datasets still missing entities, as ["<entity> (<label>)", ...].
 
@@ -223,6 +240,7 @@ def main():
             "entities": ENTITIES,
             "statuses": STATUSES,
             "types": types,
+            "typeGroups": type_groups(types),
             "count": len(rows),
             "built": datetime.date.today().isoformat(),
             "scraped": scraped,

@@ -277,21 +277,13 @@
     return esc(s.slice(0, i)) + "<mark>" + esc(s.slice(i, i + term.length)) + "</mark>" + esc(s.slice(i + term.length));
   }
 
-  // The state publishes a document-type code rather than a name. Two of them
-  // are unambiguous, because the site's own Higher Education filter produces
-  // exactly those: CN is what a Contract search returns, PO a Purchase Order
-  // search. The rest ("O4", "ZO", "OM", ...) come from State agency searches,
-  // which offer no such filter and no key -- so they render as-is rather than
-  // be given a label we would be guessing at.
-  var TYPE_LABELS = { CN: "Contract", PO: "Purchase Order" };
-
-  function typeLabel(t) {
-    return TYPE_LABELS[t] || t;
-  }
-
-  // Full labels are too wide for the table's Type column.
-  function shortType(t) {
-    return t === "PO" ? "PO" : typeLabel(t);
+  // Records carry a document-type code ("O4", "ZP", "CN", ...) rather than a
+  // name, and the state publishes no key for them. meta.typeGroups resolves
+  // each to the category the state files it under, so the page can say
+  // "Purchase Order" where the record only says "ZP" -- the code itself stays
+  // one hover away. See scripts/type_groups.json for where the mapping is from.
+  function shortType(g) {
+    return g === "Purchase Order" ? "PO" : g;  // full label is too wide for the column
   }
 
   function detailUrl(r) {
@@ -307,6 +299,17 @@
     list.forEach(function (name, i) {
       var o = document.createElement("option");
       o.value = i; o.textContent = name;
+      sel.appendChild(o);
+    });
+  }
+
+  // The entity and status filters select one item, so their option values are
+  // indices. Type is different: many codes share a category, so its options
+  // carry the category name and match on that.
+  function fillNames(sel, names) {
+    names.forEach(function (name) {
+      var o = document.createElement("option");
+      o.value = name; o.textContent = name;
       sel.appendChild(o);
     });
   }
@@ -332,7 +335,7 @@
     var out = [], rows = D.rows;
     for (var j = 0; j < rows.length; j++) {
       var r = rows[j];
-      if (ti !== "" && r[7] !== +ti) continue;
+      if (ti !== "" && D.meta.typeGroups[r[7]] !== ti) continue;
       if (si !== "" && r[5] !== +si) continue;
       if (ei !== "" && r[6] !== +ei) continue;
       if (d0 && r[3] && r[3] < d0) continue;
@@ -378,7 +381,8 @@
       var link = r[9] ? D.url.viewBase + r[9] : detailUrl(r);
       html += "<tr>" +
         '<td class="doc"><a href="' + esc(link) + '" target="_blank" rel="noopener">' + highlight(r[0]) + "</a></td>" +
-        '<td class="hide-sm">' + esc(shortType(D.meta.types[r[7]])) + "</td>" +
+        '<td class="hide-sm" title="' + esc(D.meta.types[r[7]]) + '">' +
+          esc(shortType(D.meta.typeGroups[r[7]])) + "</td>" +
         '<td class="vendor">' + highlight(D.vendors[r[1]]) + "</td>" +
         '<td class="amt">' + fmtMoney.format(r[2]) + "</td>" +
         '<td class="dt">' + fmtDate(r[3]) + "</td>" +
@@ -393,13 +397,15 @@
   }
 
   function exportCsv() {
-    var head = ["Document Number", "Type", "Vendor", "Amount", "Begin Date", "End Date", "Status", "Campus", "URL"];
+    // Type Code is the state's own value; Type is the category it files it under.
+    var head = ["Document Number", "Type", "Type Code", "Vendor", "Amount",
+                "Begin Date", "End Date", "Status", "Agency", "URL"];
     var lines = [head.join(",")];
     for (var i = 0; i < view.length; i++) {
       var r = view[i];
       var link = r[9] ? D.url.viewBase + r[9] : detailUrl(r);
       lines.push([
-        r[0], typeLabel(D.meta.types[r[7]]), D.vendors[r[1]], r[2],
+        r[0], D.meta.typeGroups[r[7]], D.meta.types[r[7]], D.vendors[r[1]], r[2],
         fmtDate(r[3]), fmtDate(r[4]), D.meta.statuses[r[5]], D.meta.entities[r[6]], link
       ].map(function (c) {
         c = String(c);
@@ -424,7 +430,9 @@
     D = json;
     vlow = D.vendors.map(function (v) { return v.toLowerCase(); });
 
-    fill($("type"), D.meta.types.map(typeLabel));
+    fillNames($("type"), D.meta.typeGroups.filter(function (g, i, all) {
+      return all.indexOf(g) === i;
+    }).sort());
     fill($("status"), D.meta.statuses);
     fill($("entity"), D.meta.entities);
 

@@ -169,11 +169,20 @@ The scraper reproduces the state's records faithfully, including their errors.
   aid, assistance, or services to a specific individual." Those are among the largest
   agencies here, so their totals understate what they actually spend. Do not read an
   agency's total as its budget.
+- **Purchase orders are not a Higher Education thing, even though the site makes them
+  look like one.** The search form only offers a Contract/Purchase Order filter for
+  Higher Education, so on the agency side the distinction is invisible — but it is in the
+  records. Ten of the 32 agency document-type codes (`O9`, `OM`, `OP`, `X7`, `Y6`, `Y7`,
+  `Z8`, `Z9`, `ZO`, `ZP`) are filed under "Purchase Orders", covering 152,210 records, or
+  about 65% of all agency data. Overall the dataset is 177,301 purchase orders to 118,594
+  contracts.
 - **Document types are the source system's internal codes**, not labels — `OP`, `O4`,
-  `Z4`, `ZP` and 28 others across state agencies. The state publishes no key for them, so
-  they are shown as-is rather than given meanings this project would be guessing at. Two
-  are unambiguous because the site's own Higher Education filter produces exactly them:
-  `CN` is what a Contract search returns, `PO` a Purchase Order search.
+  `Z4`, `ZP` and 30 others. The state publishes no key. `scripts/type_groups.json` maps
+  each to the category its detail page files it under, which is what the page filters on;
+  the raw code stays in the table (hover the Type cell) and in the CSV export. That
+  mapping is a sampled observation, not a published key — and one code contradicts it:
+  `PO`, which the site's own Purchase Order search returns, has a detail page headed
+  "Contracts". The map overrides it, since the search filter is the better authority.
 - **Only documents active on or after January 1, 2014 are in the database at all.**
   Anything that expired before then was never loaded, so early years are sparse in a way
   that reflects the database's construction rather than state spending.

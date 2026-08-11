@@ -27,13 +27,15 @@ live data that a given code maps to the same DT in every agency.
 
 import argparse
 import array
+import base64
 import csv
 import datetime
 import json
 import gzip
 import os
 import sys
-from urllib.parse import urlparse, parse_qs
+import zlib
+from urllib.parse import urlparse, parse_qs, quote, unquote
 
 import ne_format
 
@@ -331,54 +333,188 @@ def main():
         "rows": build_rows(columns, docs, dn_tokens, view_tokens),
     }
 
-    verify(payload, sources)
-
-    out_json = args.emit_json or OUT_JSON
-    os.makedirs(os.path.dirname(out_json) or ".", exist_ok=True)
-    blob = json.dumps(payload, separators=(",", ":")).encode()
-    with open(out_json, "wb") as f:
-        f.write(blob)
-
     orig = sum(os.path.getsize(p) for p in DATA.values())
-    gz = len(gzip.compress(blob, 9))
     if duplicates:
         print(f"duplicate rows: {duplicates:,} dropped (a resumed scrape redid a page)")
+
+    if args.emit_json:
+        verify_urls(payload["url"], payload["vtok"], payload["rows"], sources)
+        blob = json.dumps(payload, separators=(",", ":")).encode()
+        os.makedirs(os.path.dirname(args.emit_json) or ".", exist_ok=True)
+        with open(args.emit_json, "wb") as f:
+            f.write(blob)
+        gz = len(gzip.compress(blob, 9))
+        print(f"rows          : {n:,}")
+        print(f"vendors       : {len(vendors):,}")
+        print(f"{args.emit_json:<14}: {len(blob) / 1e6:6.2f} MB")
+        print(f"gzipped       : {gz / 1e6:6.2f} MB")
+        return
+
+    # --- binary payload ---
+    build_id = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    outdir = os.path.join(OUT_DIR, "d", build_id)
+
+    dn_bytes = [base64.b64decode(t) if t else b"" for t in dn_tokens]
+    view_bytes = [base64.b64decode(unquote(t)) if t else b"" for t in view_tokens]
+    vtok_bytes = [base64.b64decode(vendor_tokens.get(i, "")) for i in range(len(vendors))]
+
+    # All but a handful of DN tokens decode to exactly TOKEN_BYTES. The rest
+    # would otherwise force every record wider, so they travel in meta instead.
+    dn_exceptions = {str(i): dn_tokens[i] for i, b in enumerate(dn_bytes)
+                     if len(b) != ne_format.TOKEN_BYTES}
+    if len(dn_exceptions) > n * 0.001:
+        sys.exit(f"{len(dn_exceptions):,} DN tokens are not {ne_format.TOKEN_BYTES} bytes — "
+                 "too many for meta.dnExceptions; the block format needs a length array")
+    for b in view_bytes:
+        if b and len(b) != ne_format.TOKEN_BYTES:
+            sys.exit(f"a view token decodes to {len(b)} bytes, expected {ne_format.TOKEN_BYTES}")
+
+    meta = dict(payload["meta"])
+    meta.update({
+        "formatVersion": ne_format.FORMAT_VERSION,
+        "buildId": build_id,
+        "endian": "little",
+        "vendorCount": len(vendors),
+        "blockSize": ne_format.BLOCK_ROWS,
+        "blockCount": ne_format.block_count(n),
+        "tokenBytes": ne_format.TOKEN_BYTES,
+        "docAlphabet": "".join(sorted({c for d in docs for c in d.decode()})),
+        "dnExceptions": dn_exceptions,
+        "detailBase": DETAIL_BASE,
+        "viewBase": VIEW_BASE,
+        "adn": adn,
+        "DT": payload["url"]["DT"],
+        "digests": {name: zlib.crc32(col.tobytes()) for name, col in columns.items()},
+    })
+
+    vendor_names = [v.encode("utf-8") for v in payload["vendors"]]
+    for v in vendor_names:
+        if len(v) > 255:
+            sys.exit(f"vendor name exceeds 255 bytes — the length column is a u8; widen it")
+
+    ne_format.write_payload(outdir, columns, docs, vendor_names, vtok_bytes, meta)
+    ne_format.write_token_blocks(outdir, dn_bytes, view_bytes, n)
+    with open(os.path.join(OUT_DIR, "manifest.json"), "w", encoding="utf-8") as f:
+        json.dump({"buildId": build_id, "dir": f"d/{build_id}"}, f)
+
+    verify_payload(outdir, columns, docs, vendor_names, vtok_bytes,
+                   dn_tokens, view_tokens, sources)
+
+    resident = sum(os.path.getsize(os.path.join(outdir, p)) for p in
+                   (ne_format.META, ne_format.COLS_I32, ne_format.COLS_F64,
+                    ne_format.COLS_U8, ne_format.DOCS, ne_format.VENDORS))
+    tok = sum(os.path.getsize(ne_format.block_path(outdir, b))
+              for b in range(ne_format.block_count(n))) + os.path.getsize(
+                  os.path.join(outdir, ne_format.VTOK))
     print(f"rows          : {n:,}")
     print(f"vendors       : {len(vendors):,}")
     print(f"source CSVs   : {orig / 1e6:6.2f} MB")
-    print(f"{OUT_JSON:<14}: {len(blob) / 1e6:6.2f} MB")
-    print(f"gzipped       : {gz / 1e6:6.2f} MB  ({gz / orig * 100:.0f}% of source)")
+    print(f"resident      : {resident / 1e6:6.2f} MB raw  (loaded up front)")
+    print(f"deferred      : {tok / 1e6:6.2f} MB raw in {ne_format.block_count(n):,} blocks "
+          f"(fetched on click)")
+    print(f"written to    : {outdir}")
 
 
-def verify(payload, sources):
-    """Rebuild every URL from the payload and assert it matches the original exactly."""
-    from urllib.parse import quote
+def verify_urls(url, vtok, rows, sources, sample_out=None):
+    """Rebuild every URL from the payload and assert it matches the original exactly.
 
-    u = payload["url"]
+    The check that earns its keep: it caught A, D and N being assumed
+    entity-determined, which held at two entities and again across five but is
+    wrong at 92. It compares against the URLs as scraped, never against
+    anything derived from the payload.
+    """
     checked = 0
-    for row, (detail, view) in zip(payload["rows"], sources):
-        _, vi, _, _, _, _, ei, ti, dn, vtok, ui = row
+    for row, (detail, view) in zip(rows, sources):
+        _, vi, _, _, _, _, _, ti, dn, view_suffix, ui = row
 
         if detail:
-            a, d, n = u["adn"][ui]
+            a, d, nn = url["adn"][ui]
             rebuilt = (
-                f"{u['detailBase']}?A={quote(a, safe='')}"
+                f"{url['detailBase']}?A={quote(a, safe='')}"
                 f"&D={quote(d, safe='')}"
                 f"&DN={quote(dn, safe='')}"
-                f"&N={quote(n, safe='')}"
-                f"&DT={quote(u['DT'][ti], safe='')}"
-                f"&V={quote(payload['vtok'][vi], safe='')}"
+                f"&N={quote(nn, safe='')}"
+                f"&DT={quote(url['DT'][ti], safe='')}"
+                f"&V={quote(vtok[vi], safe='')}"
             )
             if rebuilt != detail:
                 sys.exit(f"URL round-trip FAILED\n  original: {detail}\n  rebuilt : {rebuilt}")
             checked += 1
+            if sample_out is not None and len(sample_out) < 5:
+                sample_out.append(rebuilt)
 
         if view:
-            if u["viewBase"] + vtok != view:
+            if url["viewBase"] + view_suffix != view:
                 sys.exit(f"view URL round-trip FAILED\n  original: {view}")
             checked += 1
 
-    print(f"round-trip verified: {checked:,} URLs reconstruct exactly\n")
+    print(f"round-trip verified: {checked:,} URLs reconstruct exactly")
+    return checked
+
+
+def verify_payload(outdir, columns, docs, vendor_names, vtok_bytes,
+                   dn_tokens, view_tokens, sources):
+    """Decode the written files and prove they carry exactly the same data.
+
+    Reads from disk rather than from the objects just built, so an encoder bug
+    -- wrong section order, wrong stride, an off-by-one, the wrong endianness
+    -- fails here instead of shipping.
+    """
+    dec_cols, dec_docs, dec_vendors, dec_vtok, dec_meta = ne_format.read_payload(outdir)
+    n = dec_meta["count"]
+
+    for name, col in columns.items():
+        if name not in dec_cols:
+            sys.exit(f"column {name!r} missing after decode")
+        # Bytes, not values: float equality would quietly accept a changed
+        # amount that happens to compare equal.
+        if dec_cols[name].tobytes() != col.tobytes():
+            sys.exit(f"column {name!r} does not survive the round trip")
+    if dec_docs != docs:
+        sys.exit("document numbers do not survive the round trip")
+    if dec_vendors != vendor_names:
+        sys.exit("vendor names do not survive the round trip")
+    if dec_vtok != vtok_bytes:
+        sys.exit("vendor tokens do not survive the round trip")
+
+    dec_dn, dec_view = ne_format.read_token_blocks(outdir, n)
+    exceptions = dec_meta["dnExceptions"]
+    for i in range(n):
+        want_dn = dn_tokens[i]
+        got_dn = exceptions.get(str(i)) or base64.b64encode(dec_dn[i]).decode()
+        if got_dn != want_dn:
+            sys.exit(f"row {i}: DN token round trip failed ({got_dn!r} != {want_dn!r})")
+        want_view = view_tokens[i]
+        got_view = quote(base64.b64encode(dec_view[i]).decode(), safe="") if want_view else ""
+        if got_view != want_view:
+            sys.exit(f"row {i}: view token round trip failed ({got_view!r} != {want_view!r})")
+
+    # The strongest single statement: the decoded files rebuild the same rows
+    # the JSON path produced. Chunked so peak memory stays bounded.
+    url = {"detailBase": dec_meta["detailBase"], "viewBase": dec_meta["viewBase"],
+           "adn": [list(x) for x in dec_meta["adn"]], "DT": dec_meta["DT"]}
+    vtok_text = [base64.b64encode(v).decode() for v in dec_vtok]
+    samples = []
+    total = 0
+    for lo in range(0, n, 100_000):
+        hi = min(lo + 100_000, n)
+        sl = {k: v[lo:hi] for k, v in dec_cols.items()}
+        rebuilt = build_rows(sl, dec_docs[lo:hi],
+                             [exceptions.get(str(i)) or base64.b64encode(dec_dn[i]).decode()
+                              for i in range(lo, hi)],
+                             view_tokens[lo:hi])
+        reference = build_rows({k: v[lo:hi] for k, v in columns.items()}, docs[lo:hi],
+                               dn_tokens[lo:hi], view_tokens[lo:hi])
+        if rebuilt != reference:
+            sys.exit(f"rows {lo}..{hi} differ after decoding the binary payload")
+        total += verify_urls(url, vtok_text, rebuilt, sources[lo:hi], samples)
+    print(f"decoded payload matches the source for all {n:,} rows "
+          f"({total:,} URLs re-verified from disk)")
+
+    print("\nspot-check these by hand — a payload that round-trips against dead links is still broken:")
+    for s in samples:
+        print(f"  {s}")
+    print()
 
 
 if __name__ == "__main__":

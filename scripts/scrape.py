@@ -171,6 +171,16 @@ def drain_latency():
 
 _detail_pool = ThreadPoolExecutor(max_workers=MAX_WORKERS)
 
+# One worker, so at most a single results page is ever in flight. The point is
+# to overlap that fetch with the detail fetches, not to add search load.
+_page_pool = ThreadPoolExecutor(max_workers=1)
+
+
+def _fetch_page(session, page):
+    """Fetch one results page on the searching session, honouring the pacing delay."""
+    time.sleep(PAGE_DELAY)
+    return session.get(f"{RESULTS_URL}?page={page}", timeout=SEARCH_TIMEOUT)
+
 
 def fetch_view_urls_parallel(records):
     """Fetch view URLs for a page of records in parallel, on search-free sessions."""
@@ -229,9 +239,18 @@ def parse_results_page(soup):
     return records, last_page
 
 
-def scrape_entity(session, entity_name, entity_val, status, entity_type, doc_type, writer):
+def scrape_entity(session, entity_name, entity_val, status, entity_type, doc_type, writer,
+                  start_page=1, on_page=None, deadline=None):
+    """Scrape one (entity, status) combo. Returns (rows_written, finished).
+
+    `finished` is False when a deadline cut the combo short; the caller records
+    how far it got so a later run resumes there. Resuming costs one search --
+    the site holds results in session state, so page N is only reachable by
+    re-running the query -- but that is a couple of minutes against combos that
+    otherwise take hours to redo.
+    """
     label = f"{entity_name} | {status}" + (f" | {doc_type}" if doc_type else "")
-    print(f"\nScraping: {label}")
+    print(f"\nScraping: {label}" + (f"  (resuming at page {start_page:,})" if start_page > 1 else ""))
 
     token = get_token(session)
     data = {
@@ -257,22 +276,68 @@ def scrape_entity(session, entity_name, entity_val, status, entity_type, doc_typ
     resp.raise_for_status()
 
     page = 1
+    if start_page > 1:
+        time.sleep(PAGE_DELAY)
+        resp = session.get(f"{RESULTS_URL}?page={start_page}", timeout=SEARCH_TIMEOUT)
+        resp.raise_for_status()
+        page = start_page
+
     total = 0
+    prefetch = None   # next page's response, fetched while this page's details are in flight
+    recovered = False
+
+    def run_search():
+        """Re-run the query. Results live in server-side session state, so this
+        is the only way back to a given page after that state goes away."""
+        time.sleep(PAGE_DELAY)
+        r = session.post(RESULTS_URL, data={**data, "__RequestVerificationToken": get_token(session)},
+                         timeout=SEARCH_TIMEOUT)
+        r.raise_for_status()
+        return r
 
     while True:
         soup = BeautifulSoup(resp.text, "html.parser")
+        records, last_page = parse_results_page(soup)
+        empty = ("No results found" in resp.text) or not records
 
-        if "No results found" in resp.text:
+        # An empty page partway through does not mean the results ran out --
+        # the site holds them in session state that expires, and once it does
+        # every further page comes back blank. Treating that as the end is how
+        # a 7,139-page combo quietly finished at 5,777 and marked itself
+        # complete. Re-run the search and return to where we were; only call it
+        # the end if the page is still empty afterwards.
+        if empty and page > start_page and not recovered:
+            print(f"  Page {page:,} came back empty -- search state likely expired, re-running query.")
+            resp = run_search()
+            if page > 1:
+                time.sleep(PAGE_DELAY)
+                resp = session.get(f"{RESULTS_URL}?page={page}", timeout=SEARCH_TIMEOUT)
+                resp.raise_for_status()
+            recovered = True
+            continue
+
+        if empty:
+            if page > start_page:
+                # Still empty after a fresh search: stop, but do not claim the
+                # combo is finished -- a later run resumes here and re-checks.
+                print(f"  Page {page:,} still empty after re-running the search -- stopping, not marking complete.")
+                return total, False
             print("  No results found.")
             break
 
-        records, last_page = parse_results_page(soup)
+        recovered = False
 
-        if not records:
-            print(f"  Page {page}: no rows found, stopping.")
-            break
+        # Start the next results page before spending ~2.5s on this page's
+        # detail fetches. The two use different connections -- details run on
+        # search-free sessions precisely so they don't queue behind search
+        # state -- so the ~1.4s results fetch costs nothing once hidden behind
+        # them. This is one extra in-flight request, not more detail workers:
+        # the detail endpoint is already saturated at 15, where 20 measured the
+        # same throughput with worse latency.
+        more_pages = last_page is not None and page < last_page
+        if more_pages:
+            prefetch = _page_pool.submit(_fetch_page, session, page + 1)
 
-        # Fetch all view URLs for this page in parallel
         view_urls = fetch_view_urls_parallel(records)
 
         for record, view_url in zip(records, view_urls):
@@ -297,14 +362,29 @@ def scrape_entity(session, entity_name, entity_val, status, entity_type, doc_typ
             ])
 
         total += len(records)
-        print(f"  Page {page}: {len(records)} records (running total: {total})")
+        if page % 20 == 0 or page == last_page or page == start_page:
+            of = f"/{last_page:,}" if last_page else ""
+            print(f"  Page {page:,}{of}: {total:,} records this run")
 
-        if last_page is None or page >= last_page:
+        # Only after the rows are on disk, so a resume never skips a page whose
+        # rows were lost. The reverse -- redoing a page whose rows did land --
+        # costs 25 duplicate rows, which build_site.py drops.
+        if on_page:
+            on_page(page)
+
+        if not more_pages:
             break
 
+        if deadline and time.time() >= deadline:
+            print(f"  Time limit reached at page {page:,} of {last_page:,} -- stopping here.")
+            if prefetch:
+                prefetch.cancel()
+            return total, False
+
         page += 1
-        time.sleep(PAGE_DELAY)
-        resp = session.get(f"{RESULTS_URL}?page={page}", timeout=SEARCH_TIMEOUT)
+        # Usually already done, since it ran alongside the detail fetches.
+        resp = prefetch.result()
+        prefetch = None
         resp.raise_for_status()
 
     median = drain_latency()
@@ -315,7 +395,25 @@ def scrape_entity(session, entity_name, entity_val, status, entity_type, doc_typ
         flag = "  <-- server slowing, consider easing pacing" if median > 2.0 else ""
         print(f"  Median detail fetch: {median:.2f}s{flag}")
 
-    return total
+    # Did we actually reach the last page? This is checked on the page counter
+    # rather than the row count so it holds for a resumed combo too -- the
+    # earlier row-count version was skipped exactly when a combo resumed, which
+    # is when it was needed.
+    if last_page and page < last_page:
+        print(f"  NOTE: stopped at page {page:,} of {last_page:,} -- not marking complete.")
+        return total, False
+
+    # The site adds records daily, so a scrape spanning hours has rows inserted
+    # underneath it and page boundaries shift. That normally shows up as a few
+    # repeated rows, which build_site.py drops, but the same movement could in
+    # principle skip some.
+    if last_page and start_page == 1:
+        expected = (last_page - 1) * 25
+        if total < expected * 0.98:
+            print(f"  NOTE: {total:,} rows for {last_page:,} pages, fewer than the "
+                  f"~{expected:,} expected -- records may have shifted mid-scrape.")
+
+    return total, True
 
 
 def record_scrape_time(dataset):
@@ -342,28 +440,46 @@ def progress_file(dataset):
 
 
 def load_progress(path):
-    """(entity, status) combos a previous run of this dataset finished."""
+    """(finished combos, {unfinished combo: last page written}).
+
+    The combos here run to thousands of pages -- the largest is about ten hours
+    -- so finishing is far too coarse a unit to checkpoint on. Page position is
+    tracked too, which is what lets an interrupted run pick up mid-combo rather
+    than repeat a day's work.
+    """
     if not os.path.exists(path):
-        return set()
+        return set(), {}
     try:
         with open(path, encoding="utf-8") as f:
-            return {tuple(pair) for pair in json.load(f)}
+            raw = json.load(f)
     except (OSError, ValueError):
-        return set()  # unreadable or corrupt: treat as a fresh start
+        return set(), {}  # unreadable or corrupt: treat as a fresh start
+
+    if isinstance(raw, list):  # written before page tracking existed
+        return {tuple(pair) for pair in raw}, {}
+    done = {tuple(pair) for pair in raw.get("done", [])}
+    partial = {(e, s): page for e, s, page in raw.get("partial", [])}
+    return done, partial
 
 
-def save_progress(path, done):
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(sorted(list(pair) for pair in done), f, indent=2)
+def save_progress(path, done, partial):
+    payload = {
+        "done": sorted(list(pair) for pair in done),
+        "partial": sorted([e, s, page] for (e, s), page in partial.items()),
+    }
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+    os.replace(tmp, path)  # atomic, so a kill mid-write can't corrupt the checkpoint
 
 
-def drop_unfinished_rows(csv_path, done):
-    """Strip rows belonging to combos that were started but never finished.
+def drop_unfinished_rows(csv_path, keep):
+    """Strip rows belonging to combos we have no position for.
 
-    A run killed mid-combo leaves that combo's partial rows on disk with no
-    record of how far it got. Resuming would re-scrape the combo from page 1
-    and duplicate them, so the partial rows are discarded first. Combos in
-    `done` are complete and keep their rows.
+    A combo that is finished, or that has a recorded page position, has its
+    rows accounted for and keeps them. Anything else was cut off before the
+    first page was checkpointed, so its rows would be re-scraped and
+    duplicated -- those are dropped.
     """
     if not os.path.exists(csv_path):
         return 0
@@ -375,7 +491,7 @@ def drop_unfinished_rows(csv_path, done):
 
     header, body = rows[0], rows[1:]
     # Entity Name is column 3, Status is column 8 -- see the header written in main().
-    kept = [r for r in body if len(r) > 8 and (r[3], r[8]) in done]
+    kept = [r for r in body if len(r) > 8 and (r[3], r[8]) in keep]
     dropped = len(body) - len(kept)
 
     if dropped:
@@ -446,7 +562,7 @@ def main():
                 os.remove(p)
         print(f"--fresh: cleared {progress_path} and {output_csv}")
 
-    done = load_progress(progress_path)
+    done, partial = load_progress(progress_path)
     all_combos = combos(entities)
     todo = [c for c in all_combos if (c[0], c[2]) not in done]
 
@@ -454,13 +570,15 @@ def main():
         print(f"TOTAL={len(all_combos)}")
         print(f"DONE={len(all_combos) - len(todo)}")
         print(f"REMAINING={len(todo)}")
+        for (e, s), page in sorted(partial.items()):
+            print(f"PARTIAL={e} | {s} | through page {page}")
         return
 
     print(f"{len(todo):,} (entity, status) combos remaining of {len(all_combos):,}")
 
-    dropped = drop_unfinished_rows(output_csv, done)
+    dropped = drop_unfinished_rows(output_csv, done | set(partial))
     if dropped:
-        print(f"Discarded {dropped:,} partial rows from a combo that was interrupted mid-scrape.")
+        print(f"Discarded {dropped:,} rows from a combo cut off before its first checkpoint.")
 
     write_header = not os.path.exists(output_csv) or os.path.getsize(output_csv) == 0
     start = time.time()
@@ -479,14 +597,24 @@ def main():
                 print(f"\n{args.hours}h time limit reached -- stopping cleanly.")
                 break
 
-            grand_total += scrape_entity(
-                session, entity_name, entity_val, status, entity_type, doc_type, writer
+            key = (entity_name, status)
+
+            def checkpoint(page, _key=key):
+                f.flush()
+                partial[_key] = page
+                save_progress(progress_path, done, partial)
+
+            count, finished = scrape_entity(
+                session, entity_name, entity_val, status, entity_type, doc_type, writer,
+                start_page=partial.get(key, 0) + 1, on_page=checkpoint, deadline=deadline,
             )
+            grand_total += count
             f.flush()
-            # Only marked done once the combo's rows are all on disk, so an
-            # interrupted combo is re-scraped rather than half-recorded.
-            done.add((entity_name, status))
-            save_progress(progress_path, done)
+
+            if finished:
+                done.add(key)
+                partial.pop(key, None)
+            save_progress(progress_path, done, partial)
 
     remaining = len([c for c in all_combos if (c[0], c[2]) not in done])
     if remaining:

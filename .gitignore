@@ -10,7 +10,7 @@ data/scrape_state.txt
 # Resume state for the long scrapes — meaningful only alongside the (ignored)
 # CSVs they track. What they imply about coverage is baked into data.json's
 # meta.incomplete at build time, so the published page carries it regardless.
-data/*_scrape_progress.json*
+data/*_scrape_progress*.json*
 
 # Working output of scripts/extract_text.py — an append-only checkpoint log
 # that grows as documents are processed, not something to commit while

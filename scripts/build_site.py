@@ -183,9 +183,23 @@ def main():
     rows = []
     sources = []       # parallel to rows: original URLs, for round-trip verification
 
+    # A scrape interrupted between writing a page and checkpointing it re-fetches
+    # that page on resume, so the CSV can hold one duplicated page (~25 rows).
+    # They are byte-identical, including the per-document DN token, so dropping
+    # exact repeats cannot lose a distinct record.
+    seen = set()
+    duplicates = 0
+
     for path in DATA.values():
         with open(path, newline="", encoding="utf-8") as f:
             for r in csv.DictReader(f):
+                fingerprint = (r["Document Number"], r["Entity Name"], r["Status"],
+                               r["Document Type"], r["Detail URL"])
+                if fingerprint in seen:
+                    duplicates += 1
+                    continue
+                seen.add(fingerprint)
+
                 ent = r["Entity Name"]
                 if ent not in ENTITIES:
                     sys.exit(f"unexpected entity {ent!r} in {path}")
@@ -269,6 +283,8 @@ def main():
 
     orig = sum(os.path.getsize(p) for p in DATA.values())
     gz = len(gzip.compress(blob, 9))
+    if duplicates:
+        print(f"duplicate rows: {duplicates:,} dropped (a resumed scrape redid a page)")
     print(f"rows          : {len(rows):,}")
     print(f"vendors       : {len(vendors):,}")
     print(f"source CSVs   : {orig / 1e6:6.2f} MB")

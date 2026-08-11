@@ -25,6 +25,8 @@ exist isn't knowable up front. DT stays keyed by type alone -- verified against
 live data that a given code maps to the same DT in every agency.
 """
 
+import argparse
+import array
 import csv
 import datetime
 import json
@@ -32,6 +34,8 @@ import gzip
 import os
 import sys
 from urllib.parse import urlparse, parse_qs
+
+import ne_format
 
 # Paths resolve against the project folder (the parent of scripts/), so the
 # scripts work no matter which directory they are invoked from. index.html and
@@ -153,7 +157,32 @@ def scraped_at():
     return oldest.isoformat(timespec="seconds")
 
 
+def build_rows(columns, docs, dn_tokens, view_tokens):
+    """The legacy 11-field row list, rebuilt from the columns.
+
+    Two jobs. It backs --emit-json for the older payload, and it is the
+    strongest correctness check available: if the columns cannot reproduce a
+    row exactly, one of them is missing or wrong, and comparing rebuilt rows
+    from the decoder against rebuilt rows from the reference says so in one
+    equality.
+    """
+    vi = columns["vendorIdx"]; amt = columns["amount"]
+    beg = columns["begin"]; end = columns["end"]
+    st = columns["status"]; ent = columns["entity"]
+    ty = columns["type"]; ui = columns["adnIdx"]
+    return [
+        [docs[i].decode("utf-8"), vi[i], amt[i], beg[i], end[i],
+         st[i], ent[i], ty[i], dn_tokens[i], view_tokens[i], ui[i]]
+        for i in range(len(docs))
+    ]
+
+
 def main():
+    parser = argparse.ArgumentParser(description="Build the published payload from the scraped CSVs.")
+    parser.add_argument("--emit-json", metavar="PATH", default=None,
+                        help="write the legacy single-file JSON payload here instead of data.json")
+    args = parser.parse_args()
+
     for path in DATA.values():
         if not os.path.exists(path):
             sys.exit(f"missing {path} — run the scraper first")
@@ -180,8 +209,17 @@ def main():
             types.append(code)
         return type_index[code]
 
-    rows = []
-    sources = []       # parallel to rows: original URLs, for round-trip verification
+    # Columns rather than a list of row lists: at 738,195 rows the row-list
+    # shape costs ~1.4 GB of Python objects, and the payload is written
+    # column-wise anyway.
+    columns = {name: array.array("i") for name in ne_format.I32_COLUMNS}
+    columns.update({name: array.array("d") for name in ne_format.F64_COLUMNS})
+    columns.update({name: array.array("B") for name in ne_format.U8_COLUMNS})
+    docs = []          # document numbers, as bytes
+    dn_tokens = []     # DN, still base64 text at this point
+    view_tokens = []   # view-URL suffix, still percent-encoded text
+
+    sources = []       # parallel to the columns: original URLs, for round-trip verification
 
     # A scrape interrupted between writing a page and checkpointing it re-fetches
     # that page on resume, so the CSV can hold one duplicated page (~25 rows).
@@ -230,20 +268,39 @@ def main():
                 if view and not view.startswith(VIEW_BASE):
                     sys.exit(f"unexpected view URL shape: {view[:80]}")
 
-                rows.append([
-                    r["Document Number"],
-                    vi,
-                    to_amount(r["Amount"]),
-                    to_ymd(r["Begin Date"]),
-                    to_ymd(r["End Date"]),
-                    si,
-                    ei,
-                    ti,
-                    dn,
-                    view[len(VIEW_BASE):] if view else "",
-                    ui,
-                ])
+                doc = r["Document Number"].encode("utf-8")
+                if len(doc) > 255:
+                    sys.exit(f"document number {r['Document Number']!r} exceeds 255 bytes — "
+                             "docLen is a u8; widen the column")
+                if any(c.islower() for c in r["Document Number"]):
+                    sys.exit(f"document number {r['Document Number']!r} contains lowercase — "
+                             "the page case-folds against meta.docAlphabet; add a folded blob")
+
+                view_suffix = view[len(VIEW_BASE):] if view else ""
+                columns["vendorIdx"].append(vi)
+                columns["amount"].append(to_amount(r["Amount"]))
+                columns["begin"].append(to_ymd(r["Begin Date"]))
+                columns["end"].append(to_ymd(r["End Date"]))
+                columns["status"].append(si)
+                columns["entity"].append(ei)
+                columns["type"].append(ti)
+                columns["adnIdx"].append(ui)
+                columns["viewPresent"].append(1 if view_suffix else 0)
+                columns["docLen"].append(len(doc))
+                docs.append(doc)
+                dn_tokens.append(dn)
+                view_tokens.append(view_suffix)
+
                 sources.append((detail, view))
+
+    n = len(docs)
+
+    # The u8 columns index dictionaries that are small today but not bounded by
+    # anything except the state's own data. Fail here rather than silently
+    # wrapping a value and mislabelling every affected row.
+    for name, size in (("entity", len(ENTITIES)), ("type", len(types)), ("adnIdx", len(adn))):
+        if size > 255:
+            sys.exit(f"{name} dictionary has {size} entries — the column is a u8; widen it")
 
     scraped = scraped_at()
     if not scraped:
@@ -255,7 +312,7 @@ def main():
             "statuses": STATUSES,
             "types": types,
             "typeGroups": type_groups(types),
-            "count": len(rows),
+            "count": n,
             "built": datetime.date.today().isoformat(),
             "scraped": scraped,
             "incomplete": incomplete_coverage(),
@@ -269,23 +326,24 @@ def main():
             # string keeps this aligned with the type indices rows refer to.
             "DT": [const_DT.get(i, "") for i in range(len(types))],
         },
-        "vendors": [n for n, _ in sorted(vendors.items(), key=lambda kv: kv[1])],
+        "vendors": [name for name, _ in sorted(vendors.items(), key=lambda kv: kv[1])],
         "vtok": [vendor_tokens.get(i, "") for i in range(len(vendors))],
-        "rows": rows,
+        "rows": build_rows(columns, docs, dn_tokens, view_tokens),
     }
 
     verify(payload, sources)
 
-    os.makedirs(OUT_DIR, exist_ok=True)
+    out_json = args.emit_json or OUT_JSON
+    os.makedirs(os.path.dirname(out_json) or ".", exist_ok=True)
     blob = json.dumps(payload, separators=(",", ":")).encode()
-    with open(OUT_JSON, "wb") as f:
+    with open(out_json, "wb") as f:
         f.write(blob)
 
     orig = sum(os.path.getsize(p) for p in DATA.values())
     gz = len(gzip.compress(blob, 9))
     if duplicates:
         print(f"duplicate rows: {duplicates:,} dropped (a resumed scrape redid a page)")
-    print(f"rows          : {len(rows):,}")
+    print(f"rows          : {n:,}")
     print(f"vendors       : {len(vendors):,}")
     print(f"source CSVs   : {orig / 1e6:6.2f} MB")
     print(f"{OUT_JSON:<14}: {len(blob) / 1e6:6.2f} MB")

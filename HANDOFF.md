@@ -26,18 +26,31 @@ campuses. Sitting in `data/*.csv` (gitignored, 362 MB).
 **The live site publishes 295,895 of them** as a single 35 MB `data.json`
 (16 MB gzipped). That is the pre-purchase-order corpus and it works fine.
 
-**In flight:** replacing that payload so the full 738,195 can ship. Two of four
-stages are done and pushed:
+**In flight:** replacing that payload so the full 738,195 can ship. Three of
+four stages are done:
 
 | Stage | Commit | State |
 |---|---|---|
 | 0 — columnar refactor of the builder | `3e1046a` | done, byte-identical output verified |
 | 1+2 — binary payload + widened verify | `ddba1f5` | done, verified from disk |
-| 3 — rewrite `index.html` data layer | — | **not started** |
-| 4 — staged rollout, then promote | — | not started |
+| 3 — rewrite the `index.html` data layer | uncommitted | done as `staging/index.html`, verified in a browser |
+| 4 — staged rollout, then promote | — | **not started** |
 
-Neither pushed commit changes anything published — they only touch build
-scripts.
+Nothing published has changed. The two pushed commits touch only build
+scripts, and Stage 3 landed as a *new* file (`staging/index.html`) rather than
+an edit to the live page.
+
+Stage 3 as built, measured against the real payload on a local server:
+
+| | |
+|---|---|
+| a keystroke over all 738,195 rows | **4–21 ms** |
+| first sort of a column (cached after) | 56–199 ms; amount, sorted at load, is 4 ms |
+| peak JS heap | **~90 MB** (vs 154 MB today for 40% of the data) |
+| browser self-check `?selftest=1` | 15/15 pass, incl. 1,000 URLs rebuilt in JS matching the scraped CSVs |
+
+`staging/index.html` differs from what will become `index.html` in exactly one
+line: `var BASE = "../"`. Promotion is that line plus a file move.
 
 ## 3. Guard rails
 
@@ -72,6 +85,11 @@ python3 scripts/build_site.py                    # binary payload -> d/<buildId>
 python3 scripts/build_site.py --emit-json out.json  # legacy single-file payload
 python3 scripts/serve_site.py                    # preview at 127.0.0.1:8765
 ```
+
+With the preview running: `/staging/` is the new page, `/` is the live one.
+`/staging/?selftest=1` checks every column against the digests in `meta.json`
+and rebuilds 1,000 sampled URLs against the addresses in `selftest.json`,
+which come from the scraped CSVs rather than from the payload.
 
 Every scrape checkpoints per page and resumes; interrupting is safe.
 
@@ -136,6 +154,21 @@ than one `N`, and three `N` values span agencies. They are now stored as the 98
 combinations that actually occur, with an index per row. `verify()` caught this
 rather than shipping broken links; keep it running.
 
+**A `<tr>` cannot be 24 million pixels tall.** The virtual scroller sizes
+spacer rows to the full list height, which browsers cap at 2^24 px (Chrome).
+At 295,895 rows that is 9.8 M px and fine; at 738,195 it is 24.4 M and the
+bottom third of the table silently becomes unreachable — the scrollbar just
+stops. `staging/index.html` caps the track at 15 M px and scales scroll
+position onto the real list past that point. Anything that changes `ROW_H` or
+the row count has to keep that in mind.
+
+**`load_progress()` returns a pair.** `build_site.py`'s `incomplete_coverage()`
+bound `(done, partial)` to one name, so every entity tested as uncollected and
+`meta.incomplete` listed all 101 of them as "still being collected" — the
+page's honesty note inverted into a false alarm. Fixed; the correct answer is
+now an empty list. It only surfaced because the published `data.json` predates
+the scraper adding page-position tracking.
+
 **The site renders entity names in caps on state result grids**
 (`DRY BEAN COMMISSION`) but the dropdown uses title case. Rows record the
 canonical dropdown name, because both the resume checkpoint and
@@ -171,12 +204,26 @@ a detail page headed "Contracts". The map overrides that.
 
 ## 8. Known open items
 
-**Next up: Stage 3**, rewriting `index.html`'s data layer. Full detail in the
-plan file; the parts that need care are `orderFor()` (a cached permutation per
-column, replacing per-keystroke sorting), hover-based `href` rewriting so
-middle-click and ⌘-click keep working with deferred tokens, and the two export
-buttons agreed with the user (instant permalink export; source-link export that
-states its download size).
+**Next up: Stage 4**, the rollout. Nothing is committed yet. In order:
+
+1. Commit `d/<buildId>/*` (~50 MB) and `staging/index.html`. Production is
+   untouched; `…/ne-contracts/staging/` starts exercising the real CDN.
+2. On the deployed staging URL — not locally, because local serving cannot
+   reproduce gzip-in-transit, and CDN behavior produced the one
+   design-changing surprise in this project — run `?selftest=1`, and
+   `curl -I` each published file for `content-encoding: gzip`.
+3. Promote: copy `staging/index.html` to `index.html` with `BASE = ""`. One
+   file, one commit; rollback is one `git revert`.
+4. Days later, delete `data.json`, `staging/`, and the prior build directory.
+
+Keep `data.json` through the cutover. Pages serves `index.html` with
+`max-age=600`, so a reader can hold a ten-minute-stale page; the old page keeps
+fetching `data.json` and works, a fresh page fetches the binary payload and
+works, and neither can pair with the other's data because `index.html` carries
+no build identity — it reads `manifest.json`.
+
+`README.md` still publishes the old size, timing and verification numbers.
+Update it as part of the promotion commit.
 
 **Vendor names are fragmented.** 6,742 vendor strings collapse to 1,987 real
 companies — the state records the same firm many ways, often with a contract

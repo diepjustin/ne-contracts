@@ -121,6 +121,36 @@ Each combo reports its median detail-fetch time, and flags a sustained climb pas
 The site's healthy baseline is ~0.95s; a run that drifts well above that is asking for
 more than the site wants to give, and the pacing above should come back down.
 
+## Daily updates
+
+The full scrape above is a one-time (or occasional-maintenance) job. Day to day, the
+state adds records under **`Status=Active`**, which is only ~7.3% of all pages, so
+`scripts/scrape.py <dataset> --daily` re-scans just that status per entity and diffs it
+against what the existing CSV already knows is Active, matched on `Detail URL`:
+
+```bash
+python3 scripts/scrape.py contract --daily
+python3 scripts/scrape.py purchase-order --daily
+python3 scripts/scrape.py state --daily
+```
+
+A record it hasn't seen before gets a detail fetch and a new row, same as a full scrape.
+A record it already knew about is skipped entirely — no detail fetch, no rewrite. A
+record that was previously Active but doesn't show up today gets its existing row's
+`Status` flipped to `Expired` in place. This deliberately does **not** catch an amendment
+to an existing Active record's Amount/Vendor/End Date — only a full re-scrape does that.
+
+Each run appends per-entity counts to `data/daily_diff_report.json`
+(gitignored, like the other progress files). `scripts/check_daily_diff.py` reads it and
+fails if any single entity had more than half its previously-Active records flip to
+Expired in one day — implausible as real-world attrition, but exactly what a
+renamed/retired entity looks like (see `check_entity_drift.py`).
+
+`.github/workflows/ne-contracts-daily.yml` runs `--daily` for all three datasets every
+night, and on Sundays additionally runs `check_entity_drift.py` → `build_site.py` →
+`check_daily_diff.py` → commit + push, in that order, so a bad week never reaches the
+live site. See `HANDOFF.md` for the cache-bootstrap step this needs on a fresh clone.
+
 ## The website
 
 `index.html` is a self-contained static site — no build step, no dependencies, no server.

@@ -230,11 +230,6 @@ improvement: it is what makes "how much has Nebraska paid this company?"
 answerable. Do it as an inspectable mapping file, like `type_groups.json`, not
 blind normalization.
 
-**Incremental daily updates.** A full re-scrape is 20+ hours and can't run
-nightly, but Active contracts are only 7.3% of pages, and expirations can be
-inferred from what leaves Active. Est. 30–45 min nightly. Needs a baseline
-diff, which now exists.
-
 **Full-text search** (`prototype-search/`) is live but unlinked, covering
 16,467 documents. Query latency is unresolved — see the range-request finding
 above for a likely cause. Do not extend it to the new corpus before that is
@@ -246,3 +241,52 @@ scanned images needing OCR that doesn't exist yet, and turning contract text
 into a one-line scope realistically needs an LLM pass over 150,000+ documents.
 Feasible but the largest remaining project; a narrow single-agency pilot would
 prove the summaries before committing.
+
+## 9. Daily automation
+
+`.github/workflows/ne-contracts-daily.yml` scrapes all three datasets with
+`--daily` every night (10pm Central, DST-resolved at runtime via
+`TZ=America/Chicago date +%H` rather than hardcoded UTC offsets — GitHub
+Actions cron has no DST awareness, so two cron entries fire daily and the
+gate step no-ops whichever one doesn't land on hour 22). On Sundays only, it
+additionally runs `check_entity_drift.py` → `build_site.py` →
+`check_daily_diff.py` → commit + push, in that order, so any one of those
+failing blocks the publish and fails the workflow, which triggers GitHub's
+built-in scheduled-run failure email. See `README.md`'s "Daily updates"
+section for how `--daily` itself works.
+
+**GitHub Actions runners are ephemeral and `data/*.csv` is gitignored**, so
+there is no persistent state across nightly runs by default — every run
+would look like a cold start with nothing to diff against. `data/` round-
+trips through `actions/cache` instead: restored under a `ne-contracts-data-`
+prefix at the start of a run, saved under a fresh run-scoped key at the end
+(cache keys are immutable in GitHub Actions, so "latest" only works via
+prefix-restore + a new key per save), with the oldest entries pruned via
+`gh cache delete` after each save to stay well under the 10GB/repo cap.
+
+**This means a fresh clone's first workflow run has no cache to restore and
+will fail** — `load_known_active()` returns `None` and `scrape.py --daily`
+refuses to run rather than treat a missing baseline as "nothing was ever
+active." Bootstrap it once: temporarily commit the existing `data/*.csv` to
+a short-lived branch (comment out the `data/*.csv` line in `.gitignore` for
+that commit only), trigger the workflow via `workflow_dispatch` on that
+branch so the checkout itself supplies the CSVs and the run's "Save data/
+cache" step seeds the real cache from them, then delete the branch and
+revert the `.gitignore` change. Every run after that restores from the seeded
+cache normally.
+
+**Guard rail thresholds** (`scripts/check_daily_diff.py`): an entity fails
+the week if more than 50% of its previously-Active records flipped to
+Expired in a single day, skipped below 5 previously-Active records where the
+percentage is noise. Chosen because a renamed/retired entity's daily scrape
+returns "No results found" on page one — `seen` is empty, 100% of `known`
+flips, always over threshold regardless of entity size — which is exactly
+the failure mode `check_entity_drift.py` (run first in the Sunday leg) is
+meant to catch before it gets this far.
+
+**What `--daily` deliberately does not catch:** an amendment to an existing
+Active record's Amount, Vendor, or End Date. It's seen again, matched as
+already-known by `Detail URL`, and skipped — no rewrite. Only a full
+re-scrape (`scrape.py contract`/`purchase-order`/`state`, no `--daily`)
+picks up amendments. Worth an occasional manual full re-scrape; not
+automated.

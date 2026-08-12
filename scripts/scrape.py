@@ -7,6 +7,7 @@ import argparse
 import datetime
 import json
 import statistics
+import sys
 import threading
 import time
 import csv
@@ -240,7 +241,8 @@ def parse_results_page(soup):
 
 
 def scrape_entity(session, entity_name, entity_val, status, entity_type, doc_type, writer,
-                  start_page=1, on_page=None, deadline=None):
+                  start_page=1, on_page=None, deadline=None,
+                  record_filter=None, on_record_seen=None):
     """Scrape one (entity, status) combo. Returns (rows_written, finished).
 
     `finished` is False when a deadline cut the combo short; the caller records
@@ -248,6 +250,13 @@ def scrape_entity(session, entity_name, entity_val, status, entity_type, doc_typ
     the site holds results in session state, so page N is only reachable by
     re-running the query -- but that is a couple of minutes against combos that
     otherwise take hours to redo.
+
+    `record_filter` and `on_record_seen` exist for --daily mode (see run_daily):
+    when given, only records passing `record_filter` get a detail/view-URL
+    fetch and a CSV row, while `on_record_seen` still fires for every parsed
+    record so the caller can diff what's on the page against what it already
+    knew, independent of what got written. Both default to None, which
+    reproduces the original "write every record" behaviour exactly.
     """
     label = f"{entity_name} | {status}" + (f" | {doc_type}" if doc_type else "")
     print(f"\nScraping: {label}" + (f"  (resuming at page {start_page:,})" if start_page > 1 else ""))
@@ -338,9 +347,16 @@ def scrape_entity(session, entity_name, entity_val, status, entity_type, doc_typ
         if more_pages:
             prefetch = _page_pool.submit(_fetch_page, session, page + 1)
 
-        view_urls = fetch_view_urls_parallel(records)
+        to_fetch = [r for r in records if record_filter is None or record_filter(r)]
+        view_urls = fetch_view_urls_parallel(to_fetch)
+        view_url_by_detail = dict(zip((r["detail_url"] for r in to_fetch), view_urls))
 
-        for record, view_url in zip(records, view_urls):
+        for record in records:
+            if on_record_seen:
+                on_record_seen(record)
+            if record_filter is not None and not record_filter(record):
+                continue
+            view_url = view_url_by_detail.get(record["detail_url"], "")
             writer.writerow([
                 record["doc_number"],
                 record["doc_type"],
@@ -502,6 +518,218 @@ def drop_unfinished_rows(csv_path, keep):
     return dropped
 
 
+def load_known_active(csv_path):
+    """{entity_name: {detail_url, ...}} for rows currently Status == Active.
+
+    None (not {}) means the CSV doesn't exist at all -- --daily's signal to
+    refuse rather than treat a missing baseline as "nothing was ever active".
+    Read once at the start of a daily run, before any scraping, so each
+    entity's diff has a stable baseline unaffected by rows this same run
+    appends or patches.
+    """
+    if not os.path.exists(csv_path):
+        return None
+    known = {}
+    with open(csv_path, newline="", encoding="utf-8") as f:
+        reader = csv.reader(f)
+        next(reader, None)  # header
+        for r in reader:
+            # Entity Name is column 3, Status is column 8, Detail URL is column 9.
+            if len(r) > 9 and r[8] == "Active":
+                known.setdefault(r[3], set()).add(r[9])
+    return known
+
+
+def patch_status_to_expired(csv_path, flip_urls):
+    """Flip Status Active -> Expired for existing rows whose Detail URL is in flip_urls.
+
+    One full rewrite, same shape as drop_unfinished_rows -- there is no index
+    to seek by. Called once per dataset per --daily run, after every entity
+    has been scraped, not once per entity.
+    """
+    if not flip_urls or not os.path.exists(csv_path):
+        return 0
+    with open(csv_path, newline="", encoding="utf-8") as f:
+        rows = list(csv.reader(f))
+    if not rows:
+        return 0
+
+    header, body = rows[0], rows[1:]
+    patched = 0
+    for r in body:
+        if len(r) > 9 and r[8] == "Active" and r[9] in flip_urls:
+            r[8] = "Expired"
+            patched += 1
+
+    if patched:
+        tmp = csv_path + ".tmp"
+        with open(tmp, "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(header)
+            writer.writerows(body)
+        os.replace(tmp, csv_path)  # atomic, same reasoning as save_progress
+    return patched
+
+
+DAILY_DIFF_REPORT = "data/daily_diff_report.json"
+
+
+def append_daily_diff_report(dataset, entity_report, stamp):
+    """Append one dataset-run's per-entity counts to the week's accumulating report.
+
+    Consumed by scripts/check_daily_diff.py on the weekly publish day, then
+    cleared. See that script for how the totals here get used as a guard rail.
+    """
+    entries = []
+    if os.path.exists(DAILY_DIFF_REPORT):
+        try:
+            with open(DAILY_DIFF_REPORT, encoding="utf-8") as f:
+                entries = json.load(f)
+        except (OSError, ValueError):
+            entries = []  # unreadable or corrupt: start this week's report fresh
+
+    totals = {k: sum(e[k] for e in entity_report.values())
+              for k in ("previously_active", "still_active", "newly_active", "flipped_to_expired")}
+    entries.append({"dataset": dataset, "timestamp": stamp, "entities": entity_report, "totals": totals})
+
+    tmp = DAILY_DIFF_REPORT + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(entries, f, indent=2, sort_keys=True)
+    os.replace(tmp, DAILY_DIFF_REPORT)
+
+
+def daily_progress_file(dataset):
+    return f"data/{dataset}_daily_progress.json"
+
+
+def load_daily_progress(path):
+    """Entities already finished in *today's* --daily run, or empty if this is a new day.
+
+    Unlike the full-scrape checkpoint, this is never meant to persist across
+    days -- it exists only so a same-day retry (e.g. re-running a workflow
+    that hit its time limit) doesn't repeat entities already done today. A
+    stored date that isn't today's is treated as stale, so every new day
+    re-scans every entity's Active status from scratch, same as if this file
+    didn't exist.
+    """
+    if not os.path.exists(path):
+        return set()
+    try:
+        with open(path, encoding="utf-8") as f:
+            raw = json.load(f)
+    except (OSError, ValueError):
+        return set()
+    if raw.get("date") != datetime.date.today().isoformat():
+        return set()
+    return set(raw.get("done_entities", []))
+
+
+def save_daily_progress(path, done_entities):
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump({"date": datetime.date.today().isoformat(),
+                   "done_entities": sorted(done_entities)}, f, indent=2)
+    os.replace(tmp, path)
+
+
+def run_daily(args):
+    """Scrape only Status=Active for one dataset and diff against what the
+    existing CSV already knows is Active -- see scripts/README or HANDOFF.md
+    for why this is safe (build_site.py's exact-fingerprint dedup) and what
+    it deliberately does not catch (amendments to an already-Active record).
+    """
+    entity_type, doc_type, output_csv = DATASETS[args.dataset]
+    is_state = args.dataset == "state"
+    entities = STATE_ENTITIES if is_state else HIGHER_ED_ENTITIES
+
+    if args.entity:
+        unknown = [e for e in args.entity if e not in entities]
+        if unknown:
+            known = "scripts/state_entities.json" if is_state else "HIGHER_ED_ENTITIES in scripts/scrape.py"
+            print(f"unknown entity name(s) for dataset {args.dataset!r}: {unknown}. See {known}.", file=sys.stderr)
+            sys.exit(2)
+        entities = {name: entities[name] for name in args.entity}
+
+    os.makedirs("data", exist_ok=True)
+
+    known_active = load_known_active(output_csv)
+    if known_active is None:
+        print(f"ERROR: refusing --daily: {output_csv} does not exist. This dataset needs a "
+              "completed full scrape (or a restored data/ cache) before daily mode has anything "
+              "to diff against.", file=sys.stderr)
+        sys.exit(1)
+
+    progress_path = daily_progress_file(args.dataset)
+    done_today = load_daily_progress(progress_path)
+
+    write_header = not os.path.exists(output_csv) or os.path.getsize(output_csv) == 0
+    start = time.time()
+    deadline = start + args.hours * 3600 if args.hours else None
+
+    flips = {}    # entity_name -> set(detail_url) flipped to Expired
+    report = {}   # entity_name -> counts dict
+
+    with open(output_csv, "a", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        if write_header:
+            writer.writerow(CSV_HEADER)
+
+        session = build_session()
+        for entity_name in ordered_entities(entities):
+            if entity_name in done_today:
+                continue
+            if deadline and time.time() >= deadline:
+                print(f"\n{args.hours}h time limit reached -- stopping cleanly.")
+                break
+
+            entity_val = entities[entity_name]
+            known = known_active.get(entity_name, set())
+            seen = set()
+
+            count, finished = scrape_entity(
+                session, entity_name, entity_val, "Active", entity_type, doc_type, writer,
+                deadline=deadline,
+                record_filter=lambda r, _k=known: r["detail_url"] not in _k,
+                on_record_seen=lambda r, _s=seen: _s.add(r["detail_url"]),
+            )
+            f.flush()
+
+            if not finished:
+                # Deadline or a recovery failure -- don't mark done, don't compute
+                # flips off an incomplete "seen" set. It retries from page 1 next
+                # run (today's retry, or tomorrow's fresh run).
+                print(f"  {entity_name}: not finished this run, will re-scan from the top later.")
+                continue
+
+            report[entity_name] = {
+                "previously_active": len(known),
+                "still_active": len(seen & known),
+                "newly_active": len(seen - known),
+                "flipped_to_expired": len(known - seen),
+            }
+            flips[entity_name] = known - seen
+
+            done_today.add(entity_name)
+            save_daily_progress(progress_path, done_today)
+
+    all_flip_urls = {u for s in flips.values() for u in s}
+    if all_flip_urls:
+        patched = patch_status_to_expired(output_csv, all_flip_urls)
+        print(f"Patched {patched:,} row(s) Active -> Expired.")
+
+    if all(e in done_today for e in entities):
+        stamp = record_scrape_time(args.dataset)
+        append_daily_diff_report(args.dataset, report, stamp)
+        if os.path.exists(progress_path):
+            os.remove(progress_path)  # today is done; tomorrow starts fresh anyway, but tidy
+        print(f"\nDaily scrape complete for {args.dataset}. Scrape time recorded: {stamp}")
+    else:
+        remaining = sorted(set(entities) - done_today)
+        print(f"\nDaily scrape incomplete -- {len(remaining)} entit(y/ies) not finished today: "
+              f"{remaining[:5]}{'...' if len(remaining) > 5 else ''}. Re-run to finish before "
+              "the report is finalized.")
+
+
 CSV_HEADER = [
     "Document Number", "Document Type", "Entity Code", "Entity Name",
     "Vendor", "Amount", "Begin Date", "End Date", "Status", "Detail URL", "View URL"
@@ -517,13 +745,18 @@ STATE_PRIORITY = [
 ]
 
 
+def ordered_entities(entities):
+    """Entity names in scrape order, biggest known agencies first (STATE_PRIORITY)."""
+    return sorted(entities, key=lambda n: (STATE_PRIORITY.index(n) if n in STATE_PRIORITY else len(STATE_PRIORITY), n))
+
+
 def combos(entities):
     """(entity_name, entity_val, status) to scrape, biggest known agencies first.
 
     Ordering only decides what has landed if a run stops early -- the checkpoint
     makes the end result identical either way.
     """
-    ordered = sorted(entities, key=lambda n: (STATE_PRIORITY.index(n) if n in STATE_PRIORITY else len(STATE_PRIORITY), n))
+    ordered = ordered_entities(entities)
     return [(name, entities[name], status) for name in ordered for status in STATUSES]
 
 
@@ -539,7 +772,17 @@ def main():
                         help="Print progress counts and exit -- no network calls.")
     parser.add_argument("--fresh", action="store_true",
                         help="Discard any saved progress and re-scrape this dataset from scratch.")
+    parser.add_argument("--daily", action="store_true",
+                        help="Scrape only Status=Active and diff against the existing CSV, "
+                             "instead of a full (entity, status) sweep.")
     args = parser.parse_args()
+
+    if args.daily:
+        if args.fresh or args.status:
+            parser.error("--daily is incompatible with --fresh/--status (it always reads and "
+                          "patches the existing CSV in place; it never starts fresh).")
+        run_daily(args)
+        return
 
     entity_type, doc_type, output_csv = DATASETS[args.dataset]
     is_state = args.dataset == "state"

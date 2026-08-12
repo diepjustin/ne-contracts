@@ -12,6 +12,12 @@ data/scrape_state.txt
 # meta.incomplete at build time, so the published page carries it regardless.
 data/*_scrape_progress*.json*
 
+# --daily's own within-run resumption and the weekly diff accumulator it
+# feeds -- both are transient working state (round-tripped via the GitHub
+# Actions cache, not git), same category as the progress files above.
+data/*_daily_progress.json*
+data/daily_diff_report.json
+
 # Working output of scripts/extract_text.py — an append-only checkpoint log
 # that grows as documents are processed, not something to commit while
 # prototyping.

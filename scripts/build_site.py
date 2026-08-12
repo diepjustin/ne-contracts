@@ -33,6 +33,7 @@ import datetime
 import json
 import gzip
 import os
+import random
 import sys
 import zlib
 from urllib.parse import urlparse, parse_qs, quote, unquote
@@ -108,7 +109,11 @@ def incomplete_coverage():
     gaps = []
     for dataset in DATA:
         entities = STATE_ENTITIES if dataset == "state" else HIGHER_ED_ENTITIES
-        done = load_progress(os.path.join(ROOT, progress_file(dataset)))
+        # load_progress returns (finished combos, partial positions). Binding the
+        # pair to one name makes every membership test false and reports the whole
+        # state as uncollected -- which is exactly the wrong direction for a note
+        # whose job is to stop readers misreading a gap.
+        done, _partial = load_progress(os.path.join(ROOT, progress_file(dataset)))
         missing = sorted({e for e in entities for s in STATUSES if (e, s) not in done})
         gaps += [f"{e} ({labels[dataset]})" for e in missing]
     return gaps
@@ -392,8 +397,17 @@ def main():
         if len(v) > 255:
             sys.exit(f"vendor name exceeds 255 bytes — the length column is a u8; widen it")
 
+    # Document numbers and vendor names are not columns, so the per-column
+    # digests above leave the two largest resident files unchecked in the
+    # browser. Digest them whole, by file, so ?selftest=1 covers everything it
+    # loads. Keyed by filename to stay distinguishable from column names.
+    meta["digests"][ne_format.DOCS] = zlib.crc32(b"".join(docs))
+    meta["digests"][ne_format.VENDORS] = zlib.crc32(
+        bytes(len(v) for v in vendor_names) + b"".join(vendor_names))
+
     ne_format.write_payload(outdir, columns, docs, vendor_names, vtok_bytes, meta)
     ne_format.write_token_blocks(outdir, dn_bytes, view_bytes, n)
+    write_selftest(outdir, sources, columns["viewPresent"], n)
     with open(os.path.join(OUT_DIR, "manifest.json"), "w", encoding="utf-8") as f:
         json.dump({"buildId": build_id, "dir": f"d/{build_id}"}, f)
 
@@ -413,6 +427,34 @@ def main():
     print(f"deferred      : {tok / 1e6:6.2f} MB raw in {ne_format.block_count(n):,} blocks "
           f"(fetched on click)")
     print(f"written to    : {outdir}")
+
+
+SELFTEST_ROWS = 1000
+
+
+def write_selftest(outdir, sources, view_present, n):
+    """A fixture of row -> URL pairs, taken from the CSVs, for `?selftest=1`.
+
+    Python's verification proves the *files* carry the source data. It says
+    nothing about the JavaScript that decodes them — a swapped section, a
+    mis-sized block, a base64 slip would all pass on this side and produce
+    wrong links in the browser. So ship a sample of the scraped truth and let
+    the page check itself against it, on the real CDN where gzip-in-transit
+    and range behavior actually apply.
+
+    The seed is fixed so a rebuild of unchanged data samples the same rows,
+    which makes two runs comparable.
+    """
+    rows = random.Random(20260811).sample(range(n), min(SELFTEST_ROWS, n))
+    fixture = []
+    for i in sorted(rows):
+        detail, view = sources[i]
+        # The page shows the view URL when there is one, so that is what it
+        # must be held to; view_present is the column it decides on.
+        fixture.append([i, view if view_present[i] else detail])
+
+    with open(os.path.join(outdir, ne_format.SELFTEST), "w", encoding="utf-8") as f:
+        json.dump({"rows": fixture}, f, separators=(",", ":"))
 
 
 def verify_urls(url, vtok, rows, sources, sample_out=None):

@@ -62,7 +62,11 @@ COLS_U8 = "cols.u8.bin"
 DOCS = "docs.bin"
 VENDORS = "vendors.bin"
 VTOK = "vtok.bin"
+SELFTEST = "selftest.json"
 TOK_DIR = "tok"
+
+# What the page loads before it can render anything, in the order it needs them.
+RESIDENT = (COLS_I32, COLS_F64, COLS_U8, DOCS, VENDORS)
 
 # Section order within each column file. The names are the keys used by
 # write_payload/read_payload, and the order here IS the on-disk order.
@@ -101,7 +105,11 @@ def _write_packed(path, lengths, blobs):
 
 
 def write_payload(outdir, columns, docs, vendors, vtokens, meta):
-    """Write every file the page loads. `columns` maps name -> array.array."""
+    """Write every file the page loads. `columns` maps name -> array.array.
+
+    Returns the meta actually written, which gains a `bytes` map this function
+    fills in from the files on disk -- so meta.json is written last.
+    """
     n = meta["count"]
     os.makedirs(os.path.join(outdir, TOK_DIR), exist_ok=True)
 
@@ -120,8 +128,17 @@ def write_payload(outdir, columns, docs, vendors, vtokens, meta):
     # TOKEN_BYTES and a u8 still covers far more than occurs.
     _write_packed(os.path.join(outdir, VTOK), [len(v) // TOKEN_BYTES for v in vtokens], vtokens)
 
+    # Decompressed size per file. The page cannot ask the network for these:
+    # Pages gzips every one of them, so Content-Length is the compressed length
+    # while the reader yields decompressed bytes. Stating them here is what lets
+    # the loader show a progress bar that means something.
+    meta = dict(meta)
+    meta["bytes"] = {name: os.path.getsize(os.path.join(outdir, name))
+                     for name in RESIDENT + (VTOK,)}
+
     with open(os.path.join(outdir, META), "w", encoding="utf-8") as f:
         json.dump(meta, f, separators=(",", ":"), sort_keys=True)
+    return meta
 
 
 def write_token_blocks(outdir, dn, view, n):

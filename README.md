@@ -7,48 +7,35 @@ records from the [Nebraska State Contracts Database](https://statecontracts.nebr
 the public database mandated by **Neb. Rev. Stat. § 84-602.04**.
 
 This folder contains two things: a scraper, and a static searchable website built from
-what it collects. `index.html` and `data.json` live at the folder root because that root
-is the published URL.
+what it collects. `index.html` lives at the folder root, alongside the `d/<buildId>/`
+directory it reads, because that root is the published URL.
 
 ## Coverage
 
-**295,895 records across 92 entities** — every state agency, board and commission the
+**738,195 records across 92 entities** — every state agency, board and commission the
 database lists (83), plus all nine University of Nebraska and Nebraska State College
-campuses. Both Active and Expired documents.
+campuses. Both Active and Expired documents, contracts and purchase orders.
+**Collection is complete**; the page carries no outstanding-entity warning.
 
 | | Records |
 | --- | ---: |
+| University of Nebraska Medical Center | 238,763 |
 | 70 state agencies with records (13 have none) | 235,169 |
-| University of Nebraska Lincoln | 31,079 |
+| University of Nebraska Lincoln | 209,526 |
+| University of Nebraska Omaha | 28,167 |
 | University of Nebraska Kearney | 18,696 |
-| University of Nebraska Medical Center | 5,382 |
-| Wayne State College | 2,151 |
-| University of Nebraska Omaha | 1,106 |
+| Wayne State College | 5,562 |
 | Chadron State College | 871 |
 | University of Nebraska Central Administration | 821 |
 | Peru State College | 489 |
 | Nebraska State College System | 131 |
 
-Three agencies dominate: Correctional Services (61,783), Health & Human Services
-(60,682) and Roads (39,253) are together about 70% of all state agency records.
+Two campuses now hold 61% of everything, almost all of it purchase orders. On the
+agency side three dominate: Correctional Services (61,783), Health & Human Services
+(60,682) and Roads (39,253) are together about 70% of state agency records.
 
-### Purchase orders are not finished yet
-
-Contracts are complete for all nine campuses, and state agency records are complete for
-all 83. **Higher Education purchase orders are still being collected** — done for
-Chadron, Kearney, Peru, Central Administration and the State College System, and still
-outstanding for UNL (Expired), the Medical Center, Omaha and Wayne State.
-
-That backlog is far larger than it looks: probing the remaining searches found roughly
-442,000 purchase orders outstanding, including ~229,550 for the Medical Center and
-~178,500 for UNL alone. For comparison, the previous version of this dataset recorded
-50 expired UNL purchase orders in total. Collecting the rest is a separate job — at
-~740,000 records the single-payload approach below stops being viable and needs
-splitting first.
-
-The page names the outstanding entities itself, reading the scrapers' checkpoints, so a
-partly-collected entity is never silently indistinguishable from an empty one — and the
-warning disappears on its own once collection finishes.
+The page still names any outstanding entity itself, reading the scrapers' checkpoints,
+so a partly-collected entity is never silently indistinguishable from an empty one.
 
 ## The scraper
 
@@ -94,9 +81,17 @@ Each run stamps its completion time into `data/scrape_meta.json`, keyed by datas
 is where the "Last updated" line on the page comes from. `build_site.py` publishes the
 **oldest** of the stamps — the dataset is only as current as its stalest part.
 
-`View URL` links straight to the scanned document. It is blank for 4.2% of records
-(1,367 of 32,409), where the state has not uploaded a file ("Documents not available
-for immediate viewing").
+`View URL` links straight to the scanned document. It is blank for 6.37% of records
+(47,050 of 738,195), where the state has not uploaded a file ("Documents not available
+for immediate viewing"). `Detail URL` is present on every row.
+
+A long paginated scrape needs one more thing to be correct. The site keeps its results
+in server-side state that expires: after roughly 2,000 pages of continuous paging every
+further page comes back "No results found", which is indistinguishable from the end of
+the data. Reading it as the end once marked UNL purchase orders complete at 144,425 of
+178,573 records, with no error anywhere. The scraper now re-runs the query and returns
+to its position; that fired twice during the Medical Center's 9,186 pages and saved
+about 170,000 records.
 
 ### A note on speed
 
@@ -131,31 +126,80 @@ more than the site wants to give, and the pacing above should come back down.
 `index.html` is a self-contained static site — no build step, no dependencies, no server.
 
 ```bash
-python3 scripts/build_site.py   # data/*.csv -> data.json
+python3 scripts/build_site.py   # data/*.csv -> d/<buildId>/
 python3 scripts/serve_site.py   # preview at http://127.0.0.1:8765
 ```
 
-`build_site.py` normalizes 144 MB of CSV into a 35 MB JSON payload (16 MB gzipped, which
-is what GitHub Pages actually serves — 11% of source). It gets there by exploiting the
-structure of the state's URLs: `DT` is determined by document type, `V` maps 1:1 with
-vendor, and `A`/`D`/`N` vary together across only 98 distinct combinations, so each row
-carries a small index instead of three long tokens. Every URL is round-trip verified
-against the original before the payload is written — 548,516 of them on the current
-dataset — so the compression is lossless.
+`build_site.py` normalizes 362 MB of CSV into a payload split by how the page actually
+uses it. It gets there first by exploiting the structure of the state's URLs: `DT` is
+determined by document type, `V` maps 1:1 with vendor, and `A`/`D`/`N` vary together
+across only 98 distinct combinations, so each row carries a small index instead of three
+long tokens. Every URL is round-trip verified against the original before the payload is
+written — 1,429,340 of them — so the compression is lossless.
 
 That verification is worth keeping honest about: `A`, `D` and `N` each looked
 entity-determined at two-entity scale, and still did across five. At 92 entities the
 rule breaks — twelve agencies carry more than one `N`, and three `N` values span
 agencies. The round-trip check is what caught it rather than shipping broken links.
 
-Client-side cost of the payload, measured in-browser: 0.11s to fetch, 0.63s to parse,
-0.15s to filter and sort all 295,895 rows, ~154 MB heap. The table renders only the
-visible slice, so row count barely affects scrolling.
+### Why the payload is columns and not JSON
+
+One JSON file of all 738,195 rows is ~104 MB, ~49 MB gzipped, and roughly 380 MB of
+heap — minutes to load and an out-of-memory crash on a phone. The same values packed
+column-wise compress about 5x better, because a column of integers is far more
+compressible than the same integers interleaved with JSON punctuation.
+
+So the payload is split by access pattern:
+
+| | gzipped, as Pages serves it |
+| --- | ---: |
+| numeric columns, vendor names, document numbers — **loaded up front** | **6.94 MB** |
+| link tokens — **fetched on demand**, in 361 blocks of 64 KB | 25.45 MB |
+
+The resident half is *smaller than the 16 MB the site used to ship for 40% of the data.*
+Link tokens are needed only for rows someone actually clicks or exports, so they wait.
+
+Two findings shaped this, both verified against the live CDN rather than assumed:
+
+- **Ranged HTTP requests are unusable on GitHub Pages.** A range request that advertises
+  gzip — which browsers always do, and `fetch()` cannot override — is served against the
+  *compressed* representation. Ask for bytes 100–115 and you get 16 bytes of a gzip
+  stream, plus a `Content-Range` denominator that is the compressed length. Deferred data
+  is therefore separate block files, never byte ranges. This probably also explains the
+  unresolved query latency in `prototype-search/`.
+- **Pages does gzip `application/octet-stream`**, so raw binary compresses in transit with
+  no client-side work.
+
+`scripts/ne_format.py` owns the layout and is the only place that knows it. Each file
+holds one item size, so a section's offset is `n * itemsize * index` — no header, no
+offset table, no padding, and the reader checks every file's length against `meta.count`.
+
+Client-side cost, measured in-browser on all 738,195 rows: a keystroke filters in
+**4–21 ms**, a column's first sort takes 56–199 ms and is cached after, and peak heap is
+**~90 MB** — against ~154 MB for the old payload at 40% of the size. Sorting happens once
+per column rather than once per keystroke: the page caches an ordering and filtering
+walks it, so results come out already sorted.
+
+Two things that only appear at this scale, both handled:
+
+- Row ids move on every rebuild, so the shareable `?doc=` link carries document number,
+  agency and type code instead. Document number alone is not unique — 14,633 of them are
+  reused across agencies, covering 29,321 rows.
+- Browsers cap element height at 2^24 px. All 738,195 rows at 33 px is 24.4 million, so
+  the virtual scroller's spacer rows would be truncated and the last third of the table
+  unreachable. Past 15 M px the scroll position is scaled onto the list instead.
+
+Loading `/?selftest=1` checks every column against a CRC recorded at build time and
+rebuilds 1,000 sampled URLs against addresses taken from the source CSVs. Run it against
+the deployed site, not a local server: only a real deployment exercises gzip in transit,
+and CDN behavior produced the one design-changing surprise here.
 
 Publishing needs no configuration: this folder lives in the `diepjustin.github.io`
 user site, which already serves `main` at the repo root, so pushing updates the live
-page. To refresh the data, re-run the scraper, re-run `build_site.py`, then commit
-`data.json` and `data/scrape_meta.json`.
+page. To refresh the data, re-run the scraper, re-run `build_site.py`, then commit the
+new `d/<buildId>/`, `manifest.json` and `data/scrape_meta.json`. `index.html` carries no
+build identity — it reads `manifest.json` with `cache: 'no-store'` — so a reader holding
+a stale copy of the page can never pair it with a different build's data.
 
 ## Data caveats
 
@@ -174,8 +218,8 @@ The scraper reproduces the state's records faithfully, including their errors.
   Higher Education, so on the agency side the distinction is invisible — but it is in the
   records. Ten of the 32 agency document-type codes (`O9`, `OM`, `OP`, `X7`, `Y6`, `Y7`,
   `Z8`, `Z9`, `ZO`, `ZP`) are filed under "Purchase Orders", covering 152,210 records, or
-  about 65% of all agency data. Overall the dataset is 177,301 purchase orders to 118,594
-  contracts.
+  about 65% of all agency data. Overall the dataset is 619,601 purchase orders to 118,594
+  contracts — the reverse of what the interface implies.
 - **Document types are the source system's internal codes**, not labels — `OP`, `O4`,
   `Z4`, `ZP` and 30 others. The state publishes no key. `scripts/type_groups.json` maps
   each to the category its detail page files it under, which is what the page filters on;

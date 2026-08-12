@@ -23,47 +23,47 @@ built by `scripts/build_site.py`. Pushing to `main` publishes.
 agencies, boards and commissions, plus all nine university and state college
 campuses. Sitting in `data/*.csv` (gitignored, 362 MB).
 
-**The live site publishes 295,895 of them** as a single 35 MB `data.json`
-(16 MB gzipped). That is the pre-purchase-order corpus and it works fine.
-
-**In flight:** replacing that payload so the full 738,195 can ship. Three of
-four stages are done:
+**The live site publishes all 738,195**, from build `20260811-215819`. All
+four stages of the payload replacement are done and pushed:
 
 | Stage | Commit | State |
 |---|---|---|
-| 0 — columnar refactor of the builder | `3e1046a` | done, byte-identical output verified |
-| 1+2 — binary payload + widened verify | `ddba1f5` | done, verified from disk |
-| 3 — rewrite the `index.html` data layer | uncommitted | done as `staging/index.html`, verified in a browser |
-| 4 — staged rollout, then promote | — | **not started** |
+| 0 — columnar refactor of the builder | `3e1046a` | byte-identical output verified |
+| 1+2 — binary payload + widened verify | `ddba1f5` | verified from disk |
+| 3 — rewrite the `index.html` data layer | `73a543a` | shipped as `staging/`, verified in a browser |
+| 4 — staged rollout, then promote | `73a543a`, then the promotion commit | live |
 
-Nothing published has changed. The two pushed commits touch only build
-scripts, and Stage 3 landed as a *new* file (`staging/index.html`) rather than
-an edit to the live page.
-
-Stage 3 as built, measured against the real payload on a local server:
+Measured, and re-verified on the CDN after deploying:
 
 | | |
 |---|---|
+| resident payload, gzipped as Pages serves it | **6.94 MB** (was 16 MB for 40% of the data) |
+| deferred link tokens | 25.45 MB, 361 blocks, fetched on click |
 | a keystroke over all 738,195 rows | **4–21 ms** |
 | first sort of a column (cached after) | 56–199 ms; amount, sorted at load, is 4 ms |
-| peak JS heap | **~90 MB** (vs 154 MB today for 40% of the data) |
-| browser self-check `?selftest=1` | 15/15 pass, incl. 1,000 URLs rebuilt in JS matching the scraped CSVs |
+| peak JS heap | **~90 MB** (was ~154 MB for 40% of the data) |
+| `?selftest=1` on the live CDN | 15/15 pass, incl. 1,000 URLs rebuilt in JS matching the scraped CSVs |
 
-`staging/index.html` differs from what will become `index.html` in exactly one
-line: `var BASE = "../"`. Promotion is that line plus a file move.
+Every published file is served `content-encoding: gzip`, checked by hand.
+
+**One cleanup left, deliberately deferred.** `data.json`, `staging/` and any
+prior `d/<buildId>/` are still in the tree. Pages serves `index.html` with
+`max-age=600`, so for ten minutes after the cutover a reader could hold the old
+page — which keeps fetching `data.json` and keeps working. Delete all three in
+a separate commit after a week or so. Nothing depends on them.
 
 ## 3. Guard rails
 
-**`data.json` in the tree is the published file.** It is the 295,895-row
-payload the live site serves right now. `build_site.py` no longer writes it
-(binary is the default; `--emit-json PATH` writes the legacy format
-elsewhere), but do not commit a rebuilt `data.json` before Stage 4 — the
-current `index.html` cannot read the 738k version, and the page and payload
-must land together.
+**`d/<buildId>/` and `manifest.json` are the published payload.** ~50 MB per
+build, and they are committed. `python3 scripts/build_site.py` writes a new
+build directory and repoints `manifest.json` (~3 min, ~1.7 GB peak memory);
+both must be committed together, and the old build directory deleted in a
+later commit, not the same one. Published bytes are ~52 MB per build and
+`.git` is already over 300 MB, so don't rebuild for nothing.
 
-**`d/<buildId>/` and `manifest.json` are generated and uncommitted.** ~50 MB.
-They publish in Stage 4 alongside the new page. Regenerate with
-`python3 scripts/build_site.py` (~4 min, ~1.7 GB peak memory).
+**`data.json` is dead weight kept on purpose.** The 295,895-row payload the
+old page read. It exists only so a reader holding a cached copy of the old
+`index.html` keeps working through the cutover window; see §2.
 
 **Don't re-scrape casually.** A full run is 20+ hours against a government
 server. The CSVs on disk are complete and checkpointed.
@@ -204,17 +204,13 @@ a detail page headed "Contracts". The map overrides that.
 
 ## 8. Known open items
 
-**Next up: Stage 4**, the rollout. Nothing is committed yet. In order:
+**The cutover cleanup**, a week or so after the promotion: delete `data.json`,
+`staging/`, and any superseded `d/<buildId>/`. One commit, no code changes.
+This is the only thing left from the payload work.
 
-1. Commit `d/<buildId>/*` (~50 MB) and `staging/index.html`. Production is
-   untouched; `…/ne-contracts/staging/` starts exercising the real CDN.
-2. On the deployed staging URL — not locally, because local serving cannot
-   reproduce gzip-in-transit, and CDN behavior produced the one
-   design-changing surprise in this project — run `?selftest=1`, and
-   `curl -I` each published file for `content-encoding: gzip`.
-3. Promote: copy `staging/index.html` to `index.html` with `BASE = ""`. One
-   file, one commit; rollback is one `git revert`.
-4. Days later, delete `data.json`, `staging/`, and the prior build directory.
+**Re-run `?selftest=1` after every rebuild**, against the deployed URL rather
+than a local server. It is the only check that covers the JavaScript decoder,
+and only a real deployment exercises gzip in transit.
 
 Keep `data.json` through the cutover. Pages serves `index.html` with
 `max-age=600`, so a reader can hold a ten-minute-stale page; the old page keeps

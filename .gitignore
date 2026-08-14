@@ -23,6 +23,11 @@ data/daily_diff_report.json
 # prototyping.
 data/doc_text.jsonl
 
+# scripts/extract_scope.py's output — derived entirely from the file above and
+# regenerated in seconds, so it travels with it rather than into git. What
+# eventually gets published is a column in the payload, not this.
+data/scope.jsonl
+
 # search.sqlite itself is NOT committed -- only its chunked form is
 # (search.sqlite.NNN + config.json, built by scripts/chunk_search_db.py),
 # since that's what the page actually serves. Keeping both would double

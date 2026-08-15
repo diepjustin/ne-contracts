@@ -65,12 +65,31 @@ STORE_CHARS = 4000
 # scanned pages measured exactly 0.
 MIN_CHARS_PER_PAGE = 50
 
-# Each worker paces its own requests this far apart. These are much heavier
-# than the metadata scraper's detail-page fetches (documents average ~1.8
-# MB), so both the delay and the worker count are more conservative than
-# scrape.py's MAX_WORKERS=15 for lightweight HTML pages.
+# Each worker paces its own requests this far apart.
+#
+# 12 workers is measured, not guessed, and it is worth knowing that the
+# metadata scraper's finding does NOT transfer here. There, 15 -> 20 workers
+# bought identical wall time and only raised latency, because search results
+# live in server-side session state that serializes. This endpoint just serves
+# a PDF blob, and it scales nearly linearly to 12:
+#
+#     workers    rate      vs 4
+#      4 (old)   3.05/s    1.0x     0 errors
+#      8         5.92/s    1.9x     0 errors
+#     12         9.09/s    3.0x     2 errors per 300
+#     16         8.29/s    2.7x     2 errors per 300   <- slower than 12
+#
+# 16 being slower than 12 is the same queuing signature, three times further
+# out. Do not push past 12: it is measurably unproductive, and at ~32,000
+# requests an hour this is already assertive for a public records server.
+#
+# Whether the ceiling is theirs or ours is untested -- pypdf is pure Python,
+# so twelve threads parsing PDFs contend for the interpreter lock, and the
+# flattening may be this machine. If more throughput is ever needed, cut our
+# own CPU first (stop parsing pages past --store-chars) rather than asking
+# the server for more.
 DOWNLOAD_DELAY = 0.5
-MAX_WORKERS = 4
+MAX_WORKERS = 12
 
 # How many documents to have in flight before checkpointing and re-checking
 # the --hours deadline. Bounds memory/queue growth on a 30,000+ item run.
@@ -185,8 +204,9 @@ def extract(session, url):
     return {"status": "text", "pages": pages, "chars": chars, "text": "\n\n".join(texts), **result_extra}
 
 
-def extract_one(dn, tok, view_base, store_chars):
-    time.sleep(DOWNLOAD_DELAY)  # per-worker pacing, so concurrency doesn't remove politeness
+def extract_one(dn, tok, view_base, store_chars, delay=None):
+    # Per-worker pacing, so concurrency doesn't remove politeness.
+    time.sleep(DOWNLOAD_DELAY if delay is None else delay)
     result = extract(worker_session(), view_base + tok)
     result["doc"] = dn
     text = result.get("text")
@@ -265,6 +285,12 @@ def main():
                          help="draw in a fixed random order -- use with --limit, since "
                               "documents sit in entity order and a contiguous slice "
                               "samples one agency rather than the corpus")
+    parser.add_argument("--workers", type=int, default=MAX_WORKERS, metavar="N",
+                         help=f"concurrent fetches (default {MAX_WORKERS}); measure before "
+                              f"raising -- on the metadata scraper more workers bought "
+                              f"nothing and only raised latency")
+    parser.add_argument("--delay", type=float, default=DOWNLOAD_DELAY, metavar="SECONDS",
+                         help=f"per-worker pause between fetches (default {DOWNLOAD_DELAY})")
     args = parser.parse_args()
 
     view_base, targets = load_targets(args.group, entity_filter(args.entities))
@@ -300,7 +326,9 @@ def main():
     processed = 0
     stopped_early = False
 
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+    print(f"pacing: {args.workers} workers, {args.delay}s per-worker delay")
+
+    with ThreadPoolExecutor(max_workers=args.workers) as pool:
         for chunk_start in range(0, len(todo), CHUNK_SIZE):
             if deadline and time.time() >= deadline:
                 print(f"\n{args.hours}h time limit reached after {processed:,} documents this run -- stopping cleanly.")
@@ -308,7 +336,8 @@ def main():
                 break
 
             chunk = todo[chunk_start: chunk_start + CHUNK_SIZE]
-            futures = {pool.submit(extract_one, dn, tok, view_base, args.store_chars): (dn, tok)
+            futures = {pool.submit(extract_one, dn, tok, view_base, args.store_chars,
+                                   args.delay): (dn, tok)
                        for dn, tok in chunk}
 
             new_items = []

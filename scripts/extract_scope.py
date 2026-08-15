@@ -56,17 +56,39 @@ COVER_SHEET = re.compile(
     re.S,
 )
 
-# A purchase-order line: sequence number, quantity, unit, description, unit
-# price, extended price. Anchoring on the two trailing money columns is what
-# makes the description boundary unambiguous.
-#
-# Verified against 7,375 University of Nebraska purchase orders. State agencies
-# use a different form ("State of Nebraska Purchase Order", a Line/Description/
-# Quantity table) that is not yet represented in the captured text -- when that
-# text exists, add its pattern here rather than loosening this one.
-LINE_ITEM = re.compile(
+# Purchase orders come on two different forms and neither pattern matches the
+# other's layout. Anchoring on the trailing money columns is what makes the
+# description boundary unambiguous in both.
+
+# University: zero-padded line number, whole-number quantity, an alphabetic
+# unit code, two-decimal money. The description column is a fixed 40 characters
+# wide, which is where the mid-word truncation comes from.
+UNIVERSITY_ITEM = re.compile(
     r"\b\d{3}\s+\d[\d,]*\s+[A-Z]{2,4}\s+(.{3,120}?)\s+[\d,]+\.\d\d\s+[\d,]+\.\d\d"
 )
+
+# State agencies: plain line number, four-decimal quantity and unit price, and
+# a unit that is often "$" rather than a code. Its description column is not
+# fixed-width, so these run longer than the University's.
+# The 120-character bound is load-bearing, not cosmetic. A handful of documents
+# have a text layer whose column structure has collapsed -- every description
+# runs together and every number lands at the end -- and an unbounded capture
+# happily spans hundreds of characters of that wreckage and calls it one item.
+STATE_ITEM = re.compile(
+    r"(?:^|\s)\d{1,3}\s+(.{3,120}?)\s+[\d,]+\.\d{4}\s+\S{1,4}\s+[\d,]+\.\d{4}\s+[\d,]+\.\d\d"
+)
+
+# The state's table header. Matching from here rather than the whole document
+# keeps the row pattern away from the addresses and boilerplate above it, which
+# carry enough numbers to look like line items.
+STATE_TABLE = "Line Description"
+
+# A state description that outruns the money columns resumes *after* them, so
+# the text between one row and the next belongs to the row before it
+# ("LABOR FOR BUILDING 14'X20'" ... "STORAGE GARAGE"). Only adopt that tail when
+# it is short and carries no digits: anything numeric is the next row starting,
+# not a continuation.
+MAX_CONTINUATION = 80
 
 # Long enough for a paragraph someone genuinely typed, short enough that a
 # runaway capture is obvious rather than shipped. Nine documents in the current
@@ -77,6 +99,25 @@ MAX_DESCRIPTION = 4000
 
 def flatten(s):
     return " ".join(s.split())
+
+
+def current_lines(path):
+    """Line numbers holding the newest entry per document.
+
+    doc_text.jsonl is an append-only log, so a document re-fetched after a bug
+    fix appears more than once and only the last entry counts -- the same rule
+    its own loader applies. Reading the file straight through instead would
+    describe such a document twice, from two different versions of its text.
+
+    Two passes rather than a dict of parsed records: at 691,145 documents the
+    records are gigabytes and the line numbers are megabytes.
+    """
+    newest = {}
+    with open(path, encoding="utf-8") as f:
+        for number, line in enumerate(f):
+            if line.strip():
+                newest[json.loads(line)["tok"]] = number
+    return set(newest.values())
 
 
 def from_cover_sheet(text):
@@ -90,16 +131,51 @@ def from_cover_sheet(text):
     return value or None
 
 
-def from_line_items(text):
-    """Every distinct line-item description, in the order they appear."""
+def dedupe(candidates):
+    """Distinct, in first-seen order. A purchase order repeats identical rows."""
     seen = set()
     items = []
-    for raw in LINE_ITEM.findall(flatten(text)):
-        item = flatten(raw)
+    for candidate in candidates:
+        item = flatten(candidate)
         if item and item not in seen:
             seen.add(item)
             items.append(item)
     return items
+
+
+def university_items(flat):
+    return dedupe(UNIVERSITY_ITEM.findall(flat))
+
+
+def state_items(flat):
+    """Line items off the state's form, each with its wrapped tail reattached."""
+    start = flat.find(STATE_TABLE)
+    if start < 0:
+        return []
+    table = flat[start + len(STATE_TABLE):]
+
+    rows = list(STATE_ITEM.finditer(table))
+    end_of_table = table.find("Total Order")
+    if end_of_table < 0:
+        end_of_table = len(table)
+
+    descriptions = []
+    for i, row in enumerate(rows):
+        # Everything up to the next row -- or the total -- trails this one.
+        stop = rows[i + 1].start() if i + 1 < len(rows) else end_of_table
+        tail = flatten(table[row.end():max(stop, row.end())])
+        description = row.group(1)
+        if tail and len(tail) <= MAX_CONTINUATION and not any(c.isdigit() for c in tail):
+            description += " " + tail
+        descriptions.append(description)
+
+    return dedupe(descriptions)
+
+
+def from_line_items(text):
+    """Every distinct line-item description, in the order they appear."""
+    flat = flatten(text)
+    return university_items(flat) or state_items(flat)
 
 
 def describe(text):
@@ -136,8 +212,14 @@ def main():
     samples = collections.defaultdict(list)
     records = []
 
+    current = current_lines(IN_JSONL)
+    superseded = 0
+
     with open(IN_JSONL, encoding="utf-8") as f:
-        for line in f:
+        for number, line in enumerate(f):
+            if number not in current:
+                superseded += 1
+                continue
             entry = json.loads(line)
             data = entry["data"]
             status[data["status"]] += 1
@@ -196,9 +278,12 @@ def main():
     if found["no description found"]:
         print(f"  {'(none)':<12} {found['no description found']:>7,}   "
               "readable, but neither pattern matched")
+    if superseded:
+        print(f"\n{superseded:,} superseded log entries skipped (documents re-fetched later)")
     if truncated:
         print(f"\n{truncated} description(s) hit the {MAX_DESCRIPTION}-char cap — "
-              "likely a cover-sheet layout this script does not close correctly")
+              "either a document with very many line items, or a layout whose end "
+              "this script fails to find. Read them before trusting them.")
 
     print(f"\nwritten to {args.out}")
     print("read some: python3 scripts/extract_scope.py --sample 20")

@@ -235,12 +235,49 @@ blind normalization.
 above for a likely cause. Do not extend it to the new corpus before that is
 understood.
 
-**"Scope of work" column** was requested by another reporter. The state exposes
-no such field anywhere, so it can only come from inside the PDFs: ~47% are
-scanned images needing OCR that doesn't exist yet, and turning contract text
-into a one-line scope realistically needs an LLM pass over 150,000+ documents.
-Feasible but the largest remaining project; a narrow single-agency pilot would
-prove the summaries before committing.
+**"Scope of work" column** was requested by another reporter, and it is mostly
+not the AI project it was written up as. The state publishes no such field, so
+it has to come from inside the PDFs — but most documents already contain one,
+written by whoever filed them, and `scripts/extract_scope.py` lifts it verbatim.
+Nothing is generated; every string is the state's own words, which is what makes
+it quotable.
+
+The earlier estimate here ("~47% are scanned … an LLM pass over 150,000+
+documents") came from a contracts-only sample and does not describe the corpus,
+which is 84% purchase orders. Measured instead:
+
+| | text layer | description parses |
+|---|---|---|
+| University purchase orders | 98.4% | 100% |
+| State agency purchase orders | 68% of the 81% that exist at all | 97% |
+| University contracts | 38.7% | 34% (those with a P2P cover sheet) |
+
+The two forms need two patterns and always will: the University's has a
+40-character fixed-width description column, the state's has none but wraps the
+text past the money columns, so a row's continuation is the text between it and
+the next row. Both are in `extract_scope.py`; do not try to unify them.
+
+**19% of state agency documents do not exist** — the state's own viewer has no
+file. No method reaches those rows, ever.
+
+Where an LLM would earn its place is the residue: ~6,000 readable contracts on a
+plain Standard Agreement template with no summary field. Around $30–100 through
+the Batch API, and clearly labelled as machine-written if it ships, because it
+is the one part that would not be the state's words.
+
+Remaining work is a ~3-day paced download of the other 660,000 documents
+(`scripts/extract_text.py`, resumable), then a delivery decision: descriptions
+for every row are ~30 MB against a 6.94 MB resident payload, so they either load
+on demand — viewable but **not searchable** — or the page gets several times
+heavier. Searching them is most of their value to a reporter, so that trade-off
+is the real design question, not the extraction.
+
+**Coverage will be uneven and readers cannot see why.** Excellent for University
+contracts, terse for purchase orders, absent for scans and for documents the
+state never published. A blank cell reads as "this contract has no description"
+when it means "we could not read the PDF" — the same honesty problem
+`meta.incomplete` solves for agency coverage, and it needs the same kind of
+answer on the page.
 
 ## 9. Daily automation
 

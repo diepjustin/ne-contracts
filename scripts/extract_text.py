@@ -1,10 +1,20 @@
-"""Pull text out of the University of Nebraska contract/PO documents that are
-born-digital PDFs.
+"""Pull text out of the published documents that are born-digital PDFs.
 
-A manual sample of 8 documents found ~40% have a real text layer and ~60%
-are scanned images with none -- pypdf.extract_text() returns 0 characters
-for the latter. This script only handles the text-native half; the scanned
-half needs OCR, which is a separate (much heavier) job.
+How much of the corpus that covers depends entirely on the document type,
+and the difference is large enough to plan around. Measured across the
+31,042 documents captured so far:
+
+    purchase orders   98.4% have a text layer
+    contracts         38.7%
+
+An early 8-document sample suggested ~40% overall and that number is still
+quoted in places; it was drawn from contracts alone and is badly wrong for
+the corpus as a whole, which is 84% purchase orders. The scanned remainder
+needs OCR, which is a separate and much heavier job.
+
+What is worth reading these for is the description -- the state publishes
+no such field, but most documents contain one written by whoever filed
+them. See scripts/extract_scope.py, which parses whatever this collects.
 
 Each document's PDF is fetched and parsed in memory -- never written to
 disk, since the full corpus is tens of gigabytes and we only want to keep
@@ -23,12 +33,16 @@ document processed twice (e.g. after a bug fix) just keeps its last entry.
 """
 
 import argparse
+import base64
 import json
 import os
+import random
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from io import BytesIO
+from urllib.parse import quote
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -36,8 +50,14 @@ from urllib3.util.retry import Retry
 from pypdf import PdfReader
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DATA_JSON = os.path.join(ROOT, "data.json")
 OUT_JSONL = os.path.join(ROOT, "data", "doc_text.jsonl")
+
+# How much of each document's text to keep. The descriptions this feeds live
+# on the first page, and keeping every document whole does not scale: the
+# 31,042 captured so far are already 408 MB, which extrapolates to roughly
+# 9 GB across all 691,145. A prefix keeps re-parsing possible -- improve a
+# pattern, re-run extract_scope.py, no re-downloading -- without that.
+STORE_CHARS = 4000
 
 # Below this average characters-per-page, treat the PDF as a scan with no
 # text layer rather than real (if sparse) text. Measured empirically: real
@@ -165,11 +185,64 @@ def extract(session, url):
     return {"status": "text", "pages": pages, "chars": chars, "text": "\n\n".join(texts), **result_extra}
 
 
-def extract_one(dn, tok, view_base):
+def extract_one(dn, tok, view_base, store_chars):
     time.sleep(DOWNLOAD_DELAY)  # per-worker pacing, so concurrency doesn't remove politeness
     result = extract(worker_session(), view_base + tok)
     result["doc"] = dn
+    text = result.get("text")
+    if text is not None and store_chars and len(text) > store_chars:
+        # `chars` still reports the whole document -- only what we keep is cut,
+        # and `clipped` says so, so a prefix is never mistaken for the full text.
+        result["text"] = text[:store_chars]
+        result["clipped"] = True
     return tok, result
+
+
+def load_targets(group=None, entities=None):
+    """(view_base, [(document number, view token), ...]) for documents with a file.
+
+    Reads the published payload via manifest.json. It used to read data.json,
+    which is the 295,895-row corpus this project outgrew -- so it could not see
+    the 442,300 records scraped since, which is nearly every purchase order and
+    every state agency document. Anything reading data.json is reading history.
+
+    `group` filters to "Contract" or "Purchase Order"; `entities` to a set of
+    entity names. Both matter because the document types differ so much: a
+    purchase order is a one-page form that almost always has a text layer, a
+    contract is a scanned agreement six times out of ten.
+    """
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import ne_format  # noqa: E402
+
+    with open(os.path.join(ROOT, "manifest.json"), encoding="utf-8") as f:
+        outdir = os.path.join(ROOT, json.load(f)["dir"])
+
+    columns, docs, _vendors, _vtokens, meta = ne_format.read_payload(outdir)
+    _dn, view = ne_format.read_token_blocks(outdir, meta["count"])
+
+    targets = []
+    for i in range(meta["count"]):
+        if not columns["viewPresent"][i]:
+            continue  # the state has no file to serve for this row
+        if group is not None and meta["typeGroups"][columns["type"][i]] != group:
+            continue
+        if entities is not None and meta["entities"][columns["entity"][i]] not in entities:
+            continue
+        # Tokens are stored decoded; the URL wants them as the scrape found them.
+        token = quote(base64.b64encode(view[i]).decode(), safe="")
+        targets.append((docs[i].decode("utf-8"), token))
+
+    return meta["viewBase"], targets
+
+
+def entity_filter(which):
+    """The set of entity names for --entities, or None for all 92."""
+    if which == "all":
+        return None
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from scrape import HIGHER_ED_ENTITIES, STATE_ENTITIES  # noqa: E402
+
+    return set(STATE_ENTITIES if which == "state" else HIGHER_ED_ENTITIES)
 
 
 def main():
@@ -181,28 +254,45 @@ def main():
                               "(for running the full corpus in bounded, resumable chunks)")
     parser.add_argument("--status", action="store_true",
                          help="print progress counts and exit -- no network calls")
+    parser.add_argument("--group", choices=("Contract", "Purchase Order"), default=None,
+                         help="only this document category (they behave very differently)")
+    parser.add_argument("--entities", choices=("all", "state", "higher-ed"), default="all",
+                         help="only these entities (default: all 92)")
+    parser.add_argument("--store-chars", type=int, default=STORE_CHARS, metavar="N",
+                         help=f"keep only the first N characters of each document, "
+                              f"0 for all of it (default {STORE_CHARS})")
+    parser.add_argument("--shuffle", action="store_true",
+                         help="draw in a fixed random order -- use with --limit, since "
+                              "documents sit in entity order and a contiguous slice "
+                              "samples one agency rather than the corpus")
     args = parser.parse_args()
 
-    with open(DATA_JSON, encoding="utf-8") as f:
-        D = json.load(f)
-
-    view_base = D["url"]["viewBase"]
-    targets = [(row[0], row[9]) for row in D["rows"] if row[9]]  # (doc_number, view token)
+    view_base, targets = load_targets(args.group, entity_filter(args.entities))
 
     store = load_checkpoint()
     todo = [(dn, tok) for dn, tok in targets if tok not in store]
+    # Against the selected targets, not the whole checkpoint: with a --group or
+    # --entities filter those differ, and reporting the checkpoint total would
+    # claim work was done on documents this run has not looked at.
+    done = len(targets) - len(todo)
 
     if args.status:
         print(f"TOTAL={len(targets)}")
-        print(f"DONE={len(store)}")
+        print(f"DONE={done}")
         print(f"REMAINING={len(todo)}")
         return
 
-    print(f"{len(targets):,} documents have a view link, {len(store):,} already processed, {len(todo):,} remaining")
+    print(f"{len(targets):,} documents have a view link, {done:,} already processed, {len(todo):,} remaining")
+
+    if args.shuffle:
+        # Seeded, so a re-run picks up where the last one left off instead of
+        # re-drawing a fresh sample and re-fetching documents already held.
+        random.Random(20260814).shuffle(todo)
 
     if args.limit is not None:
         todo = todo[: args.limit]
-        print(f"limiting this run to {len(todo):,} new documents")
+        print(f"limiting this run to {len(todo):,} new documents"
+              + (" (random order)" if args.shuffle else ""))
 
     counts = {"text": 0, "scanned": 0, "unavailable": 0, "error": 0}
     start = time.time()
@@ -218,7 +308,8 @@ def main():
                 break
 
             chunk = todo[chunk_start: chunk_start + CHUNK_SIZE]
-            futures = {pool.submit(extract_one, dn, tok, view_base): (dn, tok) for dn, tok in chunk}
+            futures = {pool.submit(extract_one, dn, tok, view_base, args.store_chars): (dn, tok)
+                       for dn, tok in chunk}
 
             new_items = []
             for future in as_completed(futures):

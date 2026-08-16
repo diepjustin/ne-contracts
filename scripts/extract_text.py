@@ -291,12 +291,21 @@ def main():
                               f"nothing and only raised latency")
     parser.add_argument("--delay", type=float, default=DOWNLOAD_DELAY, metavar="SECONDS",
                          help=f"per-worker pause between fetches (default {DOWNLOAD_DELAY})")
+    parser.add_argument("--retry-errors", action="store_true",
+                         help="also re-fetch documents whose last attempt errored; without "
+                              "this they count as done and are skipped forever")
     args = parser.parse_args()
 
     view_base, targets = load_targets(args.group, entity_filter(args.entities))
 
     store = load_checkpoint()
-    todo = [(dn, tok) for dn, tok in targets if tok not in store]
+    # A recorded error counts as done, which is right for a resumable run and
+    # wrong forever after: network blips and malformed PDFs would never be
+    # retried. "unavailable" is deliberately not included -- the state has no
+    # file to serve for those, and re-asking will not change that.
+    todo = [(dn, tok) for dn, tok in targets
+            if tok not in store
+            or (args.retry_errors and store[tok].get("status") == "error")]
     # Against the selected targets, not the whole checkpoint: with a --group or
     # --entities filter those differ, and reporting the checkpoint total would
     # claim work was done on documents this run has not looked at.

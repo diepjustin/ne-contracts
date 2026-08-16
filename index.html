@@ -64,6 +64,12 @@
   }
   input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
   #q { min-width: 260px; }
+  .check {
+    display: flex; align-items: center; gap: 5px; font-size: 13px;
+    padding: 7px 0; white-space: nowrap; cursor: pointer; color: var(--text);
+  }
+  .check input { width: auto; padding: 0; margin: 0; }
+  .check.busy { color: var(--muted); cursor: progress; }
   .num { width: 108px; }
   .yr  { width: 78px; }
   button {
@@ -164,6 +170,10 @@
   <div class="field">
     <label for="q">Search vendor or document #</label>
     <input id="q" type="search" placeholder="e.g. amazon, fisher scientific, 4800185035" autocomplete="off">
+  </div>
+  <div class="field">
+    <label for="indesc">Also search</label>
+    <label class="check"><input type="checkbox" id="indesc"> descriptions</label>
   </div>
   <div class="field">
     <label for="type">Type</label>
@@ -289,7 +299,7 @@
   var view = [];
   // Default to largest-first: it is the most useful landing view, and it avoids
   // opening on the handful of typo dates in the state's own records (e.g. year 2223).
-  var sortKey = 2, sortDir = -1, term = "";
+  var sortKey = 2, sortDir = -1, term = "", searchDesc = false;
 
   var $ = function (id) { return document.getElementById(id); };
   var scroller = $("scroller"), tbody = $("rows");
@@ -623,11 +633,14 @@
 
     // Vendors are deduped, so match the 59.9k vendor names once rather than
     // the 738k rows — then membership is a cheap integer lookup per row.
-    var vhit = null, dq = null;
+    var vhit = null, dq = null, dhit = null;
     if (q) {
       vhit = new Uint8Array(vendors.length);
       for (i = 0; i < vlow.length; i++) if (vlow[i].indexOf(q) >= 0) vhit[i] = 1;
       dq = docQuery(q);
+      // Widens the query rather than replacing it: a row matches on vendor,
+      // document number, OR description.
+      if (searchDesc && words) dhit = descMatches(q);
     }
 
     // Same trick for the type filter: many codes share one category, so decide
@@ -654,7 +667,8 @@
       if (d1 && begin[j] && begin[j] > d1) continue;
       if (hasMn && amount[j] < mn) continue;
       if (hasMx && amount[j] > mx) continue;
-      if (q && !vhit[vendorIdx[j]] && !(dq && docHas(j, dq))) continue;
+      if (q && !vhit[vendorIdx[j]] && !(dq && docHas(j, dq)) &&
+          !(dhit && dhit.has(j))) continue;
       out[count++] = j;
     }
 
@@ -809,6 +823,99 @@
       if (!lengths[i]) return "";
       return new TextDecoder().decode(u8.subarray(at, at + lengths[i]));
     });
+  }
+
+  // ---------------------------------------------------- description search
+
+  // The index is 8.6 MB gzipped -- larger than the entire rest of the page --
+  // so it is not part of loading the site. It arrives the first time a reader
+  // actually asks to search descriptions, and readers who never do never pay
+  // for it. Once here it stays for the session.
+  var indexLoad = null, words = null, postings = null;
+
+  function loadIndex() {
+    if (indexLoad) return indexLoad;
+    var box = $("indesc").parentNode;
+    box.classList.add("busy");
+    indexLoad = Promise.all([
+      fetch(BASE + dir + "words.bin").then(ok).then(function (r) { return r.text(); }),
+      fetch(BASE + dir + "postings.bin").then(ok).then(function (r) { return r.arrayBuffer(); })
+    ]).then(function (got) {
+      words = got[0].split("\n");
+      postings = decodePostings(new Uint8Array(got[1]), words.length);
+      need(meta.wordCount === undefined || words.length === meta.wordCount,
+           "words.bin holds " + words.length + " words, meta says " + meta.wordCount);
+      box.classList.remove("busy");
+    }, function (e) {
+      box.classList.remove("busy");
+      indexLoad = null;   // a failed fetch must not be cached as the answer
+      throw e;
+    });
+    return indexLoad;
+  }
+
+  // One pass, start to finish: for each word in order, a count then that many
+  // varint deltas. Row ids are rebuilt by running the deltas back up.
+  function decodePostings(bytes, count) {
+    var at = 0;
+    function take() {
+      var value = 0, shift = 0, byte;
+      do {
+        byte = bytes[at++];
+        value |= (byte & 0x7F) << shift;
+        shift += 7;
+      } while (byte & 0x80);
+      return value;
+    }
+    var out = new Array(count);
+    for (var w = 0; w < count; w++) {
+      var rows = new Int32Array(take()), previous = 0;
+      for (var i = 0; i < rows.length; i++) {
+        previous += take();
+        rows[i] = previous;
+      }
+      out[w] = rows;
+    }
+    need(at === bytes.length, "postings.bin has " + (bytes.length - at) + " bytes spare");
+    return out;
+  }
+
+  // First word at or after `term`. The list is sorted, which is what makes both
+  // an exact hit and a prefix run findable without scanning 267,000 entries.
+  function firstAtOrAfter(term) {
+    var lo = 0, hi = words.length;
+    while (lo < hi) {
+      var mid = (lo + hi) >> 1;
+      if (words[mid] < term) lo = mid + 1; else hi = mid;
+    }
+    return lo;
+  }
+
+  // Rows whose description contains this term as a word, or as the start of
+  // one -- "asbest" finds "asbestos". Substring matching mid-word is not
+  // offered: it is not what the index can answer, and pretending otherwise
+  // would silently return less than the reader expects.
+  function rowsMatching(term) {
+    var hit = new Set();
+    for (var i = firstAtOrAfter(term); i < words.length; i++) {
+      if (words[i].lastIndexOf(term, 0) !== 0) break;   // startsWith
+      var rows = postings[i];
+      for (var k = 0; k < rows.length; k++) hit.add(rows[k]);
+    }
+    return hit;
+  }
+
+  // Every term must match, so a two-word query narrows rather than widens.
+  function descMatches(query) {
+    var terms = query.split(/[^a-z0-9]+/).filter(function (t) { return t.length >= 2; });
+    if (!terms.length) return null;
+    var hit = rowsMatching(terms[0]);
+    for (var i = 1; i < terms.length && hit.size; i++) {
+      var next = rowsMatching(terms[i]), both = new Set();
+      hit.forEach(function (row) { if (next.has(row)) both.add(row); });
+      hit = both;
+    }
+    return hit;
   }
 
   function loadVtok() {
@@ -1230,11 +1337,23 @@
     ["type", "status", "entity"].forEach(function (id) {
       $(id).addEventListener("change", apply);
     });
+    $("indesc").addEventListener("change", function () {
+      searchDesc = $("indesc").checked;
+      if (!searchDesc) { apply(); return; }
+      // Nothing to search until the index is here, so wait for it before
+      // re-filtering -- otherwise the first tick silently finds nothing.
+      loadIndex().then(apply, function (e) {
+        $("indesc").checked = searchDesc = false;
+        $("count").textContent = "Could not load the description index — " + e.message;
+      });
+    });
     $("csv").addEventListener("click", exportPermalinks);
     $("csv-src").addEventListener("click", exportWithSources);
     $("reset").addEventListener("click", function () {
       ["q", "y0", "y1", "min", "max"].forEach(function (id) { $(id).value = ""; });
       ["type", "status", "entity"].forEach(function (id) { $(id).value = ""; });
+      $("indesc").checked = false;
+      searchDesc = false;
       apply();
     });
 

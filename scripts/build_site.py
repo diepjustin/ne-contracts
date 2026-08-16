@@ -52,6 +52,7 @@ DATA = {
     "state": os.path.join(ROOT, "data", "state_agencies.csv"),
 }
 SCRAPE_META = os.path.join(ROOT, "data", "scrape_meta.json")
+SCOPE_JSONL = os.path.join(ROOT, "data", "scope.jsonl")
 OUT_DIR = ROOT
 OUT_JSON = os.path.join(OUT_DIR, "data.json")
 
@@ -188,7 +189,14 @@ def main():
     parser = argparse.ArgumentParser(description="Build the published payload from the scraped CSVs.")
     parser.add_argument("--emit-json", metavar="PATH", default=None,
                         help="write the legacy single-file JSON payload here instead of data.json")
+    parser.add_argument("--descriptions-only", action="store_true",
+                        help="attach description blocks to the build manifest.json points at, "
+                             "without rebuilding it (needs data/scope.jsonl, not the CSVs)")
     args = parser.parse_args()
+
+    if args.descriptions_only:
+        add_descriptions_to_build()
+        return
 
     for path in DATA.values():
         if not os.path.exists(path):
@@ -405,14 +413,19 @@ def main():
     meta["digests"][ne_format.VENDORS] = zlib.crc32(
         bytes(len(v) for v in vendor_names) + b"".join(vendor_names))
 
+    descriptions = load_descriptions(view_tokens)
+    meta["descCount"] = len(descriptions)
+    meta["descBytes"] = sum(len(d) for d in descriptions.values())
+
     ne_format.write_payload(outdir, columns, docs, vendor_names, vtok_bytes, meta)
     ne_format.write_token_blocks(outdir, dn_bytes, view_bytes, n)
+    ne_format.write_desc_blocks(outdir, descriptions, n)
     write_selftest(outdir, sources, columns["viewPresent"], n)
     with open(os.path.join(OUT_DIR, "manifest.json"), "w", encoding="utf-8") as f:
         json.dump({"buildId": build_id, "dir": f"d/{build_id}"}, f)
 
     verify_payload(outdir, columns, docs, vendor_names, vtok_bytes,
-                   dn_tokens, view_tokens, sources)
+                   dn_tokens, view_tokens, sources, descriptions)
 
     resident = sum(os.path.getsize(os.path.join(outdir, p)) for p in
                    (ne_format.META, ne_format.COLS_I32, ne_format.COLS_F64,
@@ -420,13 +433,96 @@ def main():
     tok = sum(os.path.getsize(ne_format.block_path(outdir, b))
               for b in range(ne_format.block_count(n))) + os.path.getsize(
                   os.path.join(outdir, ne_format.VTOK))
+    desc = sum(os.path.getsize(ne_format.desc_path(outdir, b))
+               for b in range(ne_format.block_count(n)))
     print(f"rows          : {n:,}")
     print(f"vendors       : {len(vendors):,}")
     print(f"source CSVs   : {orig / 1e6:6.2f} MB")
     print(f"resident      : {resident / 1e6:6.2f} MB raw  (loaded up front)")
     print(f"deferred      : {tok / 1e6:6.2f} MB raw in {ne_format.block_count(n):,} blocks "
           f"(fetched on click)")
+    print(f"descriptions  : {desc / 1e6:6.2f} MB raw in {ne_format.block_count(n):,} blocks "
+          f"({meta['descCount']:,} rows have one)")
     print(f"written to    : {outdir}")
+
+
+def add_descriptions_to_build():
+    """Write description blocks into the build manifest.json already points at.
+
+    Descriptions are purely additive -- new files, two new meta keys, and not
+    one byte of any resident file -- so they can be attached to a payload that
+    is already built, verified and live, instead of rebuilding it. That is not
+    just a shortcut: it keeps the resident data byte-identical to what the
+    browser selftest already passed on the CDN, and it means adding them costs
+    no re-parse of 362 MB of CSV and no re-scrape.
+
+    Everything needed is in the payload itself. Rows are keyed to
+    scope.jsonl by view token, which is reconstructed from the token blocks
+    exactly as extract_text.py addressed it when fetching the document.
+    """
+    with open(os.path.join(OUT_DIR, "manifest.json"), encoding="utf-8") as f:
+        outdir = os.path.join(OUT_DIR, json.load(f)["dir"])
+    print(f"attaching descriptions to {outdir}")
+
+    columns, docs, _vendors, _vtok, meta = ne_format.read_payload(outdir)
+    n = meta["count"]
+    _dn, view = ne_format.read_token_blocks(outdir, n)
+
+    view_tokens = ["" for _ in range(n)]
+    for i in range(n):
+        if columns["viewPresent"][i]:
+            view_tokens[i] = quote(base64.b64encode(view[i]).decode(), safe="")
+
+    descriptions = load_descriptions(view_tokens)
+    if not descriptions:
+        sys.exit(f"nothing to attach — {SCOPE_JSONL} is missing or matched no rows")
+
+    ne_format.write_desc_blocks(outdir, descriptions, n)
+    verify_descriptions(outdir, descriptions, n)
+
+    meta["descCount"] = len(descriptions)
+    meta["descBytes"] = sum(len(d) for d in descriptions.values())
+    with open(os.path.join(outdir, ne_format.META), "w", encoding="utf-8") as f:
+        json.dump(meta, f, separators=(",", ":"), sort_keys=True)
+
+    size = sum(os.path.getsize(ne_format.desc_path(outdir, b))
+               for b in range(ne_format.block_count(n)))
+    print(f"descriptions  : {size / 1e6:6.2f} MB raw in {ne_format.block_count(n):,} blocks "
+          f"({meta['descCount']:,} of {n:,} rows)")
+    print("resident files untouched — a page that has not been taught about "
+          "descriptions reads this build exactly as before")
+
+
+def load_descriptions(view_tokens):
+    """Row -> description bytes, keyed off each row's view token.
+
+    scripts/extract_scope.py records the token it was fetched under, which is
+    the same string the scrape found in the View URL -- an exact key, unlike
+    document numbers, which repeat across document types. Rows the state
+    publishes no file for simply have no entry.
+
+    Optional: the descriptions come from a 20-hour document collection that
+    nobody should have to run to build a payload. Without the file the build
+    is exactly what it was before.
+    """
+    if not os.path.exists(SCOPE_JSONL):
+        print(f"note: no {SCOPE_JSONL} — building without descriptions")
+        return {}
+
+    row_of = {token: i for i, token in enumerate(view_tokens) if token}
+    descriptions, unmatched = {}, 0
+    with open(SCOPE_JSONL, encoding="utf-8") as f:
+        for line in f:
+            record = json.loads(line)
+            row = row_of.get(record["tok"])
+            if row is None:
+                unmatched += 1
+                continue
+            descriptions[row] = record["description"].encode("utf-8")
+
+    print(f"descriptions  : {len(descriptions):,} joined to rows"
+          + (f", {unmatched:,} unmatched" if unmatched else ""))
+    return descriptions
 
 
 SELFTEST_ROWS = 1000
@@ -494,8 +590,27 @@ def verify_urls(url, vtok, rows, sources, sample_out=None):
     return checked
 
 
+def verify_descriptions(outdir, descriptions, n):
+    """Decode the description blocks and prove they carry the same text.
+
+    Same rule as everything else here: read it back from disk rather than
+    trusting the writer, so a wrong length header or a block boundary
+    off by one fails now instead of showing the wrong contract's words
+    next to a $38 million row.
+    """
+    decoded = ne_format.read_desc_blocks(outdir, n)
+    for row in range(n):
+        want = descriptions.get(row, b"")
+        if decoded[row] != want:
+            sys.exit(f"row {row}: description round trip failed\n"
+                     f"  wrote {want[:80]!r}\n  read  {decoded[row][:80]!r}")
+    present = sum(1 for d in decoded if d)
+    print(f"descriptions round-trip verified: {present:,} rows across "
+          f"{ne_format.block_count(n):,} blocks")
+
+
 def verify_payload(outdir, columns, docs, vendor_names, vtok_bytes,
-                   dn_tokens, view_tokens, sources):
+                   dn_tokens, view_tokens, sources, descriptions=None):
     """Decode the written files and prove they carry exactly the same data.
 
     Reads from disk rather than from the objects just built, so an encoder bug
@@ -518,6 +633,9 @@ def verify_payload(outdir, columns, docs, vendor_names, vtok_bytes,
         sys.exit("vendor names do not survive the round trip")
     if dec_vtok != vtok_bytes:
         sys.exit("vendor tokens do not survive the round trip")
+
+    if descriptions is not None:
+        verify_descriptions(outdir, descriptions, n)
 
     dec_dn, dec_view = ne_format.read_token_blocks(outdir, n)
     exceptions = dec_meta["dnExceptions"]

@@ -64,6 +64,7 @@ VENDORS = "vendors.bin"
 VTOK = "vtok.bin"
 SELFTEST = "selftest.json"
 TOK_DIR = "tok"
+DESC_DIR = "desc"
 
 # What the page loads before it can render anything, in the order it needs them.
 RESIDENT = (COLS_I32, COLS_F64, COLS_U8, DOCS, VENDORS)
@@ -79,6 +80,10 @@ _TYPECODE = {4: "i", 8: "d", 1: "B"}
 
 def block_path(outdir, block):
     return os.path.join(outdir, TOK_DIR, f"{block:05d}.bin")
+
+
+def desc_path(outdir, block):
+    return os.path.join(outdir, DESC_DIR, f"{block:05d}.bin")
 
 
 def block_count(n):
@@ -157,6 +162,60 @@ def write_token_blocks(outdir, dn, view, n):
                 f.write(dn[i][:TOKEN_BYTES] if dn[i] else blank)
             for i in range(lo, hi):
                 f.write(view[i] if view[i] else blank)
+
+
+# Descriptions the state itself wrote into each document (see
+# scripts/extract_scope.py). They are 39 MB of text -- more than five times the
+# whole resident payload -- so they can never be loaded up front, and they are
+# deliberately kept out of every resident file: a page that has not been taught
+# about them reads the build exactly as before, which is why FORMAT_VERSION
+# does not move.
+#
+# Blocked on the same BLOCK_ROWS boundary as the tokens, so one row's block
+# number is its block number everywhere. Each block is self-describing -- a u16
+# length per row, then the packed UTF-8 -- so nothing resident has to say which
+# rows have a description. Zero length means none, which is also what a row the
+# state published no readable file for gets.
+DESC_LENGTH = "H"  # u16; extract_scope caps a description far below 65535
+
+
+def write_desc_blocks(outdir, descriptions, n):
+    """Write one block per BLOCK_ROWS rows. `descriptions` maps row -> bytes."""
+    os.makedirs(os.path.join(outdir, DESC_DIR), exist_ok=True)
+    for b in range(block_count(n)):
+        lo = b * BLOCK_ROWS
+        hi = min(lo + BLOCK_ROWS, n)
+        chunk = [descriptions.get(i, b"") for i in range(lo, hi)]
+        for text in chunk:
+            if len(text) > 65535:
+                raise ValueError(f"a description is {len(text)} bytes; the length is a u16")
+        lengths = array.array(DESC_LENGTH, [len(text) for text in chunk])
+        with open(desc_path(outdir, b), "wb") as f:
+            f.write(lengths.tobytes())
+            for text in chunk:
+                f.write(text)
+
+
+def read_desc_blocks(outdir, n):
+    """Every row's description bytes, reassembled from the blocks."""
+    out = [b""] * n
+    for b in range(block_count(n)):
+        lo = b * BLOCK_ROWS
+        hi = min(lo + BLOCK_ROWS, n)
+        rows = hi - lo
+        data = open(desc_path(outdir, b), "rb").read()
+        header = rows * 2
+        if len(data) < header:
+            raise ValueError(f"description block {b}: {len(data)} bytes, header alone is {header}")
+        lengths = array.array(DESC_LENGTH)
+        lengths.frombytes(data[:header])
+        pos = header
+        for i, length in enumerate(lengths):
+            out[lo + i] = data[pos:pos + length]
+            pos += length
+        if pos != len(data):
+            raise ValueError(f"description block {b}: {len(data) - pos} bytes past the last row")
+    return out
 
 
 def _read_columns(path, names, itemsize, n):

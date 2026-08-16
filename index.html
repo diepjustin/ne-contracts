@@ -80,7 +80,27 @@
   .status b { color: var(--text); }
   #exp button { padding: 1px 8px; font-size: 12px; font-weight: 500; margin-left: 8px; }
 
+  /* Fixed height on purpose. The table below is virtualised on the assumption
+     that every row is exactly ROW_H tall, so the description cannot expand a
+     row without breaking the scroll arithmetic -- it lives out here instead. */
+  #detail {
+    padding: 10px 20px; border-bottom: 1px solid var(--border);
+    background: var(--panel); height: 92px; overflow-y: auto; font-size: 13.5px;
+  }
+  #detail .who { color: var(--muted); font-size: 12px; margin-bottom: 3px; }
+  #detail .who b { color: var(--text); font-variant-numeric: tabular-nums; }
+  #detail .words { white-space: pre-wrap; }
+  #detail .none { color: var(--muted); font-style: italic; }
+  #detail button {
+    float: right; padding: 0 7px; font-size: 12px; font-weight: 500; color: var(--muted);
+  }
+  tbody tr[data-row] { cursor: pointer; }
+  tbody tr.picked { background: var(--accent-soft); }
+
   #scroller { overflow: auto; height: calc(100vh - 218px); }
+  /* The scroller's height is hand-computed against everything above it, so the
+     detail strip has to be subtracted too or the page overflows by its height. */
+  body.has-detail #scroller { height: calc(100vh - 218px - 92px); }
   table { border-collapse: collapse; width: 100%; font-size: 13.5px; }
   thead th {
     position: sticky; top: 0; background: var(--panel); z-index: 2;
@@ -120,6 +140,7 @@
   @media (max-width: 720px) {
     .hide-sm { display: none; }
     #scroller { height: calc(100vh - 300px); }
+    body.has-detail #scroller { height: calc(100vh - 300px - 92px); }
   }
 </style>
 </head>
@@ -190,6 +211,8 @@
   <span id="count">Loading data…</span>
   <span id="exp" hidden><span id="exp-text"></span><button id="exp-cancel" type="button">Cancel</button></span>
 </div>
+
+<div id="detail" hidden></div>
 
 <div id="load">
   <div id="load-text">Loading…</div>
@@ -676,7 +699,7 @@
 
     for (var i = start; i < end; i++) {
       var id = view[i], t = typeCol[id];
-      html += "<tr>" +
+      html += '<tr data-row="' + id + '"' + (id === picked ? ' class="picked"' : '') + ">" +
         '<td class="doc"><a data-row="' + id + '" href="' + esc(permalink(id)) +
           '" target="_blank" rel="noopener">' + highlight(docStr(id)) + "</a></td>" +
         '<td class="hide-sm" title="' + esc(meta.types[t]) + '">' +
@@ -737,6 +760,48 @@
       if (old !== b) delete blocks[old];
     }
     return p;
+  }
+
+  // ------------------------------------------------------------ descriptions
+
+  // The state publishes no description field; these are lifted verbatim out of
+  // the document each row links to (scripts/extract_scope.py). 40 MB of text
+  // across all rows -- six times the whole resident payload -- so it is fetched
+  // one block at a time for the row a reader actually opens, and never
+  // truncated or normalised on the way to the screen.
+  var descBlocks = {}, descAge = [];
+
+  function getDescBlock(b) {
+    if (descBlocks[b]) return descBlocks[b];
+    var name = ("0000" + b).slice(-5);
+    var p = fetch(BASE + dir + "desc/" + name + ".bin").then(ok)
+      .then(function (r) { return r.arrayBuffer(); })
+      .then(function (ab) { return new Uint8Array(ab); });
+    p["catch"](function () { delete descBlocks[b]; });
+    descBlocks[b] = p;
+    descAge.push(b);
+    while (descAge.length > BLOCK_CACHE) {
+      var old = descAge.shift();
+      if (old !== b) delete descBlocks[old];
+    }
+    return p;
+  }
+
+  // Each block is self-describing: a u16 length per row, then the packed UTF-8.
+  // Nothing resident records which rows have one, so a zero length is the
+  // answer rather than something to look up first.
+  function descFor(id) {
+    var b = blockOf(id), rows = blockRows(b), i = id - b * meta.blockSize;
+    return getDescBlock(b).then(function (u8) {
+      var header = rows * 2;
+      need(u8.length >= header, "description block " + b + " is " + u8.length +
+           " bytes; its header alone is " + header);
+      var lengths = new Uint16Array(u8.buffer, u8.byteOffset, rows);
+      var at = header;
+      for (var k = 0; k < i; k++) at += lengths[k];
+      if (!lengths[i]) return "";
+      return new TextDecoder().decode(u8.subarray(at, at + lengths[i]));
+    });
   }
 
   function loadVtok() {
@@ -803,6 +868,73 @@
 
   function anchorFor(ev) {
     return ev.target && ev.target.closest ? ev.target.closest("a[data-row]") : null;
+  }
+
+  var picked = -1;
+
+  function closeDetail() {
+    picked = -1;
+    $("detail").hidden = true;
+    document.body.classList.remove("has-detail");
+    render();   // the scroller just grew back; refill the rows that gap exposed
+    var was = tbody.querySelector("tr.picked");
+    if (was) was.classList.remove("picked");
+  }
+
+  // An empty description is not the same fact as an absent one, and a reader
+  // cannot tell them apart from a blank space. Say which it is: the state
+  // published no document at all, or it published one we could not read
+  // (a scan, almost always). Neither means the contract has no scope.
+  function whyBlank(id) {
+    if (!viewPresent[id]) return "The state publishes no document for this record.";
+    return "No description could be read from this document — it is most likely " +
+           "a scanned image rather than text. That is a limit of the file the " +
+           "state published, not a statement about the contract.";
+  }
+
+  function showDetail(id) {
+    picked = id;
+    var el = $("detail"), t = typeCol[id];
+    var first = el.hidden;
+    el.hidden = false;
+    document.body.classList.add("has-detail");
+    if (first) render();   // the scroller just shrank; drop the rows now off-screen
+    el.innerHTML =
+      '<button type="button" id="detail-close">Close</button>' +
+      '<div class="who"><b>' + esc(docStr(id)) + "</b> · " +
+      esc(vendors[vendorIdx[id]]) + " · " + esc(meta.entities[entityCol[id]]) +
+      " · " + esc(shortType(meta.typeGroups[t])) + "</div>" +
+      '<div class="words" id="detail-words">Loading…</div>';
+    $("detail-close").addEventListener("click", closeDetail);
+
+    descFor(id).then(function (text) {
+      if (picked !== id) return;   // reader moved on before this landed
+      var words = $("detail-words");
+      if (text) {
+        words.textContent = text;
+      } else {
+        words.className = "words none";
+        words.textContent = whyBlank(id);
+      }
+    }, function (e) {
+      if (picked !== id) return;
+      $("detail-words").textContent = "Could not load the description — " + e.message;
+    });
+  }
+
+  function armDetail() {
+    tbody.addEventListener("click", function (ev) {
+      if (anchorFor(ev)) return;   // the document link keeps its own behaviour
+      var tr = ev.target.closest && ev.target.closest("tr[data-row]");
+      if (!tr) return;
+      var was = tbody.querySelector("tr.picked");
+      if (was) was.classList.remove("picked");
+      tr.classList.add("picked");
+      showDetail(+tr.dataset.row);
+    });
+    document.addEventListener("keydown", function (ev) {
+      if (ev.key === "Escape" && picked >= 0) closeDetail();
+    });
   }
 
   function armLinks() {
@@ -1101,6 +1233,7 @@
     scroller.addEventListener("scroll", render, { passive: true });
     window.addEventListener("resize", render);
     armLinks();
+    armDetail();
 
     document.querySelectorAll("thead th").forEach(function (th) {
       th.addEventListener("click", function () {

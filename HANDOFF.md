@@ -310,24 +310,35 @@ prefix-restore + a new key per save), with the oldest entries pruned via
 **This means a fresh clone's first workflow run has no cache to restore and
 will fail** — `load_known_active()` returns `None` and `scrape.py --daily`
 refuses to run rather than treat a missing baseline as "nothing was ever
-active." Bootstrap it once: temporarily commit the existing `data/*.csv` to
-`main` (comment out the `data/*.csv` line in `.gitignore` for that commit
-only), run `ne-contracts-seed-cache.yml` via `workflow_dispatch` **on main**
-with no `artifact_run_id` so the checkout itself supplies the CSVs, then
-revert both commits. Every run after that restores from the seeded cache
-normally.
+active." Bootstrap it once:
 
-**Seed from `main`, never from a side branch.** GitHub scopes each cache to
-the ref that saved it and shares it only with that ref or the default branch,
-so a cache seeded on a short-lived branch is invisible to the nightly run and
-is orphaned outright once the branch is deleted. An earlier version of this
-section recommended exactly that, and it took the nightly job down for two
+1. Commit the existing `data/*.csv` to a short-lived branch, commenting out
+   the `data/*.csv` line in `.gitignore` for that commit only. Use a branch,
+   not `main` — these are ~346 MB and a revert would not remove the objects
+   from history; deleting an unmerged branch lets them be collected.
+2. Dispatch `ne-contracts-rescue-cache.yml` **on that branch**. It notices the
+   checkout already carries the CSVs, skips its restore, and republishes
+   `data/` as an artifact.
+3. Dispatch `ne-contracts-seed-cache.yml` **on `main`**, passing that run's ID
+   as `artifact_run_id`. This is the step that must run from `main` — see
+   below.
+4. Delete the branch.
+
+Every run after that restores from the seeded cache normally.
+
+**Step 3 must run from `main`.** GitHub scopes each cache to the ref that
+saved it and shares it only with that ref or the default branch, so a cache
+*saved* on a short-lived branch is invisible to the nightly run and is
+orphaned outright once the branch is deleted. Staging the CSVs on a branch is
+fine — that is step 1 — but the `cache/save` has to happen on `main`, which is
+why the artifact hop in steps 2–3 exists. An earlier version of this section
+had the whole thing on the branch, and it took the nightly job down for two
 days in Aug 2026 with `refusing --daily: data/nu_contracts.csv does not
 exist` — the seed was intact the whole time, just permanently out of scope.
-`ne-contracts-rescue-cache.yml` exists to recover from that: re-create the
-branch by name (scope matches on the ref string), dispatch it on that branch
-to republish `data/` as an artifact, then feed that run's ID to
-`ne-contracts-seed-cache.yml` on `main`.
+Recovering from that is the same artifact hop: re-create the branch by name
+(cache scope matches on the ref string, so the orphaned cache comes back into
+view), dispatch `ne-contracts-rescue-cache.yml` on it, then feed that run's ID
+to `ne-contracts-seed-cache.yml` on `main`.
 
 **Never let an empty `data/` reach the cache.** Restore matches on the
 `ne-contracts-data-` prefix and takes the *newest* hit, so a single cache

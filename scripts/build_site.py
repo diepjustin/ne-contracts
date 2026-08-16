@@ -167,6 +167,28 @@ def scraped_at():
     return oldest.isoformat(timespec="seconds")
 
 
+def find_permalink_collision(docs, entity_column, type_column):
+    """(first row, second row, triple) for the first repeat, or None.
+
+    The shareable link is ?doc=&agency=&type=, and it only identifies a record
+    because that triple is unique. Row ids would be shorter, but they move on
+    every rebuild -- a row-id permalink silently points at a different contract
+    after the next scrape. Document number alone is not enough either: 14,633
+    of them are reused across agencies, covering 29,321 rows.
+
+    Uniqueness held when checked by hand across 738,195 rows. Nothing else
+    re-checks it, and the failure mode is not an error but a link that quietly
+    resolves to the wrong record -- so check it every build.
+    """
+    seen = {}
+    for row in range(len(docs)):
+        triple = (docs[row], entity_column[row], type_column[row])
+        if triple in seen:
+            return seen[triple], row, triple
+        seen[triple] = row
+    return None
+
+
 def build_rows(columns, docs, dn_tokens, view_tokens):
     """The legacy 11-field row list, rebuilt from the columns.
 
@@ -318,6 +340,15 @@ def main():
     for name, size in (("entity", len(ENTITIES)), ("type", len(types)), ("adnIdx", len(adn))):
         if size > 255:
             sys.exit(f"{name} dictionary has {size} entries — the column is a u8; widen it")
+
+    collision = find_permalink_collision(docs, columns["entity"], columns["type"])
+    if collision:
+        first, second, (doc, entity_idx, type_idx) = collision
+        sys.exit(
+            f"permalink collision: rows {first} and {second} share "
+            f"(doc={doc.decode()}, agency={ENTITIES[entity_idx]}, type={types[type_idx]}). "
+            "?doc= can no longer identify a record — add a disambiguator before publishing."
+        )
 
     scraped = scraped_at()
     if not scraped:

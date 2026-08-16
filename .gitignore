@@ -28,12 +28,11 @@ data/doc_text.jsonl
 # eventually gets published is a column in the payload, not this.
 data/scope.jsonl
 
-# search.sqlite itself is NOT committed -- only its chunked form is
-# (search.sqlite.NNN + config.json, built by scripts/chunk_search_db.py),
-# since that's what the page actually serves. Keeping both would double
-# ~527 MB of published data for no benefit. Regenerable from
-# data/doc_text.jsonl if the chunks ever need rebuilding.
-prototype-search/search.sqlite
+# prototype-search/ was retired in Aug 2026 (see HANDOFF.md section 8) -- the
+# chunked index is no longer published. search.sqlite stays ignored because the
+# local copy is still on disk and regenerable from data/doc_text.jsonl, and it
+# must never be committed: it is 503 MB.
+prototype-search/
 
 # Python
 venv/

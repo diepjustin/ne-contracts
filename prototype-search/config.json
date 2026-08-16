@@ -1,8 +1,0 @@
-{
-  "serverMode": "chunked",
-  "requestChunkSize": 1024,
-  "databaseLengthBytes": 527126528,
-  "serverChunkSize": 10485760,
-  "urlPrefix": "search.sqlite.",
-  "suffixLength": 3
-}

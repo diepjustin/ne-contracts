@@ -196,7 +196,7 @@ Two findings shaped this, both verified against the live CDN rather than assumed
   *compressed* representation. Ask for bytes 100–115 and you get 16 bytes of a gzip
   stream, plus a `Content-Range` denominator that is the compressed length. Deferred data
   is therefore separate block files, never byte ranges. This probably also explains the
-  unresolved query latency in `prototype-search/`.
+  unresolved query latency in the retired `prototype-search/` prototype.
 - **Pages does gzip `application/octet-stream`**, so raw binary compresses in transit with
   no client-side work.
 

@@ -577,7 +577,7 @@
       // The column stores a type code, the cell shows the category, and
       // meta.types is in the order the scrape happened to meet each code --
       // so ordering by the stored index sorts by none of what is on screen.
-      r = rankOf(meta.typeGroups.map(function (g, i) { return g + " " + meta.types[i]; }));
+      r = rankOf(meta.typeGroups.map(function (g, i) { return g + "\u0000" + meta.types[i]; }));
       return function (a, b) { return r[typeCol[a]] - r[typeCol[b]] || a - b; };
     }
     return docCmp;

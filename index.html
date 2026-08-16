@@ -94,7 +94,7 @@
   #detail button {
     float: right; padding: 0 7px; font-size: 12px; font-weight: 500; color: var(--muted);
   }
-  tbody tr[data-row] { cursor: pointer; }
+  body.has-descriptions tbody tr[data-row] { cursor: pointer; }
   tbody tr.picked { background: var(--accent-soft); }
 
   #scroller { overflow: auto; height: calc(100vh - 218px); }
@@ -512,6 +512,9 @@
     }
     need(p === blob.length, VENDORS + " has " + (blob.length - p) + " bytes past the last name");
 
+    hasDesc = (meta.descCount || 0) > 0;
+    document.body.classList.toggle("has-descriptions", hasDesc);
+
     viewBuf = new Int32Array(N);
     view = viewBuf.subarray(0, 0);
   }
@@ -769,6 +772,10 @@
   // across all rows -- six times the whole resident payload -- so it is fetched
   // one block at a time for the row a reader actually opens, and never
   // truncated or normalised on the way to the screen.
+  // Not every build carries them: the weekly rebuild in CI has no scope.jsonl,
+  // and a build that predates the feature has no desc/ at all. meta.descCount
+  // is how the page tells, rather than discovering it as a 404 per click.
+  var hasDesc = false;
   var descBlocks = {}, descAge = [];
 
   function getDescBlock(b) {
@@ -924,6 +931,7 @@
 
   function armDetail() {
     tbody.addEventListener("click", function (ev) {
+      if (!hasDesc) return;        // this build carries no descriptions
       if (anchorFor(ev)) return;   // the document link keeps its own behaviour
       var tr = ev.target.closest && ev.target.closest("tr[data-row]");
       if (!tr) return;

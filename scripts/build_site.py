@@ -473,7 +473,7 @@ def add_descriptions_to_build():
         if columns["viewPresent"][i]:
             view_tokens[i] = quote(base64.b64encode(view[i]).decode(), safe="")
 
-    descriptions = load_descriptions(view_tokens)
+    descriptions = load_descriptions(view_tokens, carry=False)
     if not descriptions:
         sys.exit(f"nothing to attach — {SCOPE_JSONL} is missing or matched no rows")
 
@@ -493,7 +493,58 @@ def add_descriptions_to_build():
           "descriptions reads this build exactly as before")
 
 
-def load_descriptions(view_tokens):
+def carry_descriptions_forward(view_tokens):
+    """Row -> description bytes, recovered from the build being replaced.
+
+    Descriptions come from a 20-hour document collection whose inputs
+    (data/doc_text.jsonl, 1.3 GB) will never live in CI, so the weekly rebuild
+    has no way to regenerate them. Without this it would publish a build with
+    no descriptions at all and the feature would silently disappear every
+    Sunday.
+
+    They survive because they are keyed by view token, not by row: the token is
+    the state's own identifier for a document and is stable across rebuilds,
+    while row numbers are not -- a week of --daily scraping inserts records and
+    shifts every row after them. So read the previous build's tokens and
+    descriptions together, and re-key onto whatever rows this build has.
+
+    Records added since the last extraction simply have none, which is honest:
+    nobody has read their document yet.
+    """
+    manifest = os.path.join(OUT_DIR, "manifest.json")
+    if not os.path.exists(manifest):
+        return {}
+    with open(manifest, encoding="utf-8") as f:
+        previous = os.path.join(OUT_DIR, json.load(f)["dir"])
+    if not os.path.isdir(previous):
+        return {}
+
+    columns, _docs, _vendors, _vtok, meta = ne_format.read_payload(previous)
+    if not meta.get("descCount"):
+        return {}
+
+    count = meta["count"]
+    _dn, view = ne_format.read_token_blocks(previous, count)
+    previous_desc = ne_format.read_desc_blocks(previous, count)
+
+    by_token = {}
+    for i in range(count):
+        if columns["viewPresent"][i] and previous_desc[i]:
+            by_token[quote(base64.b64encode(view[i]).decode(), safe="")] = previous_desc[i]
+
+    carried = {}
+    for row, token in enumerate(view_tokens):
+        text = by_token.get(token) if token else None
+        if text:
+            carried[row] = text
+
+    print(f"descriptions  : {len(carried):,} carried forward from {os.path.basename(previous)}"
+          + (f", {len(by_token) - len(carried):,} dropped (rows gone)"
+             if len(by_token) > len(carried) else ""))
+    return carried
+
+
+def load_descriptions(view_tokens, carry=True):
     """Row -> description bytes, keyed off each row's view token.
 
     scripts/extract_scope.py records the token it was fetched under, which is
@@ -505,12 +556,20 @@ def load_descriptions(view_tokens):
     nobody should have to run to build a payload. Without the file the build
     is exactly what it was before.
     """
+    # The previous build is the floor, so a rebuild never loses descriptions it
+    # was already publishing. A local scope.jsonl then overlays it, which is
+    # strictly newer: it covers every document extracted so far, including any
+    # collected since that build was made.
+    descriptions = carry_descriptions_forward(view_tokens) if carry else {}
+
     if not os.path.exists(SCOPE_JSONL):
-        print(f"note: no {SCOPE_JSONL} — building without descriptions")
-        return {}
+        if not descriptions:
+            print(f"note: no {SCOPE_JSONL} and nothing to carry forward — "
+                  "building without descriptions")
+        return descriptions
 
     row_of = {token: i for i, token in enumerate(view_tokens) if token}
-    descriptions, unmatched = {}, 0
+    added, unmatched = 0, 0
     with open(SCOPE_JSONL, encoding="utf-8") as f:
         for line in f:
             record = json.loads(line)
@@ -518,9 +577,12 @@ def load_descriptions(view_tokens):
             if row is None:
                 unmatched += 1
                 continue
+            if row not in descriptions:
+                added += 1
             descriptions[row] = record["description"].encode("utf-8")
 
     print(f"descriptions  : {len(descriptions):,} joined to rows"
+          + (f", {added:,} new since the last build" if added else "")
           + (f", {unmatched:,} unmatched" if unmatched else ""))
     return descriptions
 

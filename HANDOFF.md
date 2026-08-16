@@ -61,6 +61,16 @@ both must be committed together, and the old build directory deleted in a
 later commit, not the same one. Published bytes are ~52 MB per build and
 `.git` is already over 300 MB, so don't rebuild for nothing.
 
+The nightly workflow does both phases: it commits the new build and manifest
+together, then retires every build older than the previous one in a *separate*
+follow-up commit, so the build a cached reader's manifest still points at stays
+fetchable. It kept only phase one until Aug 2026, which would have added ~50 MB
+and 369 files to a `.git` already past 400 MB every single week, forever.
+
+`workflow_dispatch` takes a **`dry_run`** input that runs the whole publish leg
+— drift check, `build_site.py`, guard rail — and stops before the commit. Use
+it to check the publish path without spending a build's worth of payload.
+
 **`data.json` is dead weight kept on purpose.** The 295,895-row payload the
 old page read. It exists only so a reader holding a cached copy of the old
 `index.html` keeps working through the cutover window; see §2.

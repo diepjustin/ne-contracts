@@ -282,10 +282,16 @@ answer on the page.
 ## 9. Daily automation
 
 `.github/workflows/ne-contracts-daily.yml` scrapes all three datasets with
-`--daily` every night (10pm Central, DST-resolved at runtime via
-`TZ=America/Chicago date +%H` rather than hardcoded UTC offsets — GitHub
-Actions cron has no DST awareness, so two cron entries fire daily and the
-gate step no-ops whichever one doesn't land on hour 22). On Sundays only, it
+`--daily` every night (10pm Central; GitHub Actions cron has no DST
+awareness, so two cron entries fire daily and the gate step compares
+`github.event.schedule` against the entry implied by the current
+`TZ=America/Chicago date +%z` offset, letting exactly one through). Note it
+gates on *which entry fired*, not on the wall clock: GitHub's scheduler
+routinely runs 30–90 minutes late, and the original hour-equals-22 check
+silently skipped entire nights when both entries drifted past 22 — reporting
+success while scraping nothing. For the same reason the weekday is rolled
+back a day when a run lands before noon Central, so a delayed Sunday-night
+run still reaches the publish leg. On Sundays only, it
 additionally runs `check_entity_drift.py` → `build_site.py` →
 `check_daily_diff.py` → commit + push, in that order, so any one of those
 failing blocks the publish and fails the workflow, which triggers GitHub's
@@ -305,12 +311,32 @@ prefix-restore + a new key per save), with the oldest entries pruned via
 will fail** — `load_known_active()` returns `None` and `scrape.py --daily`
 refuses to run rather than treat a missing baseline as "nothing was ever
 active." Bootstrap it once: temporarily commit the existing `data/*.csv` to
-a short-lived branch (comment out the `data/*.csv` line in `.gitignore` for
-that commit only), trigger the workflow via `workflow_dispatch` on that
-branch so the checkout itself supplies the CSVs and the run's "Save data/
-cache" step seeds the real cache from them, then delete the branch and
-revert the `.gitignore` change. Every run after that restores from the seeded
-cache normally.
+`main` (comment out the `data/*.csv` line in `.gitignore` for that commit
+only), run `ne-contracts-seed-cache.yml` via `workflow_dispatch` **on main**
+with no `artifact_run_id` so the checkout itself supplies the CSVs, then
+revert both commits. Every run after that restores from the seeded cache
+normally.
+
+**Seed from `main`, never from a side branch.** GitHub scopes each cache to
+the ref that saved it and shares it only with that ref or the default branch,
+so a cache seeded on a short-lived branch is invisible to the nightly run and
+is orphaned outright once the branch is deleted. An earlier version of this
+section recommended exactly that, and it took the nightly job down for two
+days in Aug 2026 with `refusing --daily: data/nu_contracts.csv does not
+exist` — the seed was intact the whole time, just permanently out of scope.
+`ne-contracts-rescue-cache.yml` exists to recover from that: re-create the
+branch by name (scope matches on the ref string), dispatch it on that branch
+to republish `data/` as an artifact, then feed that run's ID to
+`ne-contracts-seed-cache.yml` on `main`.
+
+**Never let an empty `data/` reach the cache.** Restore matches on the
+`ne-contracts-data-` prefix and takes the *newest* hit, so a single cache
+saved from an empty directory shadows the good one on every subsequent run
+and the failure feeds itself — which is how two days of outage became
+self-sustaining above. The "Check data/ is worth caching" step gates both the
+save and the prune on CSVs actually being present, and the prune is deliberately
+downstream of a *successful* save so a run that banked nothing can never age
+out the baseline it failed to replace.
 
 **Guard rail thresholds** (`scripts/check_daily_diff.py`): an entity fails
 the week if more than 50% of its previously-Active records flipped to

@@ -48,6 +48,7 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from pypdf import PdfReader
+from pdfminer.high_level import extract_text as pdfminer_text
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT_JSONL = os.path.join(ROOT, "data", "doc_text.jsonl")
@@ -181,7 +182,7 @@ def extract(session, url):
         reader = PdfReader(BytesIO(resp.content))
         page_count = len(reader.pages)
     except Exception as e:
-        return {"status": "error", "detail": str(e)[:200]}
+        return with_pdfminer(resp.content, e)
 
     texts = []
     failed_pages = 0
@@ -196,12 +197,44 @@ def extract(session, url):
     chars = sum(len(t) for t in texts)
     avg = chars / max(pages, 1)
 
+    # Every page raising is not a scan, it is a parse failure wearing a scan's
+    # clothes -- and "scanned" is not an error, so it would never be retried.
+    if failed_pages and failed_pages == pages:
+        return with_pdfminer(resp.content, f"pypdf failed on all {pages} pages")
+
     result_extra = {"failed_pages": failed_pages} if failed_pages else {}
 
     if avg < MIN_CHARS_PER_PAGE:
         return {"status": "scanned", "pages": pages, "chars": chars, **result_extra}
 
     return {"status": "text", "pages": pages, "chars": chars, "text": "\n\n".join(texts), **result_extra}
+
+
+def with_pdfminer(content, pypdf_error):
+    """Second opinion on a PDF pypdf could not read.
+
+    pypdf is strict about structure and gives up on documents that render
+    perfectly well: 3,181 of the corpus's failures are a single "Invalid object
+    in /Pages". pdfminer reconstructs more and opened 12 of 12 of those in a
+    sample, so it is worth the second attempt before calling a document lost.
+
+    Only reached when pypdf has already failed, so nothing that currently works
+    changes path. The original pypdf error is kept in the record -- if this ever
+    needs debugging, "which parser, failing how" is the question.
+    """
+    try:
+        text = pdfminer_text(BytesIO(content))
+    except Exception as e:
+        return {"status": "error",
+                "detail": f"pypdf: {str(pypdf_error)[:90]} | pdfminer: {str(e)[:90]}"}
+
+    # pdfminer separates pages with a form feed, so the count comes free.
+    pages = text.count("\f") or 1
+    chars = len(text)
+    if chars / pages < MIN_CHARS_PER_PAGE:
+        return {"status": "scanned", "pages": pages, "chars": chars, "parser": "pdfminer"}
+    return {"status": "text", "pages": pages, "chars": chars, "text": text,
+            "parser": "pdfminer"}
 
 
 def extract_one(dn, tok, view_base, store_chars, delay=None):

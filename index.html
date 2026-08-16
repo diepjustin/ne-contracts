@@ -212,17 +212,23 @@
     <button id="csv-src" title="Same, but with each document's own address on the state's site — needs an extra download">Export + source links</button>
   </div>
   <div class="field">
+    <label for="baddates">Data quality</label>
+    <label class="check"><input type="checkbox" id="baddates"> ends before it begins</label>
+  </div>
+  <div class="field">
     <label>&nbsp;</label>
     <button id="reset">Reset</button>
   </div>
 </div>
+
+<div class="gap-note" id="amounts" hidden></div>
 
 <div class="status" id="status-bar">
   <span id="count">Loading data…</span>
   <span id="exp" hidden><span id="exp-text"></span><button id="exp-cancel" type="button">Cancel</button></span>
 </div>
 
-<div id="detail" hidden></div>
+<div id="detail" role="region" aria-live="polite" aria-label="Document description" hidden></div>
 
 <div id="load">
   <div id="load-text">Loading…</div>
@@ -651,6 +657,12 @@
       for (i = 0; i < meta.typeGroups.length; i++) if (meta.typeGroups[i] === ti) thit[i] = 1;
     }
 
+    // A record whose end date precedes its begin date cannot be right. Document
+    // 41780 begins 09/28/2223 and ends 09/28/2023 -- the state's own typo. The
+    // class was documented in README.md and findable nowhere; this makes it a
+    // filter. Rows missing either date are not claimed to be wrong.
+    var onlyBadDates = $("baddates").checked;
+
     var sIdx = si === "" ? -1 : +si, eIdx = ei === "" ? -1 : +ei;
     var d0 = isNaN(y0) ? 0 : y0 * 10000;
     var d1 = isNaN(y1) ? 0 : y1 * 10000 + 9999;
@@ -663,6 +675,7 @@
       if (thit && !thit[typeCol[j]]) continue;
       if (sIdx >= 0 && statusCol[j] !== sIdx) continue;
       if (eIdx >= 0 && entityCol[j] !== eIdx) continue;
+      if (onlyBadDates && !(begin[j] && end[j] && begin[j] > end[j])) continue;
       if (d0 && begin[j] && begin[j] < d0) continue;
       if (d1 && begin[j] && begin[j] > d1) continue;
       if (hasMn && amount[j] < mn) continue;
@@ -675,6 +688,25 @@
     view = out.subarray(0, count);
     render();
     summarize();
+    showAmountNote();
+  }
+
+  // The default view is Amount descending, so the very first thing every reader
+  // sees is a $38 billion row -- with nothing to say it is a not-to-exceed
+  // ceiling on a multi-year programme rather than money the state spent. That
+  // caveat lived only in README.md, where readers do not go. Show it exactly
+  // when that sort is active, and not otherwise.
+  function showAmountNote() {
+    var el = $("amounts");
+    var relevant = sortKey === 2 && sortDir < 0;
+    if (!relevant) { el.hidden = true; return; }
+    el.innerHTML =
+      "<b>Largest amounts first.</b> The biggest figures here are mostly " +
+      "not-to-exceed ceilings on multi-year, statewide programmes rather than " +
+      "money paid out — the state values a service contract at the estimated " +
+      "cost of the whole contract including renewals. Treat the top of this " +
+      "column as ceilings, and check the document before quoting one.";
+    el.hidden = false;
   }
 
   function summarize() {
@@ -716,7 +748,9 @@
 
     for (var i = start; i < end; i++) {
       var id = view[i], t = typeCol[id];
-      html += '<tr data-row="' + id + '"' + (id === picked ? ' class="picked"' : '') + ">" +
+      html += '<tr data-row="' + id + '"' + (id === picked ? ' class="picked"' : '') +
+        (hasDesc ? ' tabindex="0" role="button" aria-expanded="' +
+                   (id === picked ? 'true' : 'false') + '"' : '') + ">" +
         '<td class="doc"><a data-row="' + id + '" href="' + esc(permalink(id)) +
           '" target="_blank" rel="noopener">' + highlight(docStr(id)) + "</a></td>" +
         '<td class="hide-sm" title="' + esc(meta.types[t]) + '">' +
@@ -987,10 +1021,19 @@
   var picked = -1;
 
   function closeDetail() {
+    var was = tbody.querySelector("tr.picked");
+    var wasRow = was && was.dataset.row;
     picked = -1;
     $("detail").hidden = true;
     document.body.classList.remove("has-detail");
     render();   // the scroller just grew back; refill the rows that gap exposed
+    // Send focus back where it came from. render() has just replaced the row
+    // element, so re-find it -- without this a keyboard reader is dropped at
+    // the top of the document with no idea where they were.
+    if (wasRow) {
+      var again = tbody.querySelector('tr[data-row="' + wasRow + '"]');
+      if (again) again.focus();
+    }
     var was = tbody.querySelector("tr.picked");
     if (was) was.classList.remove("picked");
   }
@@ -1036,17 +1079,36 @@
     });
   }
 
+  function openRow(tr) {
+    var was = tbody.querySelector("tr.picked");
+    if (was) {
+      was.classList.remove("picked");
+      was.setAttribute("aria-expanded", "false");
+    }
+    tr.classList.add("picked");
+    tr.setAttribute("aria-expanded", "true");
+    showDetail(+tr.dataset.row);
+  }
+
   function armDetail() {
     tbody.addEventListener("click", function (ev) {
       if (!hasDesc) return;        // this build carries no descriptions
       if (anchorFor(ev)) return;   // the document link keeps its own behaviour
       var tr = ev.target.closest && ev.target.closest("tr[data-row]");
-      if (!tr) return;
-      var was = tbody.querySelector("tr.picked");
-      if (was) was.classList.remove("picked");
-      tr.classList.add("picked");
-      showDetail(+tr.dataset.row);
+      if (tr) openRow(tr);
     });
+
+    // A click handler on a <tr> is invisible to anyone not using a mouse. The
+    // rows carry role/tabindex so they are reachable and announced; this makes
+    // the two keys that role promises actually work.
+    tbody.addEventListener("keydown", function (ev) {
+      if (!hasDesc || ev.key !== "Enter" && ev.key !== " ") return;
+      var tr = ev.target.closest && ev.target.closest("tr[data-row]");
+      if (!tr || anchorFor(ev)) return;   // Enter on the link still follows it
+      ev.preventDefault();                // Space would otherwise scroll
+      openRow(tr);
+    });
+
     document.addEventListener("keydown", function (ev) {
       if (ev.key === "Escape" && picked >= 0) closeDetail();
     });
@@ -1334,7 +1396,7 @@
     ["q", "y0", "y1", "min", "max"].forEach(function (id) {
       $(id).addEventListener("input", debounced);
     });
-    ["type", "status", "entity"].forEach(function (id) {
+    ["type", "status", "entity", "baddates"].forEach(function (id) {
       $(id).addEventListener("change", apply);
     });
     $("indesc").addEventListener("change", function () {
@@ -1353,6 +1415,7 @@
       ["q", "y0", "y1", "min", "max"].forEach(function (id) { $(id).value = ""; });
       ["type", "status", "entity"].forEach(function (id) { $(id).value = ""; });
       $("indesc").checked = false;
+      $("baddates").checked = false;
       searchDesc = false;
       apply();
     });

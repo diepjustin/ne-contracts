@@ -84,11 +84,15 @@ MIN_CHARS_PER_PAGE = 50
 # out. Do not push past 12: it is measurably unproductive, and at ~32,000
 # requests an hour this is already assertive for a public records server.
 #
-# Whether the ceiling is theirs or ours is untested -- pypdf is pure Python,
-# so twelve threads parsing PDFs contend for the interpreter lock, and the
-# flattening may be this machine. If more throughput is ever needed, cut our
-# own CPU first (stop parsing pages past --store-chars) rather than asking
-# the server for more.
+# The ceiling turned out to be ours, not theirs, and contracts proved it:
+# 10-page documents ran at 1.90/s where 1-page purchase orders did 8.1/s, on
+# identical pacing. Twelve threads in pure-Python pypdf contend for the
+# interpreter lock, so the work -- not the network -- was the limit.
+#
+# Not parsing pages whose text --store-chars will discard took that to 7.46/s,
+# a 3.9x gain the server cannot even observe. That is the order to look for
+# throughput in: cut our own work first, and only then consider asking a public
+# records site for more.
 DOWNLOAD_DELAY = 0.5
 MAX_WORKERS = 12
 
@@ -146,7 +150,7 @@ def append_checkpoint(new_items):
         f.flush()
 
 
-def extract(session, url):
+def extract(session, url, store_chars=STORE_CHARS):
     """Fetch one document and classify it. Returns a result dict.
 
     Pages are extracted individually and a page that raises (pypdf chokes on
@@ -182,27 +186,48 @@ def extract(session, url):
         reader = PdfReader(BytesIO(resp.content))
         page_count = len(reader.pages)
     except Exception as e:
-        return with_pdfminer(resp.content, e)
+        return with_pdfminer(resp.content, e, store_chars)
 
+    # Stop once there is more text than --store-chars will keep. A contract
+    # averages 9.9 pages and we keep the first ~1.7, so parsing the rest is
+    # thrown away immediately -- and pypdf is pure Python, so on a 12-thread run
+    # that wasted work is the actual ceiling: contracts managed 1.90/s where
+    # purchase orders did 8.1/s. Cheaper for us and identical for the server,
+    # which is the right order to look for throughput.
+    #
+    # The cutoff can only fire once `chars` has passed the limit, which means
+    # text has already been found -- so a scan, whose pages yield nothing, is
+    # never cut short and never misclassified by it.
     texts = []
     failed_pages = 0
+    parsed_pages = 0
+    chars = 0
     for p in reader.pages:
+        parsed_pages += 1
         try:
-            texts.append(p.extract_text() or "")
+            text = p.extract_text() or ""
         except Exception:
-            texts.append("")
+            text = ""
             failed_pages += 1
+        texts.append(text)
+        chars += len(text)
+        if store_chars and chars >= store_chars:
+            break
 
     pages = page_count
-    chars = sum(len(t) for t in texts)
-    avg = chars / max(pages, 1)
+    # Averaged over the pages actually read, not the whole document: dividing
+    # text from two pages by ten pages' worth would read as a scan.
+    avg = chars / max(parsed_pages, 1)
 
     # Every page raising is not a scan, it is a parse failure wearing a scan's
     # clothes -- and "scanned" is not an error, so it would never be retried.
     if failed_pages and failed_pages == pages:
-        return with_pdfminer(resp.content, f"pypdf failed on all {pages} pages")
+        return with_pdfminer(resp.content, f"pypdf failed on all {pages} pages", store_chars)
 
     result_extra = {"failed_pages": failed_pages} if failed_pages else {}
+    if parsed_pages < pages:
+        # `chars` counts only what was read; `pages` is still the real total.
+        result_extra["parsed_pages"] = parsed_pages
 
     if avg < MIN_CHARS_PER_PAGE:
         return {"status": "scanned", "pages": pages, "chars": chars, **result_extra}
@@ -210,7 +235,7 @@ def extract(session, url):
     return {"status": "text", "pages": pages, "chars": chars, "text": "\n\n".join(texts), **result_extra}
 
 
-def with_pdfminer(content, pypdf_error):
+def with_pdfminer(content, pypdf_error, store_chars=STORE_CHARS):
     """Second opinion on a PDF pypdf could not read.
 
     pypdf is strict about structure and gives up on documents that render
@@ -240,7 +265,7 @@ def with_pdfminer(content, pypdf_error):
 def extract_one(dn, tok, view_base, store_chars, delay=None):
     # Per-worker pacing, so concurrency doesn't remove politeness.
     time.sleep(DOWNLOAD_DELAY if delay is None else delay)
-    result = extract(worker_session(), view_base + tok)
+    result = extract(worker_session(), view_base + tok, store_chars)
     result["doc"] = dn
     text = result.get("text")
     if text is not None and store_chars and len(text) > store_chars:

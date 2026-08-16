@@ -326,23 +326,33 @@ descriptions" checkbox, which fetches an 8.6 MB inverted index only when a
 reader ticks it. The resident payload stays 6.94 MB for everyone else.
 
 The download is done for purchase orders and running for contracts. Measured on
-disk as of 16 Aug, 622,552 documents:
+disk 16 Aug, **625,632 documents** across 640,152 log lines:
 
 | | | |
 |---|---|---|
-| text | 530,125 | a real text layer, parsed |
-| scanned | 53,190 | opened fine, no text in it |
-| unavailable | 23,846 | the state has no file to serve |
-| error | 14,551 | neither parser could open it |
+| text | 538,876 | 86.1% — a real text layer, parsed |
+| scanned | 61,001 | 9.8% — opened fine, no text in it |
+| unavailable | 25,692 | 4.1% — the state has no file to serve |
+| error | **63** | 0.0% — neither parser could open it |
 
-**The 10,510 contract errors are ours, not the state's, and they are already
-fixed.** Two bugs, both live during the first contract attempts: the pdfminer
-fallback raised `NameError: pdfminer_text` because the import never landed, and
-`cryptography` was missing for AES-encrypted files. Since the restart carrying
-both fixes the run has processed 3,200 consecutive documents with **zero
-errors**. So those 10,510 are recoverable, but they will not retry themselves —
-an error is recorded as done. Run `extract_text.py --retry-errors` once the
-contract queue finishes.
+**Count documents, not lines.** The log is append-only and a later entry for a
+token supersedes the earlier one, so `wc -l` overstates by the 14,520 retry
+lines. Reading it any other way produced two wrong numbers in one session: a
+40%-complete claim that was really 23%, and a 14,551-error figure that was
+really 63 because the retries that fixed them were counted alongside the
+failures they replaced. Fold on `tok`, keep the last entry, then count.
+
+**The contract errors were ours, not the state's, and are fixed.** Two bugs ran
+during the first contract attempts: the pdfminer fallback raised
+`NameError: pdfminer_text` because the import never landed, and `cryptography`
+was missing for AES-encrypted files. At their peak they were erroring 55% of
+contracts. With both fixed the rate is 8 in 20,120 — 0.04% — and a
+`--retry-errors` pass recovered all but 63 of the historical ones.
+
+Errors will not retry themselves: `extract_text.py` counts a recorded error as
+done, deliberately, so a resumed run does not re-fetch them. `--retry-errors`
+is the switch, and `unavailable` is excluded from it on purpose — the state has
+no file for those and re-asking will not change that.
 
 **Coverage will be uneven and readers cannot see why.** Excellent for University
 contracts, terse for purchase orders, absent for scans and for documents the

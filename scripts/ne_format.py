@@ -67,6 +67,7 @@ TOK_DIR = "tok"
 DESC_DIR = "desc"
 WORDS = "words.bin"
 POSTINGS = "postings.bin"
+VGROUP = "vgroup.bin"
 
 # What the page loads before it can render anything, in the order it needs them.
 RESIDENT = (COLS_I32, COLS_F64, COLS_U8, DOCS, VENDORS)
@@ -296,6 +297,35 @@ def read_index(outdir):
     if at != len(blob):
         raise ValueError(f"{POSTINGS}: {len(blob) - at} bytes past the last word")
     return out
+
+
+# Which reviewed company each vendor spelling belongs to: one Int32 per vendor,
+# -1 for the great majority that belong to none. Per vendor rather than per row,
+# so it is 240 KB for 59,875 vendors instead of 3 MB for 738,195 rows -- small
+# enough to be resident, which it must be, because search consults it on every
+# keystroke.
+#
+# It never renames anything. Rows display the string the state recorded; this
+# only says which of them are the same company, for search and for a total the
+# page labels as ours.
+def write_vendor_groups(outdir, group_of_vendor):
+    """`group_of_vendor` is one int per vendor: a group index, or -1."""
+    column = array.array("i", group_of_vendor)
+    with open(os.path.join(outdir, VGROUP), "wb") as f:
+        f.write(column.tobytes())
+
+
+def read_vendor_groups(outdir, vendor_count):
+    path = os.path.join(outdir, VGROUP)
+    expected = vendor_count * 4
+    actual = os.path.getsize(path)
+    if actual != expected:
+        raise ValueError(f"{VGROUP}: {actual} bytes, expected {expected} "
+                         f"({vendor_count} vendors x 4)")
+    column = array.array("i")
+    with open(path, "rb") as f:
+        column.frombytes(f.read())
+    return column
 
 
 def _read_columns(path, names, itemsize, n):

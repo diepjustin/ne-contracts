@@ -454,6 +454,7 @@ def main():
     ne_format.write_token_blocks(outdir, dn_bytes, view_bytes, n)
     ne_format.write_desc_blocks(outdir, descriptions, n)
     write_search_index(outdir, descriptions, meta)
+    write_vendor_groups(outdir, vendor_names, columns, meta)
     write_selftest(outdir, sources, columns["viewPresent"], n)
     with open(os.path.join(OUT_DIR, "manifest.json"), "w", encoding="utf-8") as f:
         json.dump({"buildId": build_id, "dir": f"d/{build_id}"}, f)
@@ -498,7 +499,7 @@ def add_descriptions_to_build():
         outdir = os.path.join(OUT_DIR, json.load(f)["dir"])
     print(f"attaching descriptions to {outdir}")
 
-    columns, docs, _vendors, _vtok, meta = ne_format.read_payload(outdir)
+    columns, docs, vendors, _vtok, meta = ne_format.read_payload(outdir)
     n = meta["count"]
     _dn, view = ne_format.read_token_blocks(outdir, n)
 
@@ -517,6 +518,7 @@ def add_descriptions_to_build():
     meta["descCount"] = len(descriptions)
     meta["descBytes"] = sum(len(d) for d in descriptions.values())
     write_search_index(outdir, descriptions, meta)
+    write_vendor_groups(outdir, vendors, columns, meta)
     with open(os.path.join(outdir, ne_format.META), "w", encoding="utf-8") as f:
         json.dump(meta, f, separators=(",", ":"), sort_keys=True)
 
@@ -549,6 +551,67 @@ def build_index(descriptions):
             if len(word) >= MIN_WORD:
                 postings[word].append(row)
     return postings
+
+
+VENDOR_GROUPS_JSON = os.path.join(ROOT, "scripts", "vendor_groups.json")
+
+
+def write_vendor_groups(outdir, vendor_names, columns, meta):
+    """Attach the reviewed vendor groupings, and fail if any has gone stale.
+
+    The mapping is written by hand (scripts/vendor_groups.json) from the
+    spend-ranked candidates that scripts/suggest_vendor_groups.py proposes.
+    Nothing is merged automatically: a wrong merge invents spending that never
+    happened, which is worse than the fragmentation it would be fixing.
+
+    A spelling listed there but absent from the data means the state has
+    renamed or dropped that vendor since the review. Silently ignoring it would
+    quietly shrink a published company total, so it stops the build instead --
+    the same reasoning as the entity guard.
+    """
+    if not os.path.exists(VENDOR_GROUPS_JSON):
+        meta["vendorGroups"] = []
+        return
+
+    with open(VENDOR_GROUPS_JSON, encoding="utf-8") as f:
+        reviewed = {k: v for k, v in json.load(f).items() if not k.startswith("_")}
+
+    index_of = {name.decode("utf-8"): i for i, name in enumerate(vendor_names)}
+    canonical = sorted(reviewed)
+    group_of_vendor = [-1] * len(vendor_names)
+
+    missing = []
+    for group, name in enumerate(canonical):
+        for spelling in reviewed[name]:
+            row = index_of.get(spelling)
+            if row is None:
+                missing.append((name, spelling))
+                continue
+            group_of_vendor[row] = group
+
+    if missing:
+        listed = "\n".join(f"    {name}: {spelling!r}" for name, spelling in missing[:10])
+        sys.exit(f"{len(missing)} vendor spelling(s) in vendor_groups.json are not in the "
+                 f"data:\n{listed}\n"
+                 "The state has renamed or dropped them. Re-run "
+                 "scripts/suggest_vendor_groups.py and update the file — leaving them "
+                 "would quietly shrink a published company total.")
+
+    ne_format.write_vendor_groups(outdir, group_of_vendor)
+
+    decoded = ne_format.read_vendor_groups(outdir, len(vendor_names))
+    if list(decoded) != group_of_vendor:
+        sys.exit("vendor groups do not survive the round trip")
+
+    meta["vendorGroups"] = canonical
+    grouped = sum(1 for g in group_of_vendor if g >= 0)
+    spend = collections.Counter()
+    for row in range(meta["count"]):
+        group = group_of_vendor[columns["vendorIdx"][row]]
+        if group >= 0:
+            spend[group] += columns["amount"][row]
+    print(f"vendor groups : {len(canonical)} companies covering {grouped} spellings, "
+          f"${sum(spend.values()) / 1e9:.2f} B")
 
 
 def write_search_index(outdir, descriptions, meta):

@@ -91,12 +91,16 @@
      row without breaking the scroll arithmetic -- it lives out here instead. */
   #detail {
     padding: 10px 20px; border-bottom: 1px solid var(--border);
-    background: var(--panel); height: 92px; overflow-y: auto; font-size: 13.5px;
+    background: var(--panel); height: 132px; overflow-y: auto; font-size: 13.5px;
   }
   #detail .who { color: var(--muted); font-size: 12px; margin-bottom: 3px; }
   #detail .who b { color: var(--text); font-variant-numeric: tabular-nums; }
   #detail .words { white-space: pre-wrap; }
   #detail .none { color: var(--muted); font-style: italic; }
+  #detail .company {
+    margin: 2px 0 5px; font-size: 12px; color: var(--muted);
+  }
+  #detail .company i { opacity: .8; }
   #detail button {
     float: right; padding: 0 7px; font-size: 12px; font-weight: 500; color: var(--muted);
   }
@@ -106,7 +110,7 @@
   #scroller { overflow: auto; height: calc(100vh - 218px); }
   /* The scroller's height is hand-computed against everything above it, so the
      detail strip has to be subtracted too or the page overflows by its height. */
-  body.has-detail #scroller { height: calc(100vh - 218px - 92px); }
+  body.has-detail #scroller { height: calc(100vh - 218px - 132px); }
   table { border-collapse: collapse; width: 100%; font-size: 13.5px; }
   thead th {
     position: sticky; top: 0; background: var(--panel); z-index: 2;
@@ -146,7 +150,7 @@
   @media (max-width: 720px) {
     .hide-sm { display: none; }
     #scroller { height: calc(100vh - 300px); }
-    body.has-detail #scroller { height: calc(100vh - 300px - 92px); }
+    body.has-detail #scroller { height: calc(100vh - 300px - 132px); }
   }
 </style>
 </head>
@@ -297,6 +301,10 @@
   var docs, docOff;              // packed ASCII document numbers + their offsets
   var files = {};                // the raw file bytes, kept for ?selftest=1
   var vendors = [], vlow = [];
+  // Which reviewed company each vendor spelling belongs to (-1 for most), and
+  // the canonical names. Optional: a build made before the review existed, or
+  // with an empty vendor_groups.json, simply has neither.
+  var vgroup = null, groupNames = [], groupSpend = null;
   var vtokLoad = null;           // promise for vtok.bin, fetched only when needed
 
   // --- view state ---------------------------------------------------------
@@ -488,6 +496,7 @@
       .then(function (got) {
         RESIDENT.forEach(function (f, i) { files[f] = got[i]; });
         decode();
+        return loadVendorGroups();
       });
   }
 
@@ -533,6 +542,47 @@
 
     viewBuf = new Int32Array(N);
     view = viewBuf.subarray(0, 0);
+  }
+
+  // 240 KB for 59,875 vendors, so it rides along with the resident load rather
+  // than waiting to be asked for -- search consults it on every keystroke. A
+  // build without it just has no groupings, and everything else works.
+  function loadVendorGroups() {
+    groupNames = meta.vendorGroups || [];
+    if (!groupNames.length) return Promise.resolve();
+    return fetch(BASE + dir + "vgroup.bin").then(ok)
+      .then(function (r) { return r.arrayBuffer(); })
+      .then(function (ab) {
+        need(ab.byteLength === vendors.length * 4,
+             "vgroup.bin is " + ab.byteLength + " bytes for " + vendors.length + " vendors");
+        vgroup = new Int32Array(ab);
+      }, function () {
+        vgroup = null;   // grouping is an enhancement; never block the page for it
+        groupNames = [];
+      });
+  }
+
+  // What the state has paid every spelling of one company, summed once and
+  // kept. This is our arithmetic over the state's rows, not a figure the state
+  // publishes, and the panel says so.
+  function companyTotals() {
+    if (groupSpend) return groupSpend;
+    groupSpend = { amount: new Float64Array(groupNames.length),
+                   records: new Int32Array(groupNames.length) };
+    for (var row = 0; row < N; row++) {
+      var g = vgroup[vendorIdx[row]];
+      if (g >= 0) {
+        groupSpend.amount[g] += amount[row];
+        groupSpend.records[g] += 1;
+      }
+    }
+    return groupSpend;
+  }
+
+  function spellingsIn(group) {
+    var count = 0;
+    for (var v = 0; v < vgroup.length; v++) if (vgroup[v] === group) count++;
+    return count;
   }
 
   // ---------------------------------------------------------------- sorting
@@ -643,6 +693,14 @@
     if (q) {
       vhit = new Uint8Array(vendors.length);
       for (i = 0; i < vlow.length; i++) if (vlow[i].indexOf(q) >= 0) vhit[i] = 1;
+      // "hausmann" should find all 26 recorded spellings, including the ones
+      // carrying a contract number that the plain string match misses.
+      if (vgroup) {
+        for (i = 0; i < groupNames.length; i++) {
+          if (groupNames[i].toLowerCase().indexOf(q) < 0) continue;
+          for (var v = 0; v < vgroup.length; v++) if (vgroup[v] === i) vhit[v] = 1;
+        }
+      }
       dq = docQuery(q);
       // Widens the query rather than replacing it: a row matches on vendor,
       // document number, OR description.
@@ -1061,6 +1119,7 @@
       '<div class="who"><b>' + esc(docStr(id)) + "</b> · " +
       esc(vendors[vendorIdx[id]]) + " · " + esc(meta.entities[entityCol[id]]) +
       " · " + esc(shortType(meta.typeGroups[t])) + "</div>" +
+      companyLine(id) +
       '<div class="words" id="detail-words">Loading…</div>';
     $("detail-close").addEventListener("click", closeDetail);
 
@@ -1088,6 +1147,20 @@
     tr.classList.add("picked");
     tr.setAttribute("aria-expanded", "true");
     showDetail(+tr.dataset.row);
+  }
+
+  // The one number on this page that is ours rather than the state's, so it is
+  // labelled that way. A row still shows the exact name the state recorded;
+  // this says what that name is part of.
+  function companyLine(id) {
+    if (!vgroup) return "";
+    var group = vgroup[vendorIdx[id]];
+    if (group < 0) return "";
+    var totals = companyTotals();
+    return '<div class="company">' + esc(groupNames[group]) + " — " +
+      fmtMoney.format(totals.amount[group]) + " · " +
+      totals.records[group].toLocaleString() + " records · " +
+      spellingsIn(group) + " spellings. <i>Grouped by us, not by the state.</i></div>";
   }
 
   function armDetail() {

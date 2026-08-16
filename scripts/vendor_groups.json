@@ -1,0 +1,65 @@
+{
+  "_what": "Vendor spellings that are one company. Reviewed by hand, never generated.",
+
+  "_why": "The state records the same firm many ways: legal suffixes come and go, punctuation drifts, and a contract number often gets appended to the name. 26 spellings of Hausmann Construction total $1.40 B where the site shows $903 M under the largest single one, so the database gives a wrong answer to 'how much has Nebraska paid this company?'. About 9,000 vendor strings sit in a cluster with at least one other, holding $11.02 B between them.",
+
+  "_rules": "A wrong merge invents spending that never happened, which is worse than the fragmentation. So nothing here is automatic. scripts/suggest_vendor_groups.py proposes candidates ranked by spend and decides nothing; a grouping exists only once somebody has written it here. build_site.py fails the build if any spelling below is missing from the data, so a rescrape that renames a vendor is loud rather than silent.",
+
+  "_display": "This never changes what a row shows. Rows keep the exact string the state recorded, because that is what makes a row quotable. The grouping powers search and a clearly-labelled company total, both of which are ours and are presented as ours.",
+
+  "_key": "The key is the canonical name. It is a label for the group, not a claim about the company's legal name.",
+
+  "_seeded": "The four groups below were proposed from the spend-ranked report and each is a single base name differing only by legal suffix, punctuation, or an appended contract number. Everything else in that report is still unreviewed -- run scripts/suggest_vendor_groups.py to see it.",
+
+  "Hausmann Construction": [
+    "HAUSMANN CONSTRUCTION INC",
+    "HAUSMANN CONSTRUCTION, INC. 12016",
+    "HAUSMANN CONSTRUCTION INC.",
+    "HAUSMANN CONSTRUCTION, INC. 11202",
+    "HAUSMANN CONSTRUCTION, INC.7.12718",
+    "HAUSMANN CONSTRUCTION INC 10092",
+    "HAUSMANN CONSTRUCTION 10770",
+    "HAUSMANN CONSTRUCTION INC._10291",
+    "HAUSMANN CONSTRUCTION",
+    "HAUSMANN CONSTRUCTION, INC._10112",
+    "HAUSMANN CONSTRUCTION, INC.",
+    "HAUSMANN CONSTRUCTION INC 10112",
+    "HAUSMANN CONSTRUCTION 14423",
+    "HAUSMANN CONSTRUCTION, INC. 14667",
+    "HAUSMANN CONSTRUCTION -13068",
+    "HAUSMANN CONSTRUCTION 14423.2",
+    "HAUSMANN CONSTRUCTION-10770",
+    "HAUSMANN CONSTRUCTION, INC. 14653",
+    "HAUSMANN CONSTRUCTION, INC.13505",
+    "HAUSMANN CONSTRUCTION, INC. 13772",
+    "HAUSMANN CONSTRUCTION, INC. 14676",
+    "HAUSMANN CONSTRUCTION, INC. 14743",
+    "HAUSMANN CONSTRUCTION 13505",
+    "HAUSMANN CONSTRUCTION, INC. 14158",
+    "HAUSMANN CONSTRUCTION 11202",
+    "HAUSMANN CONSTRUCTION, INC. 14677"
+  ],
+
+  "Kiewit Building Group": [
+    "KIEWIT BUILDING GROUP INC",
+    "KIEWIT BUILDING GROUP 14423",
+    "KIEWIT BUILDING GROUP, INC. 4.12788",
+    "KIEWIT BUILDING GROUP"
+  ],
+
+  "Hawkins Construction": [
+    "HAWKINS CONSTRUCTION COMPANY",
+    "HAWKINS CONSTRUCTION CO.",
+    "HAWKINS CONSTRUCTION CO"
+  ],
+
+  "McCarthy Building Companies": [
+    "MCCARTHY BUILDING COMPANIES INC",
+    "MCCARTHY BUILDING COMPANIES, INC",
+    "MCCARTHY BUILDING COMPANIES",
+    "MCCARTHY BUILDING COMPANIES, INC. 12670",
+    "MCCARTHY BUILDING CO INC",
+    "MCCARTHY BUILDING CO.",
+    "MCCARTHY BUILDING COMPANIES, INC."
+  ]
+}

@@ -155,6 +155,10 @@ def write_token_blocks(outdir, dn, view, n):
     the resident viewPresent column is the authority on whether a view URL
     exists -- but zeroing keeps the stride fixed, which is the whole point.
     """
+    # Creates its own directory. It used to depend on write_payload having made
+    # it first, which worked only because of call order in build_site.py and
+    # failed the moment anything wrote token blocks on their own.
+    os.makedirs(os.path.join(outdir, TOK_DIR), exist_ok=True)
     blank = b"\x00" * TOKEN_BYTES
     for b in range(block_count(n)):
         lo = b * BLOCK_ROWS

@@ -28,12 +28,14 @@ live data that a given code maps to the same DT in every agency.
 import argparse
 import array
 import base64
+import collections
 import csv
 import datetime
 import json
 import gzip
 import os
 import random
+import re
 import sys
 import zlib
 from urllib.parse import urlparse, parse_qs, quote, unquote
@@ -420,6 +422,7 @@ def main():
     ne_format.write_payload(outdir, columns, docs, vendor_names, vtok_bytes, meta)
     ne_format.write_token_blocks(outdir, dn_bytes, view_bytes, n)
     ne_format.write_desc_blocks(outdir, descriptions, n)
+    write_search_index(outdir, descriptions, meta)
     write_selftest(outdir, sources, columns["viewPresent"], n)
     with open(os.path.join(OUT_DIR, "manifest.json"), "w", encoding="utf-8") as f:
         json.dump({"buildId": build_id, "dir": f"d/{build_id}"}, f)
@@ -482,6 +485,7 @@ def add_descriptions_to_build():
 
     meta["descCount"] = len(descriptions)
     meta["descBytes"] = sum(len(d) for d in descriptions.values())
+    write_search_index(outdir, descriptions, meta)
     with open(os.path.join(outdir, ne_format.META), "w", encoding="utf-8") as f:
         json.dump(meta, f, separators=(",", ":"), sort_keys=True)
 
@@ -491,6 +495,58 @@ def add_descriptions_to_build():
           f"({meta['descCount']:,} of {n:,} rows)")
     print("resident files untouched — a page that has not been taught about "
           "descriptions reads this build exactly as before")
+
+
+# What counts as a word. Runs of letters and digits, lowercased -- so
+# "1/4 in. Square Head" indexes as 1, 4, in, square, head. Punctuation is a
+# separator rather than content, which is what lets "CP3306-665" be found by
+# searching either half. Purely numeric tokens are kept on purpose: 15% of the
+# vocabulary, and a part number is exactly the kind of thing worth looking up.
+WORD = re.compile(r"[a-z0-9]+")
+
+# Below this a word is not worth an entry: single characters match so much that
+# they are noise, and the page's other filters are better tools for them.
+MIN_WORD = 2
+
+
+def build_index(descriptions):
+    """word -> sorted rows, over every description in this build."""
+    postings = collections.defaultdict(list)
+    for row in sorted(descriptions):
+        # set(), so a description repeating a word does not repeat the row.
+        for word in set(WORD.findall(descriptions[row].decode("utf-8").lower())):
+            if len(word) >= MIN_WORD:
+                postings[word].append(row)
+    return postings
+
+
+def write_search_index(outdir, descriptions, meta):
+    """Build the index, write it, and prove it decodes back to what went in.
+
+    Verified the same way as everything else here -- read from disk rather than
+    trusted -- because a subtly wrong index is worse than no index: it does not
+    fail, it just quietly stops finding some contracts, and nobody can tell the
+    difference between "no results" and "the index dropped them".
+    """
+    if not descriptions:
+        meta["wordCount"] = 0
+        return
+
+    postings = build_index(descriptions)
+    words = ne_format.write_index(outdir, postings)
+
+    decoded = ne_format.read_index(outdir)
+    if decoded != dict(postings):
+        differing = [w for w in postings if decoded.get(w) != postings[w]]
+        sys.exit(f"search index does not survive the round trip "
+                 f"({len(differing):,} words differ, e.g. {differing[:3]})")
+
+    meta["wordCount"] = len(words)
+    size = (os.path.getsize(os.path.join(outdir, ne_format.WORDS))
+            + os.path.getsize(os.path.join(outdir, ne_format.POSTINGS)))
+    total = sum(len(v) for v in postings.values())
+    print(f"search index  : {len(words):,} words, {total:,} postings, "
+          f"{size / 1e6:.1f} MB raw — verified from disk")
 
 
 def carry_descriptions_forward(view_tokens):

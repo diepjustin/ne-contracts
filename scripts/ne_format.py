@@ -65,6 +65,8 @@ VTOK = "vtok.bin"
 SELFTEST = "selftest.json"
 TOK_DIR = "tok"
 DESC_DIR = "desc"
+WORDS = "words.bin"
+POSTINGS = "postings.bin"
 
 # What the page loads before it can render anything, in the order it needs them.
 RESIDENT = (COLS_I32, COLS_F64, COLS_U8, DOCS, VENDORS)
@@ -215,6 +217,80 @@ def read_desc_blocks(outdir, n):
             pos += length
         if pos != len(data):
             raise ValueError(f"description block {b}: {len(data) - pos} bytes past the last row")
+    return out
+
+
+# The search index over those descriptions. It stores which rows contain a
+# word, never the words of a row -- the text itself always comes from the
+# blocks above, so nothing here can distort what a reader sees.
+#
+#   words.bin      every distinct word, sorted, newline-separated. Sorted so
+#                  the page can binary-search it, and so a prefix query is a
+#                  contiguous run rather than a scan of 267,000 entries.
+#   postings.bin   per word, in the same order: the number of rows, then each
+#                  row id as a delta from the one before it, varint-encoded.
+#                  Deltas because sorted row ids differ by far less than they
+#                  are worth, and varints because most of those deltas fit in
+#                  one byte.
+#
+# There is deliberately no offset table. The page reads postings.bin once,
+# start to finish, building whatever lookup it wants in memory -- an offset
+# array would add 1 MB to the download to save work already being done.
+def _varint(value):
+    out = bytearray()
+    while True:
+        seven = value & 0x7F
+        value >>= 7
+        out.append(seven | (0x80 if value else 0))
+        if not value:
+            return bytes(out)
+
+
+def write_index(outdir, postings):
+    """`postings` maps word -> sorted row ids. Written in sorted word order."""
+    words = sorted(postings)
+    with open(os.path.join(outdir, WORDS), "wb") as f:
+        f.write("\n".join(words).encode("utf-8"))
+    with open(os.path.join(outdir, POSTINGS), "wb") as f:
+        for word in words:
+            rows = postings[word]
+            blob = bytearray(_varint(len(rows)))
+            previous = 0
+            for row in rows:
+                blob += _varint(row - previous)
+                previous = row
+            f.write(blob)
+    return words
+
+
+def read_index(outdir):
+    """word -> row ids, decoded from the two files alone."""
+    with open(os.path.join(outdir, WORDS), encoding="utf-8") as f:
+        words = f.read().split("\n")
+    blob = open(os.path.join(outdir, POSTINGS), "rb").read()
+
+    at = 0
+
+    def take():
+        nonlocal at
+        value = shift = 0
+        while True:
+            byte = blob[at]
+            at += 1
+            value |= (byte & 0x7F) << shift
+            if not byte & 0x80:
+                return value
+            shift += 7
+
+    out = {}
+    for word in words:
+        rows, previous = [], 0
+        for _ in range(take()):
+            previous += take()
+            rows.append(previous)
+        out[word] = rows
+    if at != len(blob):
+        raise ValueError(f"{POSTINGS}: {len(blob) - at} bytes past the last word")
     return out
 
 

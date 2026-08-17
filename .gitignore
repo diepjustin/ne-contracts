@@ -27,6 +27,11 @@ data/doc_text.jsonl
 # regenerated in seconds, so it travels with it rather than into git. What
 # eventually gets published is a column in the payload, not this.
 data/scope.jsonl
+# ...and any scratch variant of it. A trial run written to scope.new.jsonl was
+# 154 MB, slipped past `git add -A`, and GitHub rejected the push for it after
+# the commit was already made. Match the shape, not the one name.
+data/scope*.jsonl
+data/*.new.jsonl
 
 # prototype-search/ was retired in Aug 2026 (see HANDOFF.md section 8) -- the
 # chunked index is no longer published. search.sqlite stays ignored because the

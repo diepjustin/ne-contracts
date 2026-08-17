@@ -22,6 +22,12 @@ data/*_scrape_progress*.json.tmp
 # feeds -- both are transient working state (round-tripped via the GitHub
 # Actions cache, not git), same category as the progress files above.
 data/*_daily_progress.json*
+
+# The amendment log. Append-only, grows slowly, and is the one file here that
+# cannot be regenerated from anything -- a night not recorded is a night gone.
+# Gitignored like the rest of data/, so it rides in the Actions cache and must
+# go onto the extraction Release with doc_text.jsonl.
+data/changes.jsonl
 data/daily_diff_report.json
 
 # Working output of scripts/extract_text.py — an append-only checkpoint log

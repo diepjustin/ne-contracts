@@ -97,8 +97,10 @@ The scraper reproduces the state's records faithfully, including their errors.
 - **Document `41780` begins 09/28/2223** and ends 09/28/2023. Filter on begin > end to
   find that class of error — the page has a checkbox for it.
 - Open-ended records commonly carry an end date of `12/31/2099` or `01/01/2099`.
-- Amounts are as recorded by the state and may not reflect amendments. `--daily` does
-  not catch an amendment to an existing Active record; only a full re-scrape does.
+- Amounts are as recorded by the state and may not reflect amendments. `--daily` does not
+  rewrite an amended row — the CSV keeps the value from the last full scrape — but it does
+  record the movement to `data/changes.jsonl`. Only a full re-scrape updates the row
+  itself.
 - The state's own entity list contains a typo — "Deaf & Hard of Dearing" — preserved
   verbatim, because matching the source exactly is what makes the links work.
 - **The state updates daily** (per its FAQ).
@@ -178,10 +180,30 @@ python3 scripts/scrape.py purchase-order --daily
 python3 scripts/scrape.py state --daily
 ```
 
-An unseen record gets a detail fetch and a new row. A known record is skipped entirely.
-A previously-Active record that does not appear today has its `Status` flipped to
-`Expired` in place. This deliberately does **not** catch an amendment to an existing
-Active record's Amount, Vendor or End Date — only a full re-scrape does.
+An unseen record gets a detail fetch and a new row. A known record is not rewritten. A
+previously-Active record that does not appear today has its `Status` flipped to `Expired`
+in place.
+
+**Amendments are recorded rather than discarded.** Amount, vendor, begin and end date are
+compared against what the CSV already held, and any move is appended to
+`data/changes.jsonl` — one entry per field, carrying both values and the date observed:
+
+```json
+{"key":"…|amount","doc":"45500","field":"amount",
+ "from":"$2,558,983.00","to":"$21,204,743.00","seen":"2026-08-17"}
+```
+
+Before this the database was a photograph: `45500` at the Medical Center reads $2,558,983
+expired and $21,204,743 active, the same contract amended, and nothing in the data could
+show it had moved. The CSV still holds only the current value — the log is the history.
+
+Read it by folding on `key` and keeping the last entry, never by counting lines: a field
+that moves twice appears twice. It is append-only, gitignored, and **cannot be
+regenerated from anything** — a night not recorded is gone — so it belongs on the
+extraction Release alongside `doc_text.jsonl`.
+
+Nothing on the site reads it yet. Publishing an "amended" flag and the history in the
+detail panel is the next step, and wants a few weeks of accumulation first.
 
 `scripts/check_daily_diff.py` fails the week if any entity had more than half its
 previously-Active records flip to Expired in a day, skipped below 5 records where the
@@ -502,11 +524,12 @@ documents and ~95% of *all* of them. An OCR pilot is scoped but not run: 500 kno
 documents through Tesseract, accuracy measured on descriptions specifically rather than
 text generally, cost and wall-clock per thousand, compared against one cloud OCR.
 
-**Change tracking is not built.** The scraper runs daily but keeps only a snapshot, so
-`45500` going from $2,558,983 to $21,204,743 is invisible. `scrape.py --daily` already
-reads a baseline and fires `on_record_seen` for every record; recording the differences
-would turn this from a photograph into a longitudinal record. Every night it is not
-running is a night of history that cannot be recovered.
+**Change tracking records but does not publish.** `--daily` now writes every amendment
+to `data/changes.jsonl` (see "Daily updates"). Nothing on the site reads it yet: an
+`amended` flag and change count as resident columns, the history itself as deferred
+blocks reusing the `write_desc_blocks` pattern, and a filter beside the existing
+data-quality ones. That wants a few weeks of accumulation before it says anything
+worth showing.
 
 **29,663 readable documents have no description and mostly never will.** This closes a
 line of investigation rather than opening one: 83% carry no numbered heading, no summary

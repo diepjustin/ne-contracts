@@ -518,18 +518,39 @@ def drop_unfinished_rows(csv_path, keep):
     return dropped
 
 
-def load_known_active(csv_path):
-    """{entity_name: {detail_url, ...}} for rows currently Status == Active.
+# Fields worth watching for change, as (record key, CSV column, label).
+# Deliberately not Status: --daily already derives Active -> Expired from
+# presence, patches the CSV, and counts it in the diff report.
+WATCHED_FIELDS = (
+    ("amount", 5, "amount"),
+    ("vendor", 4, "vendor"),
+    ("begin_date", 6, "begin date"),
+    ("end_date", 7, "end date"),
+)
 
-    None (not {}) means the CSV doesn't exist at all -- --daily's signal to
+CHANGES_JSONL = "data/changes.jsonl"
+
+
+def load_known_active(csv_path):
+    """({entity_name: {detail_url, ...}}, {detail_url: (values...)}) for Active rows.
+
+    None (not a pair) means the CSV doesn't exist at all -- --daily's signal to
     refuse rather than treat a missing baseline as "nothing was ever active".
     Read once at the start of a daily run, before any scraping, so each
     entity's diff has a stable baseline unaffected by rows this same run
     appends or patches.
+
+    The second half is the baseline for amendments. Until Aug 2026 a record
+    that was already known was skipped outright, so a contract whose amount
+    changed looked identical to one that had not moved: document 45500 at the
+    Medical Center went from $2,558,983 to $21,204,743 and the database could
+    not show it. Only the Active rows are carried, which is the same set
+    --daily re-scans, so this costs a tuple per Active row and nothing else.
     """
     if not os.path.exists(csv_path):
         return None
     known = {}
+    baseline = {}
     with open(csv_path, newline="", encoding="utf-8") as f:
         reader = csv.reader(f)
         next(reader, None)  # header
@@ -537,7 +558,45 @@ def load_known_active(csv_path):
             # Entity Name is column 3, Status is column 8, Detail URL is column 9.
             if len(r) > 9 and r[8] == "Active":
                 known.setdefault(r[3], set()).add(r[9])
-    return known
+                baseline[r[9]] = tuple(r[column] for _key, column, _label in WATCHED_FIELDS)
+    return known, baseline
+
+
+def record_changes(record, baseline, out_path=CHANGES_JSONL):
+    """Append one entry per watched field that moved. Returns how many.
+
+    Append-only with last-entry-wins, the same shape as data/doc_text.jsonl --
+    so read it by folding on `key` and keeping the last entry, never by
+    counting lines. Each entry stands alone: the document it describes, the
+    field, both values, and the date it was observed.
+    """
+    was = baseline.get(record["detail_url"])
+    if was is None:
+        return 0
+
+    changes = []
+    for (key, _column, label), before in zip(WATCHED_FIELDS, was):
+        now = record.get(key, "")
+        if now != before:
+            changes.append({
+                "key": f"{record['detail_url']}|{label}",
+                "doc": record["doc_number"],
+                "type": record["doc_type"],
+                "entity": record["entity_name"],
+                "field": label,
+                "from": before,
+                "to": now,
+                "seen": datetime.date.today().isoformat(),
+                "detail_url": record["detail_url"],
+            })
+    if not changes:
+        return 0
+
+    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+    with open(out_path, "a", encoding="utf-8") as f:
+        for change in changes:
+            f.write(json.dumps(change, ensure_ascii=False) + "\n")
+    return len(changes)
 
 
 def patch_status_to_expired(csv_path, flip_urls):
@@ -652,7 +711,8 @@ def run_daily(args):
 
     os.makedirs("data", exist_ok=True)
 
-    known_active = load_known_active(output_csv)
+    loaded = load_known_active(output_csv)
+    known_active, baseline = loaded if loaded else (None, None)
     if known_active is None:
         print(f"ERROR: refusing --daily: {output_csv} does not exist. This dataset needs a "
               "completed full scrape (or a restored data/ cache) before daily mode has anything "
@@ -668,6 +728,7 @@ def run_daily(args):
 
     flips = {}    # entity_name -> set(detail_url) flipped to Expired
     report = {}   # entity_name -> counts dict
+    amended = 0   # watched fields seen to have moved, written to changes.jsonl
 
     with open(output_csv, "a", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
@@ -686,11 +747,16 @@ def run_daily(args):
             known = known_active.get(entity_name, set())
             seen = set()
 
+            def note_change(record):
+                nonlocal amended
+                amended += record_changes(record, baseline)
+
             count, finished = scrape_entity(
                 session, entity_name, entity_val, "Active", entity_type, doc_type, writer,
                 deadline=deadline,
                 record_filter=lambda r, _k=known: r["detail_url"] not in _k,
-                on_record_seen=lambda r, _s=seen: _s.add(r["detail_url"]),
+                on_record_seen=lambda r, _s=seen: (_s.add(r["detail_url"]),
+                                                   note_change(r)),
             )
             f.flush()
 
@@ -711,6 +777,9 @@ def run_daily(args):
 
             done_today.add(entity_name)
             save_daily_progress(progress_path, done_today)
+
+    if amended:
+        print(f"Recorded {amended:,} field change(s) to {CHANGES_JSONL}.")
 
     all_flip_urls = {u for s in flips.values() for u in s}
     if all_flip_urls:

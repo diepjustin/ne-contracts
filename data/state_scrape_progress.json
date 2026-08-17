@@ -1,0 +1,666 @@
+[
+  [
+    "Abstracters Board of Examiners",
+    "Active"
+  ],
+  [
+    "Abstracters Board of Examiners",
+    "Expired"
+  ],
+  [
+    "Accountability and Disclosure Commission",
+    "Active"
+  ],
+  [
+    "Accountability and Disclosure Commission",
+    "Expired"
+  ],
+  [
+    "Administrative Services, Department of",
+    "Active"
+  ],
+  [
+    "Administrative Services, Department of",
+    "Expired"
+  ],
+  [
+    "Aeronautics, Department of",
+    "Active"
+  ],
+  [
+    "Aeronautics, Department of",
+    "Expired"
+  ],
+  [
+    "Agriculture, Board of",
+    "Active"
+  ],
+  [
+    "Agriculture, Board of",
+    "Expired"
+  ],
+  [
+    "Agriculture, Department of",
+    "Active"
+  ],
+  [
+    "Agriculture, Department of",
+    "Expired"
+  ],
+  [
+    "Arts Council",
+    "Active"
+  ],
+  [
+    "Arts Council",
+    "Expired"
+  ],
+  [
+    "Attorney General",
+    "Active"
+  ],
+  [
+    "Attorney General",
+    "Expired"
+  ],
+  [
+    "Auditor of Public Accounts",
+    "Active"
+  ],
+  [
+    "Auditor of Public Accounts",
+    "Expired"
+  ],
+  [
+    "Banking, Department of",
+    "Active"
+  ],
+  [
+    "Banking, Department of",
+    "Expired"
+  ],
+  [
+    "Barber Examiners, Board of",
+    "Active"
+  ],
+  [
+    "Barber Examiners, Board of",
+    "Expired"
+  ],
+  [
+    "Blind & Visually Impaired, Commission for the",
+    "Active"
+  ],
+  [
+    "Blind & Visually Impaired, Commission for the",
+    "Expired"
+  ],
+  [
+    "Brand Committee",
+    "Active"
+  ],
+  [
+    "Brand Committee",
+    "Expired"
+  ],
+  [
+    "Corn Board",
+    "Active"
+  ],
+  [
+    "Corn Board",
+    "Expired"
+  ],
+  [
+    "Correctional Services, Department of",
+    "Active"
+  ],
+  [
+    "Correctional Services, Department of",
+    "Expired"
+  ],
+  [
+    "Dairy Industry Development Board",
+    "Active"
+  ],
+  [
+    "Dairy Industry Development Board",
+    "Expired"
+  ],
+  [
+    "Deaf & Hard of Dearing, Commission for the",
+    "Active"
+  ],
+  [
+    "Deaf & Hard of Dearing, Commission for the",
+    "Expired"
+  ],
+  [
+    "Dry Bean Commission",
+    "Active"
+  ],
+  [
+    "Dry Bean Commission",
+    "Expired"
+  ],
+  [
+    "Economic Development, Department of",
+    "Active"
+  ],
+  [
+    "Economic Development, Department of",
+    "Expired"
+  ],
+  [
+    "Education, Department of",
+    "Active"
+  ],
+  [
+    "Education, Department of",
+    "Expired"
+  ],
+  [
+    "Educational Lands & Funds, Board of",
+    "Active"
+  ],
+  [
+    "Educational Lands & Funds, Board of",
+    "Expired"
+  ],
+  [
+    "Educational Telecommunications Commission",
+    "Active"
+  ],
+  [
+    "Educational Telecommunications Commission",
+    "Expired"
+  ],
+  [
+    "Electrical Division",
+    "Active"
+  ],
+  [
+    "Electrical Division",
+    "Expired"
+  ],
+  [
+    "Energy Office",
+    "Active"
+  ],
+  [
+    "Energy Office",
+    "Expired"
+  ],
+  [
+    "Engineers & Architects, Board of",
+    "Active"
+  ],
+  [
+    "Engineers & Architects, Board of",
+    "Expired"
+  ],
+  [
+    "Environmental Quality, Department of",
+    "Active"
+  ],
+  [
+    "Environmental Quality, Department of",
+    "Expired"
+  ],
+  [
+    "Equal Opportunity Commission",
+    "Active"
+  ],
+  [
+    "Equal Opportunity Commission",
+    "Expired"
+  ],
+  [
+    "Ethanol Board",
+    "Active"
+  ],
+  [
+    "Ethanol Board",
+    "Expired"
+  ],
+  [
+    "Fire Marshal",
+    "Active"
+  ],
+  [
+    "Fire Marshal",
+    "Expired"
+  ],
+  [
+    "Foster Care Review Office",
+    "Active"
+  ],
+  [
+    "Foster Care Review Office",
+    "Expired"
+  ],
+  [
+    "Game & Parks Commission",
+    "Active"
+  ],
+  [
+    "Game & Parks Commission",
+    "Expired"
+  ],
+  [
+    "Geologists, Board of",
+    "Active"
+  ],
+  [
+    "Geologists, Board of",
+    "Expired"
+  ],
+  [
+    "Governor",
+    "Active"
+  ],
+  [
+    "Governor",
+    "Expired"
+  ],
+  [
+    "Grain Sorghum Board",
+    "Active"
+  ],
+  [
+    "Grain Sorghum Board",
+    "Expired"
+  ],
+  [
+    "Health & Human Services, Department of",
+    "Active"
+  ],
+  [
+    "Health & Human Services, Department of",
+    "Expired"
+  ],
+  [
+    "Historical Society",
+    "Active"
+  ],
+  [
+    "Historical Society",
+    "Expired"
+  ],
+  [
+    "Indian Affairs, Commission on",
+    "Active"
+  ],
+  [
+    "Indian Affairs, Commission on",
+    "Expired"
+  ],
+  [
+    "Industrial Relations, Commission of",
+    "Active"
+  ],
+  [
+    "Industrial Relations, Commission of",
+    "Expired"
+  ],
+  [
+    "Insurance, Department of",
+    "Active"
+  ],
+  [
+    "Insurance, Department of",
+    "Expired"
+  ],
+  [
+    "Investment Council",
+    "Active"
+  ],
+  [
+    "Investment Council",
+    "Expired"
+  ],
+  [
+    "Labor, Department of",
+    "Active"
+  ],
+  [
+    "Labor, Department of",
+    "Expired"
+  ],
+  [
+    "Land Surveyors, Board of Examiners",
+    "Active"
+  ],
+  [
+    "Land Surveyors, Board of Examiners",
+    "Expired"
+  ],
+  [
+    "Landscape Architects, Board of",
+    "Active"
+  ],
+  [
+    "Landscape Architects, Board of",
+    "Expired"
+  ],
+  [
+    "Latino American Commission",
+    "Active"
+  ],
+  [
+    "Latino American Commission",
+    "Expired"
+  ],
+  [
+    "Law Enforcement & Criminal Justice, Commission On",
+    "Active"
+  ],
+  [
+    "Law Enforcement & Criminal Justice, Commission On",
+    "Expired"
+  ],
+  [
+    "Legislative Council",
+    "Active"
+  ],
+  [
+    "Legislative Council",
+    "Expired"
+  ],
+  [
+    "Library Commission",
+    "Active"
+  ],
+  [
+    "Library Commission",
+    "Expired"
+  ],
+  [
+    "Lieutenant Governor",
+    "Active"
+  ],
+  [
+    "Lieutenant Governor",
+    "Expired"
+  ],
+  [
+    "Liquor Control Commission",
+    "Active"
+  ],
+  [
+    "Liquor Control Commission",
+    "Expired"
+  ],
+  [
+    "Military Department",
+    "Active"
+  ],
+  [
+    "Military Department",
+    "Expired"
+  ],
+  [
+    "Motor Vehicle Industry Licensing Board",
+    "Active"
+  ],
+  [
+    "Motor Vehicle Industry Licensing Board",
+    "Expired"
+  ],
+  [
+    "Motor Vehicles, Department of",
+    "Active"
+  ],
+  [
+    "Motor Vehicles, Department of",
+    "Expired"
+  ],
+  [
+    "NE Ed Health & Social Serv. FA",
+    "Active"
+  ],
+  [
+    "NE Ed Health & Social Serv. FA",
+    "Expired"
+  ],
+  [
+    "NE Elementary & Secondary SFA",
+    "Active"
+  ],
+  [
+    "NE Elementary & Secondary SFA",
+    "Expired"
+  ],
+  [
+    "NE Investment Finance Auth.",
+    "Active"
+  ],
+  [
+    "NE Investment Finance Auth.",
+    "Expired"
+  ],
+  [
+    "Natural Resources, Department of",
+    "Active"
+  ],
+  [
+    "Natural Resources, Department of",
+    "Expired"
+  ],
+  [
+    "Nebraska Anatomical Board",
+    "Active"
+  ],
+  [
+    "Nebraska Anatomical Board",
+    "Expired"
+  ],
+  [
+    "Nebraska State Fair Board",
+    "Active"
+  ],
+  [
+    "Nebraska State Fair Board",
+    "Expired"
+  ],
+  [
+    "Oil and Gas Conservation Commission",
+    "Active"
+  ],
+  [
+    "Oil and Gas Conservation Commission",
+    "Expired"
+  ],
+  [
+    "Pardons, Board of",
+    "Active"
+  ],
+  [
+    "Pardons, Board of",
+    "Expired"
+  ],
+  [
+    "Postsecondary Education, Coordinating Commission for",
+    "Active"
+  ],
+  [
+    "Postsecondary Education, Coordinating Commission for",
+    "Expired"
+  ],
+  [
+    "Power Review Board",
+    "Active"
+  ],
+  [
+    "Power Review Board",
+    "Expired"
+  ],
+  [
+    "Propane Ed & Research Council",
+    "Active"
+  ],
+  [
+    "Propane Ed & Research Council",
+    "Expired"
+  ],
+  [
+    "Public Accountancy, Board of",
+    "Active"
+  ],
+  [
+    "Public Accountancy, Board of",
+    "Expired"
+  ],
+  [
+    "Public Advocacy, Commission on",
+    "Active"
+  ],
+  [
+    "Public Advocacy, Commission on",
+    "Expired"
+  ],
+  [
+    "Public Employees Retirement System",
+    "Active"
+  ],
+  [
+    "Public Employees Retirement System",
+    "Expired"
+  ],
+  [
+    "Public Service Commission",
+    "Active"
+  ],
+  [
+    "Public Service Commission",
+    "Expired"
+  ],
+  [
+    "Racing Commission",
+    "Active"
+  ],
+  [
+    "Racing Commission",
+    "Expired"
+  ],
+  [
+    "Real Estate Commission",
+    "Active"
+  ],
+  [
+    "Real Estate Commission",
+    "Expired"
+  ],
+  [
+    "Real Property Appraiser Board",
+    "Active"
+  ],
+  [
+    "Real Property Appraiser Board",
+    "Expired"
+  ],
+  [
+    "Revenue, Department of",
+    "Active"
+  ],
+  [
+    "Revenue, Department of",
+    "Expired"
+  ],
+  [
+    "Roads, Department of",
+    "Active"
+  ],
+  [
+    "Roads, Department of",
+    "Expired"
+  ],
+  [
+    "STATEWIDE",
+    "Active"
+  ],
+  [
+    "STATEWIDE",
+    "Expired"
+  ],
+  [
+    "Secretary of State",
+    "Active"
+  ],
+  [
+    "Secretary of State",
+    "Expired"
+  ],
+  [
+    "State Patrol",
+    "Active"
+  ],
+  [
+    "State Patrol",
+    "Expired"
+  ],
+  [
+    "Supreme Court",
+    "Active"
+  ],
+  [
+    "Supreme Court",
+    "Expired"
+  ],
+  [
+    "Tax Equalization & Review Commission",
+    "Active"
+  ],
+  [
+    "Tax Equalization & Review Commission",
+    "Expired"
+  ],
+  [
+    "Tourism Commission",
+    "Active"
+  ],
+  [
+    "Tourism Commission",
+    "Expired"
+  ],
+  [
+    "Treasurer",
+    "Active"
+  ],
+  [
+    "Treasurer",
+    "Expired"
+  ],
+  [
+    "Veterans' Affairs, Department of",
+    "Active"
+  ],
+  [
+    "Veterans' Affairs, Department of",
+    "Expired"
+  ],
+  [
+    "Wheat Board",
+    "Active"
+  ],
+  [
+    "Wheat Board",
+    "Expired"
+  ],
+  [
+    "Workers' Compensation Court",
+    "Active"
+  ],
+  [
+    "Workers' Compensation Court",
+    "Expired"
+  ],
+  [
+    "Wyuka Cemetery Board of Trust",
+    "Active"
+  ],
+  [
+    "Wyuka Cemetery Board of Trust",
+    "Expired"
+  ]
+]

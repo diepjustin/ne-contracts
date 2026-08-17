@@ -10,7 +10,13 @@ data/scrape_state.txt
 # Resume state for the long scrapes — meaningful only alongside the (ignored)
 # CSVs they track. What they imply about coverage is baked into data.json's
 # meta.incomplete at build time, so the published page carries it regardless.
-data/*_scrape_progress*.json*
+# Full-scrape checkpoints are tracked on purpose, unlike everything else in
+# data/. They are ~11 KB, change only when a full scrape runs, and the page
+# makes a public claim from them -- which entities are "still being collected".
+# When the build moved into CI they were left behind on the laptop, and the
+# site spent a day telling readers all 101 entities were half-collected.
+# Versioned with the code that reads them, that cannot happen quietly.
+data/*_scrape_progress*.json.tmp
 
 # --daily's own within-run resumption and the weekly diff accumulator it
 # feeds -- both are transient working state (round-tripped via the GitHub

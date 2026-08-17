@@ -112,11 +112,26 @@ def incomplete_coverage():
     gaps = []
     for dataset in DATA:
         entities = STATE_ENTITIES if dataset == "state" else HIGHER_ED_ENTITIES
+        path = os.path.join(ROOT, progress_file(dataset))
+
+        # No checkpoint file means we do not know this dataset's coverage -- not
+        # that none of it was collected. The distinction matters because the
+        # three possible answers are not equally wrong: staying silent risks a
+        # reader misreading a real gap, while announcing 101 false gaps tells
+        # every reader that the whole state is half-collected when it is
+        # finished. The second is louder and worse, and it shipped: moving the
+        # build into CI left the checkpoints behind on the laptop, and the live
+        # site spent 17 Aug 2026 declaring every agency "still being collected".
+        if not os.path.exists(path):
+            print(f"warning: {progress_file(dataset)} is missing — cannot report {dataset} "
+                  "coverage, so claiming no gaps rather than claiming all of them")
+            continue
+
         # load_progress returns (finished combos, partial positions). Binding the
         # pair to one name makes every membership test false and reports the whole
         # state as uncollected -- which is exactly the wrong direction for a note
         # whose job is to stop readers misreading a gap.
-        done, _partial = load_progress(os.path.join(ROOT, progress_file(dataset)))
+        done, _partial = load_progress(path)
         missing = sorted({e for e in entities for s in STATUSES if (e, s) not in done})
         gaps += [f"{e} ({labels[dataset]})" for e in missing]
     return gaps

@@ -166,3 +166,27 @@ def test_a_word_repeated_in_one_description_lists_its_row_once():
 def test_postings_are_sorted_so_deltas_stay_positive():
     postings = build_site.build_index({9: b"steel", 2: b"steel", 40: b"steel"})
     assert postings["steel"] == [2, 9, 40]
+
+
+def test_a_missing_checkpoint_claims_no_gaps_rather_than_every_gap(monkeypatch, tmp_path):
+    """Moving the build into CI left the scrapers' checkpoints on the laptop,
+    and the live site spent 17 Aug 2026 telling readers every one of the 101
+    entities was "still being collected" while collection was finished.
+
+    Absent a checkpoint the honest answer is that coverage is unknown. Of the
+    three ways to be wrong, announcing 101 false gaps is the loudest and the
+    worst: it discredits every count on the page at once.
+    """
+    import scrape
+
+    monkeypatch.setattr(scrape, "HIGHER_ED_ENTITIES", ["Campus A"], raising=False)
+    monkeypatch.setattr(scrape, "STATE_ENTITIES", ["Agency B"], raising=False)
+    monkeypatch.setattr(scrape, "STATUSES", ["Active", "Expired"], raising=False)
+    monkeypatch.setattr(scrape, "progress_file",
+                        lambda dataset: f"data/{dataset}_definitely_not_here.json",
+                        raising=False)
+    # Would report every entity as missing if the absent file were read as
+    # "nothing finished".
+    monkeypatch.setattr(scrape, "load_progress", lambda path: (set(), {}), raising=False)
+
+    assert build_site.incomplete_coverage() == []

@@ -54,22 +54,48 @@ days before they were removed.
 
 ## 3. Guard rails
 
-**`d/<buildId>/` and `manifest.json` are the published payload.** ~50 MB per
-build, and they are committed. `python3 scripts/build_site.py` writes a new
-build directory and repoints `manifest.json` (~3 min, ~1.7 GB peak memory);
-both must be committed together, and the old build directory deleted in a
-later commit, not the same one. Published bytes are ~52 MB per build and
-`.git` is already over 300 MB, so don't rebuild for nothing.
+**`d/<buildId>/` and `manifest.json` are the published payload, and they are
+no longer in git** (17 Aug 2026). They are gitignored. `python3
+scripts/build_site.py` still writes them locally — ~3 min, ~1.7 GB peak memory
+— which is how you preview a change before it ships, and the result stays on
+your machine.
 
-The nightly workflow does both phases: it commits the new build and manifest
-together, then retires every build older than the previous one in a *separate*
-follow-up commit, so the build a cached reader's manifest still points at stays
-fetchable. It kept only phase one until Aug 2026, which would have added ~50 MB
-and 369 files to a `.git` already past 400 MB every single week, forever.
+Publishing moved to `.github/workflows/pages.yml`, which builds the payload in
+CI and deploys it as a **Pages artifact**. Pages is set to `build_type:
+workflow`; it is not served from the branch any more. The portfolio site at the
+repo root goes out through the same workflow, so a push publishes in a couple
+of minutes rather than instantly.
 
-`workflow_dispatch` takes a **`dry_run`** input that runs the whole publish leg
-— drift check, `build_site.py`, guard rail — and stops before the commit. Use
-it to check the publish path without spending a build's worth of payload.
+Why: under branch publishing the payload *had* to be committed to be served.
+Retiring superseded build directories kept the working tree small, but nothing
+ever left history — `.git` hit 546 MB and grew ~100 MB per published build,
+forever. Removing 1,469 files stopped that. It did **not** reclaim the ~450 MB
+already in history; that needs a force-push and would invalidate every clone,
+so it remains a separate decision.
+
+How a build reaches the site:
+
+| trigger | what happens |
+|---|---|
+| push to `main` | restores the last payload from the Actions cache and deploys it. No rebuild, so a portfolio edit does not need the CSVs. |
+| nightly, on publish day | `ne-contracts-daily.yml` dispatches `pages.yml` **after** `check_daily_diff.py` passes, which rebuilds from fresh data. |
+
+The dispatch is deliberately not a `workflow_run` trigger. That fires on every
+successful nightly, and the guard rail only runs on the publish day — the site
+would have deployed unguarded data six days out of seven.
+
+Descriptions build properly in CI now rather than being carried forward: the
+workflow downloads `scope.jsonl.gz` (41 MB) from the newest `extraction-data-*`
+release. `carry_descriptions_forward()` remains as the fallback, but it can no
+longer be the main path, because it reads the build being replaced and that
+build is not in the repository.
+
+**Two things the publish must never do**, both asserted in the staging step:
+ship `ne-contracts/data/` (363 MB of scraped CSVs), and deploy a `manifest.json`
+naming a build directory that is not in the artifact.
+
+`workflow_dispatch` on the nightly takes a **`dry_run`** input that runs the
+drift check and guard rail without dispatching a deploy.
 
 **No tracked text file may carry a raw NUL byte**, and `tests/test_no_nul_bytes.py`
 now enforces it across every tracked non-binary file. `index.html` carried one

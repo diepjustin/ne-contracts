@@ -480,12 +480,23 @@ def main():
     meta["descCount"] = len(descriptions)
     meta["descBytes"] = sum(len(d) for d in descriptions.values())
 
-    ne_format.write_payload(outdir, columns, docs, vendor_names, vtok_bytes, meta)
+    # Keep what write_payload returns: it adds each resident file's size, and
+    # the two writers below add keys of their own. meta.json is rewritten after
+    # them, because write_payload works on a copy and cannot see them.
+    meta = ne_format.write_payload(outdir, columns, docs, vendor_names, vtok_bytes, meta)
     ne_format.write_token_blocks(outdir, dn_bytes, view_bytes, n)
     ne_format.write_desc_blocks(outdir, descriptions, n)
     write_search_index(outdir, descriptions, meta)
     write_vendor_groups(outdir, vendor_names, columns, meta)
     write_selftest(outdir, sources, columns["viewPresent"], n)
+    ne_format.write_meta(outdir, meta)
+
+    # A key added after write_payload and lost before the file was written is
+    # invisible: the page just behaves as though the feature is not there.
+    on_disk = json.load(open(os.path.join(outdir, ne_format.META), encoding="utf-8"))
+    for key in ("wordCount", "vendorGroups", "descCount", "bytes", "digests"):
+        if key not in on_disk:
+            sys.exit(f"meta.json is missing {key!r} — it was added after the file was written")
     with open(os.path.join(OUT_DIR, "manifest.json"), "w", encoding="utf-8") as f:
         json.dump({"buildId": build_id, "dir": f"d/{build_id}"}, f)
 

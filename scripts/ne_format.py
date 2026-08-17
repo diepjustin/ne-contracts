@@ -144,9 +144,26 @@ def write_payload(outdir, columns, docs, vendors, vtokens, meta):
     meta["bytes"] = {name: os.path.getsize(os.path.join(outdir, name))
                      for name in RESIDENT + (VTOK,)}
 
+    write_meta(outdir, meta)
+    return meta
+
+
+def write_meta(outdir, meta):
+    """meta.json, on its own.
+
+    Separate because it is written twice on a full build. write_payload needs
+    it early to record each resident file's decompressed size, but the search
+    index and the vendor groups are built afterwards and add keys of their own.
+    write_payload copies the dict it is given, so those additions reached disk
+    only on the --descriptions-only path, which rewrites meta.json at the end.
+
+    Every full build therefore published a payload with no `vendorGroups` and
+    no `wordCount` -- the vendor grouping silently absent -- and it went
+    unnoticed because the builds we inspected had all had --descriptions-only
+    run over them afterwards, which put the keys back.
+    """
     with open(os.path.join(outdir, META), "w", encoding="utf-8") as f:
         json.dump(meta, f, separators=(",", ":"), sort_keys=True)
-    return meta
 
 
 def write_token_blocks(outdir, dn, view, n):

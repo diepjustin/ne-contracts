@@ -275,6 +275,43 @@ The scraper reproduces the state's records faithfully, including their errors.
 - Open-ended records commonly carry an end date of `12/31/2099` or `01/01/2099`.
 - Amounts are as recorded by the state and may not reflect amendments.
 
+## Descriptions
+
+The state publishes no "scope of work" field, so there is nothing to scrape for it. But
+most documents already contain one, written by whoever filed them, and
+`scripts/extract_scope.py` lifts it out of the PDF **verbatim**. Nothing is generated,
+summarised or rewritten — every description on the site is the state's own words, which
+is what makes it quotable. Typos, inconsistent capitalisation and abbreviations are
+theirs and are kept.
+
+They come from three places, in this order of preference:
+
+1. **The contract cover sheet's summary field** — a sentence a person wrote. Preferred
+   wherever it exists, because it beats a list of part numbers.
+2. **University purchase-order line items** — a 40-character-wide description column.
+3. **State agency purchase-order line items** — no fixed width.
+
+Things worth knowing before quoting one:
+
+- **A description is one document's text, not the contract's official scope.** It is
+  whatever the filer typed. Read the source document before quoting; every row links to
+  it.
+- **Descriptions carry administrative text alongside the substance** — invoicing
+  instructions, project reference numbers, contact names, change-order logs. These are
+  kept deliberately rather than filtered, because on some documents the actual scope
+  appears *after* the boilerplate, so a filter aimed at the noise removes the substance.
+- **Both purchase-order forms wrap their description column across several lines**, and
+  until 16 Aug 2026 both parsers read only the first. On the University form that
+  truncated 93% of items — one $15 M construction PO read "GENERAL CONSTRUCTION SERVICES
+  FOR" and stopped. It was found by a reader checking a document against its source, not
+  by us. If you are checking this project's fidelity, that is the method that works.
+- **Coverage is uneven and a blank is not a statement about the contract.** An empty
+  description means the PDF could not be read — usually a scan with no text layer, or a
+  document the state's own viewer does not serve — not that the contract has no scope.
+  The page says so where it happens rather than leaving a blank cell to be misread.
+- **Searching descriptions is opt-in.** The index is a separate download, fetched only
+  when you tick the box, so it costs nothing for readers who do not use it.
+
 ## License
 
 MIT for the code. The underlying records are public data from the Nebraska Department

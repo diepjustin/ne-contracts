@@ -86,6 +86,20 @@ byte through where the four characters spelling it were meant. **If a tool
 suddenly stops finding text that is plainly there, check for NULs first** — and
 if you are writing a NUL-handling fix with a script, check the fix too.
 
+**Check extraction against the source document, not against itself.** Every
+sanity check on the description parsers compared their output to other output,
+or to a regex, and all of them passed while the University parser was
+truncating 93% of what it read. The bug was found by opening a PDF and reading
+it. Tests prove a parser does what you think; only the source proves that what
+you think is right. When you change `extract_scope.py`, pull ten real documents
+and read them.
+
+**A parse rate is not an accuracy rate.** This document reported "100%" and
+"97%" description parses for the two purchase-order forms while both were
+returning truncated text. Those numbers only ever meant "the pattern matched" —
+they say nothing about whether what it captured was the whole field. Do not
+quote them as a quality measure.
+
 **Don't re-scrape casually.** A full run is 20+ hours against a government
 server. The CSVs on disk are complete and checkpointed.
 
@@ -301,16 +315,61 @@ The earlier estimate here ("~47% are scanned … an LLM pass over 150,000+
 documents") came from a contracts-only sample and does not describe the corpus,
 which is 84% purchase orders. Measured instead:
 
+These are *parse* rates -- the pattern matched -- not accuracy rates. See the
+guard rail above: both purchase-order columns were parsing at ~100% while
+returning truncated text.
+
 | | text layer | description parses |
 |---|---|---|
 | University purchase orders | 98.4% | 100% |
 | State agency purchase orders | 68% of the 81% that exist at all | 97% |
 | University contracts | 38.7% | 34% (those with a P2P cover sheet) |
 
-The two forms need two patterns and always will: the University's has a
-40-character fixed-width description column, the state's has none but wraps the
-text past the money columns, so a row's continuation is the text between it and
-the next row. Both are in `extract_scope.py`; do not try to unify them.
+The two forms need two patterns and always will. Both are in
+`extract_scope.py`; do not try to unify them.
+
+**Both of them wrap, and both parsers used to stop at the first line.** This
+was the single worst bug in the project and it survived because this document
+asserted the opposite — that the University's 40-character column *cut* the
+text and that we were faithfully reproducing the state's own truncation. It
+does not cut. It wraps. A reader checked document `4740007268` against the
+source and found the site showing "GENERAL CONSTRUCTION SERVICES FOR" where the
+state wrote "GENERAL CONSTRUCTION SERVICES FOR REMODEL OF BOB DEVANTEY SPORTS
+CENTER PER UNL INVITATION TO BID 909353-12." on a $15,027,565.88 purchase
+order. Fixed 16 Aug in `40d7fe6` (University) and `268a62e` (state).
+
+| | scale of the loss | why it happened |
+|---|---|---|
+| University | 54,280 of 58,060 items wrapped; **93% were truncated** | read only the line carrying the money columns |
+| State agency | **892 of 1,367 tails discarded** | rejected any tail containing a digit |
+
+Neither continuation can simply be appended, and the reasons differ:
+
+- **University:** pdf extraction does not emit the page in reading order, so
+  the lines under a row are often the vendor address block and then the table
+  header. `FURNITURE` is the stop list, built by counting the most common line
+  following an item across 40,000 documents.
+- **State:** the tail may be the *next row* rather than this row's
+  continuation. The marker is its four-decimal quantity and unit-price columns
+  — `ROW_COLUMNS` — because nobody types "1.0000" into a description, and the
+  digit test that preceded it took `1/2 PINT/CONTAINER, 1%` with it.
+
+Both caps were also doing the cutting themselves, which is the same error in
+miniature: 12 lines bound 26% of University items, and the state's 80
+characters sat below the 99th percentile of genuine tails. They are now 25 and
+400, chosen so that they never bind — if either starts binding again the form
+has changed, and the fix belongs in the stop lists, not in the cap.
+
+**What is kept:** everything that is not furniture, verbatim. That includes
+invoicing boilerplate and change-order logs, which read as noise. Document
+`4740018436` is why: it puts "-Scope of Work - Director's office update
+installation" *after* the boilerplate, so a filter aimed at the noise would
+take the substance with it.
+
+The cover-sheet parser was audited for the same class of bug on 16 Aug and does
+not have it — 1,556 of 1,568 parse, boundaries land on the next form field, and
+no page footer appears inside a description across the sample. Do not re-derive
+this.
 
 **19% of state agency documents do not exist** — the state's own viewer has no
 file. No method reaches those rows, ever.

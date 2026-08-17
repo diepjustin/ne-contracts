@@ -94,6 +94,17 @@ it. Tests prove a parser does what you think; only the source proves that what
 you think is right. When you change `extract_scope.py`, pull ten real documents
 and read them.
 
+**How to check descriptions are verbatim.** Compare each description's words
+against its own document's text as an *ordered subsequence*, not as a
+contiguous string. 4,000 sampled documents pass at 100%: every word appears in
+the source, in order, nothing invented.
+
+The contiguous check reports 82% and every "failure" is wrong. University
+descriptions are reassembled across the money columns by design -- the item
+line, then the price, then the wrapped continuation -- so the joined string
+genuinely is not contiguous in the source. Reading that 18% as a data problem
+would send you chasing a bug that is not there.
+
 **A parse rate is not an accuracy rate.** This document reported "100%" and
 "97%" description parses for the two purchase-order forms while both were
 returning truncated text. Those numbers only ever meant "the pattern matched" —

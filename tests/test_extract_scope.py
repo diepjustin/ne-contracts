@@ -268,3 +268,44 @@ def test_the_continuation_cap_is_insurance_and_should_not_be_doing_the_cutting()
     is the parser choosing the boundary rather than the document. Measured at
     25 it never binds. This asserts the property, not the number."""
     assert extract_scope.MAX_CONTINUATION_LINES >= 25
+
+
+# --- the state agency form's wrapped tail -----------------------------------
+
+def _state(rows):
+    return "Line Description " + rows
+
+
+def test_a_numeric_continuation_is_no_longer_thrown_away():
+    """The old rule dropped any tail containing a digit, which lost 892 of
+    1,367 tails. Half of what people type into a description has a number in
+    it: sizes, percentages, container counts."""
+    text = _state("1 MILK, CHOCOLATE 1.0000 EA 0.4200 0.42 1/2 PINT/CONTAINER, 1%")
+    assert extract_scope.state_items(extract_scope.flatten(text)) == [
+        "MILK, CHOCOLATE 1/2 PINT/CONTAINER, 1%"]
+
+
+def test_a_tail_that_is_really_the_next_row_is_still_rejected():
+    """The case the digit rule existed for, and the reason the replacement
+    keys on four-decimal columns rather than on digits. This row has a negative
+    unit price, so STATE_ITEM does not match it and it arrives as a tail."""
+    text = _state("1 FREIGHT 1.0000 EA 0.1900 0.19 "
+                  "4 OFFICE SUPPLIES EXPENSE 1.0000 EA -0.1900 -0.19")
+    items = extract_scope.state_items(extract_scope.flatten(text))
+    assert items == ["FREIGHT"]
+    assert "OFFICE SUPPLIES" not in items[0]
+
+
+def test_a_tail_running_into_page_furniture_is_cut_at_it():
+    """Trimmed from a real document: the description is the word before the
+    DocuSign stamp, and everything after it belongs to the next page."""
+    text = _state("1 MONTHLY PER PORT 1.0000 EA 5.0000 5.00 Estimated "
+                  "DocuSign Envelope ID: 6522138C STATE OF NEBRASKA")
+    assert extract_scope.state_items(extract_scope.flatten(text)) == [
+        "MONTHLY PER PORT Estimated"]
+
+
+def test_the_state_continuation_cap_sits_above_the_measured_p99():
+    """At 80 the cap was below the 99th percentile of genuine tails (293), so
+    it was cutting real descriptions. Asserts the property, not the number."""
+    assert extract_scope.MAX_CONTINUATION >= 300

@@ -117,10 +117,31 @@ STATE_TABLE = "Line Description"
 
 # A state description that outruns the money columns resumes *after* them, so
 # the text between one row and the next belongs to the row before it
-# ("LABOR FOR BUILDING 14'X20'" ... "STORAGE GARAGE"). Only adopt that tail when
-# it is short and carries no digits: anything numeric is the next row starting,
-# not a continuation.
-MAX_CONTINUATION = 80
+# ("LABOR FOR BUILDING 14'X20'" ... "STORAGE GARAGE").
+#
+# The old test for "is this tail actually the next row" was "does it contain a
+# digit", which threw away 892 of 1,367 tails: "MILK, CHOCOLATE" lost "1/2
+# PINT/CONTAINER, 1%", "ICE CREAM" lost "SOFT SERVE, VANILLA, 1/2 GALLO". Half
+# of what people write into a description column has a number in it.
+#
+# What actually marks the next row is its four-decimal quantity and unit-price
+# columns. Nobody types "1.0000" into a description, and every genuine
+# next-row-in-the-tail case carries one -- including the negative-priced rows
+# that STATE_ITEM itself misses, which is how they end up in a tail at all.
+ROW_COLUMNS = re.compile(r"\d[\d,]*\.\d{4}")
+
+# The state's page furniture, for tails that run off the end of the table into
+# the next page's letterhead. Cut the tail here rather than dropping it: the
+# document that produced this list reads "MONTHLY PER PORT Estimated" and then
+# a DocuSign stamp, and the first two words are the description.
+STATE_FURNITURE = re.compile(
+    r"DocuSign Envelope ID|STATE OF NEBRASKA|State Purchasing Bureau"
+    r"|SERVICE CONTRACT AWARD|Page \d+ of \d+")
+
+# Insurance only, after ROW_COLUMNS and STATE_FURNITURE have done the real
+# work. Measured across 1,367 tails: median 13 characters, p99 293. The old
+# value of 80 sat below the p99 and was silently cutting genuine descriptions.
+MAX_CONTINUATION = 400
 
 # Long enough for a paragraph someone genuinely typed, short enough that a
 # runaway capture is obvious rather than shipped. Nine documents in the current
@@ -240,7 +261,16 @@ def state_items(flat):
         stop = rows[i + 1].start() if i + 1 < len(rows) else end_of_table
         tail = flatten(table[row.end():max(stop, row.end())])
         description = row.group(1)
-        if tail and len(tail) <= MAX_CONTINUATION and not any(c.isdigit() for c in tail):
+
+        furniture = STATE_FURNITURE.search(tail)
+        if furniture:
+            tail = tail[:furniture.start()].strip()
+
+        # A tail carrying row columns is the next line item, not this one's
+        # continuation. Drop the whole thing rather than guessing where the row
+        # begins: its own description sits in front of its numbers, so a wrong
+        # cut would file one contract's words under another's money.
+        if tail and not ROW_COLUMNS.search(tail) and len(tail) <= MAX_CONTINUATION:
             description += " " + tail
         descriptions.append(description)
 

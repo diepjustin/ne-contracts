@@ -225,7 +225,6 @@
   </div>
 </div>
 
-<div class="gap-note" id="amounts" hidden></div>
 
 <div class="status" id="status-bar">
   <span id="count">Loading data…</span>
@@ -746,25 +745,6 @@
     view = out.subarray(0, count);
     render();
     summarize();
-    showAmountNote();
-  }
-
-  // The default view is Amount descending, so the very first thing every reader
-  // sees is a $38 billion row -- with nothing to say it is a not-to-exceed
-  // ceiling on a multi-year programme rather than money the state spent. That
-  // caveat lived only in README.md, where readers do not go. Show it exactly
-  // when that sort is active, and not otherwise.
-  function showAmountNote() {
-    var el = $("amounts");
-    var relevant = sortKey === 2 && sortDir < 0;
-    if (!relevant) { el.hidden = true; return; }
-    el.innerHTML =
-      "<b>Largest amounts first.</b> The biggest figures here are mostly " +
-      "not-to-exceed ceilings on multi-year, statewide programmes rather than " +
-      "money paid out — the state values a service contract at the estimated " +
-      "cost of the whole contract including renewals. Treat the top of this " +
-      "column as ceilings, and check the document before quoting one.";
-    el.hidden = false;
   }
 
   function summarize() {

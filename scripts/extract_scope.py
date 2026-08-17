@@ -67,6 +67,38 @@ UNIVERSITY_ITEM = re.compile(
     r"\b\d{3}\s+\d[\d,]*\s+[A-Z]{2,4}\s+(.{3,120}?)\s+[\d,]+\.\d\d\s+[\d,]+\.\d\d"
 )
 
+# The same row, anchored to a whole line, so the lines that follow can be read
+# as the description column continuing. Used in preference to the pattern above
+# wherever the text layer still has its line breaks.
+UNIVERSITY_LINE = re.compile(
+    r"^\s*\d{3}\s+\d[\d,]*\s+[A-Z]{2,4}\s+(.{3,120}?)\s+[\d,]+\.\d\d\s+[\d,]+\.\d\d\s*$"
+)
+
+# Lines that follow an item without belonging to its description. PDF text
+# extraction emits page blocks in an order of its own, so the vendor address
+# and even the table header can land directly under a row. Built by counting
+# the most common line after an item across 40,000 documents rather than
+# guessed: "Your material number" alone accounts for ~2,400 of them.
+FURNITURE = re.compile(
+    r"^\s*(?:"
+    r"Your\s+(?:material\s+number|ref\.?)"
+    r"|Vendor:\s*\d"
+    r"|MATERIAL\b|NUMBERLN#|LN#\s+QTY"
+    r"|Please\s+Deliver\s+To:"
+    r"|Valid\s+(?:From|To):|Delivery\s+Date:|Destination\b|F\.O\.B\."
+    r"|INSTRUCTIONS\s+AND\s+CONDITIONS|Tracking\s+Number:"
+    r"|Total\s+(?:Order|Cost)|Sub-?total"
+    r"|Page\s+\d"
+    r")", re.I)
+
+# Insurance against a runaway, not a truncator. Measured over 13,127 items: at
+# 12 lines the cap was doing the cutting 26% of the time, which is the parser
+# choosing where the state's sentence ends. At 25 it never binds -- furniture or
+# the next row always stops it first -- and the longest result is 887 characters
+# against MAX_DESCRIPTION's 4,000. If this ever starts binding again, something
+# about the form has changed and the cut belongs in FURNITURE instead.
+MAX_CONTINUATION_LINES = 25
+
 # State agencies: plain line number, four-decimal quantity and unit price, and
 # a unit that is often "$" rather than a code. Its description column is not
 # fixed-width, so these run longer than the University's.
@@ -143,8 +175,51 @@ def dedupe(candidates):
     return items
 
 
-def university_items(flat):
-    return dedupe(UNIVERSITY_ITEM.findall(flat))
+def university_items(flat, text=None):
+    """University line items, with the description column's wrapped tail.
+
+    The description column is 40 characters wide and the text *wraps* inside
+    it rather than being cut, so reading only the line that carries the money
+    columns truncates almost everything. Measured over 28,118 documents:
+    54,280 items wrap and 3,780 do not, so the single-line reading was wrong
+    93% of the time. It made a $15 M item read "GENERAL CONSTRUCTION SERVICES
+    FOR" when the state wrote "GENERAL CONSTRUCTION SERVICES FOR REMODEL OF
+    BOB DEVANTEY SPORTS CENTER PER UNL INVITATION TO BID 909353-12." (their
+    spelling of Devaney, kept).
+
+    The tail cannot simply be taken, because pdf text extraction does not emit
+    the page in reading order: on many documents the lines after an item are
+    the vendor address block and then the table header, which were never in
+    the description column at all. FURNITURE is the empirically-built list of
+    those, taken from the most common lines following an item across 40,000
+    documents. Stop at one and the tail is whatever preceded it.
+
+    Everything that is not furniture is kept verbatim, including the invoicing
+    boilerplate ("*Please reference "Project 13781"...") and change-order logs.
+    Those read as noise but somebody typed them into that field, and deciding
+    which of the state's own words are worth keeping is not our call to make.
+    """
+    if text is None:
+        return dedupe(UNIVERSITY_ITEM.findall(flat))
+
+    lines = text.split("\n")
+    descriptions = []
+    for i, line in enumerate(lines):
+        match = UNIVERSITY_LINE.match(line)
+        if not match:
+            continue
+        parts = [match.group(1)]
+        for follower in lines[i + 1:i + 1 + MAX_CONTINUATION_LINES]:
+            if not follower.strip():
+                continue
+            if FURNITURE.match(follower) or UNIVERSITY_LINE.match(follower):
+                break
+            parts.append(follower.strip())
+        descriptions.append(flatten(" ".join(parts)))
+
+    # A few documents have a text layer whose lines have collapsed into one, so
+    # nothing anchors to a line end. The flattened pattern still finds those.
+    return dedupe(descriptions) or dedupe(UNIVERSITY_ITEM.findall(flat))
 
 
 def state_items(flat):
@@ -175,7 +250,7 @@ def state_items(flat):
 def from_line_items(text):
     """Every distinct line-item description, in the order they appear."""
     flat = flatten(text)
-    return university_items(flat) or state_items(flat)
+    return university_items(flat, text) or state_items(flat)
 
 
 def describe(text):

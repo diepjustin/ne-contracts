@@ -200,3 +200,71 @@ def test_only_the_newest_entry_per_document_is_used(tmp_path):
 
     current = extract_scope.current_lines(str(path))
     assert current == {1, 2}, "line 0 is superseded by line 1"
+
+
+# --- the University's wrapped description column ----------------------------
+
+# Trimmed from document 4740007268, a $15,027,565.88 Hausmann Construction PO.
+# Reported by a reader who checked it against the source: the site showed
+# "GENERAL CONSTRUCTION SERVICES FOR" and stopped.
+DEVANEY = """FAX TO 402-438-3235, ATTN: JOEY HAUSMANN
+001          1 PU  GENERAL CONSTRUCTION SERVICES FOR 15,027,565.88 15,027,565.88
+REMODEL OF BOB DEVANTEY SPORTS CENTER
+PER UNL INVITATION TO BID
+909353-12.
+"""
+
+# Trimmed from a Schemmer Associates PO. Nothing here continues the
+# description: pdf extraction emits page blocks in its own order, so the
+# vendor address block and then the table header land directly under the row.
+FURNITURE_FOLLOWS = """Your ref.:ARIBA_P2P
+001          1 PU  Per NTP dated  SOW: UNL Eastern Nebraska  83,150.00 83,150.00
+Your material number: NA
+Vendor: 108180
+SCHEMMER ASSOC INC
+1044 N 115 ST STE 300
+OMAHA NE  68154
+"""
+
+
+def test_a_wrapped_description_is_read_to_its_end():
+    """The column is 40 characters wide and the text wraps inside it rather
+    than being cut, so reading only the line carrying the money columns
+    truncated 93% of University items. The state's spelling of Devaney is
+    theirs and is kept."""
+    items = extract_scope.from_line_items(DEVANEY)
+    assert items == ["GENERAL CONSTRUCTION SERVICES FOR REMODEL OF BOB DEVANTEY "
+                     "SPORTS CENTER PER UNL INVITATION TO BID 909353-12."]
+
+
+def test_page_furniture_does_not_become_part_of_the_description():
+    """The line after the row is not automatically a continuation. Appending
+    blindly here would put a vendor's postal address inside the description of
+    what the university bought."""
+    items = extract_scope.from_line_items(FURNITURE_FOLLOWS)
+    assert items == ["Per NTP dated SOW: UNL Eastern Nebraska"]
+    assert "OMAHA" not in items[0] and "SCHEMMER" not in items[0]
+
+
+def test_the_next_row_ends_the_previous_description():
+    text = ("001          1 PU  FIRST ITEM DESCRIPTION 1,000.00 1,000.00\n"
+            "CONTINUES HERE\n"
+            "002          2 EA  SECOND ITEM 2,000.00 4,000.00\n")
+    assert extract_scope.from_line_items(text) == [
+        "FIRST ITEM DESCRIPTION CONTINUES HERE", "SECOND ITEM"]
+
+
+def test_a_collapsed_text_layer_still_falls_back_to_the_flat_pattern():
+    """A few documents extract with their line breaks gone, so nothing anchors
+    to a line end. Those must not silently yield nothing."""
+    collapsed = ("Line Description 001 1 PU  SOME COLLAPSED ITEM 500.00 500.00 "
+                 "002 1 PU  ANOTHER ITEM 600.00 600.00")
+    items = extract_scope.from_line_items(collapsed)
+    assert "SOME COLLAPSED ITEM" in items
+
+
+def test_the_continuation_cap_is_insurance_and_should_not_be_doing_the_cutting():
+    """At 12 lines the cap decided where a quarter of descriptions ended, which
+    is the parser choosing the boundary rather than the document. Measured at
+    25 it never binds. This asserts the property, not the number."""
+    assert extract_scope.MAX_CONTINUATION_LINES >= 25

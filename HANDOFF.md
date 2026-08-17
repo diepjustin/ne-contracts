@@ -165,10 +165,10 @@ than impossible to recreate, and both have a home to fetch them from:
 # CSVs (362 MB, ~20h of scraping) — cached by the nightly workflow.
 gh workflow run ne-contracts-rescue-cache.yml --ref main   # then download its artifact
 
-# Document text and descriptions (1.4 GB, ~19h of downloading) — a Release,
+# Document text and descriptions (1.5 GB, ~36h of downloading) — a Release,
 # because nothing else keeps them. doc_text.jsonl is the one that matters;
 # scope.jsonl rebuilds from it in 30s with scripts/extract_scope.py.
-gh release download extraction-data-2026-08-16 -D ne-contracts/data
+gh release download extraction-data-2026-08-17 -D ne-contracts/data
 cd ne-contracts/data && gunzip doc_text.jsonl.gz scope.jsonl.gz
 ```
 

@@ -14,11 +14,19 @@ Two sources, in descending order of how much they tell you:
     is filled in by hand: "Coaches Replay system to be used by MBB." This is
     the closest thing to a scope of work the state publishes.
 
-  * A **line-item table**. Purchase orders list what was bought. The
-    description column is a fixed 40-character field in the source form, so
-    entries arrive truncated mid-word ("Logitech MK540 Advanced Wireless
-    Keyboar"). That truncation is the state's, not ours, and it is why these
-    are item descriptions rather than scopes of work.
+  * A **line-item table**. Purchase orders list what was bought. These are
+    item descriptions rather than scopes of work, and they carry the
+    administrative text people type alongside them -- invoicing instructions,
+    project numbers, change-order logs -- which is kept, because on some
+    documents the scope appears after the boilerplate.
+
+    The University's column is 40 characters wide and the text *wraps* inside
+    it. It does not cut. This file used to say the opposite, and both parsers
+    were built to that belief: they read only the line carrying the money
+    columns and dropped every continuation, truncating 93% of University items
+    and discarding 892 of 1,367 state tails. A reader caught it by comparing a
+    $15 M purchase order against its source PDF. Do the same before trusting
+    any change here -- comparing output to output cannot see this class of bug.
 
 Reads whatever text scripts/extract_text.py has already captured and writes
 one record per document it can describe. It makes no network requests, so it
@@ -61,17 +69,30 @@ COVER_SHEET = re.compile(
 # description boundary unambiguous in both.
 
 # University: zero-padded line number, whole-number quantity, an alphabetic
-# unit code, two-decimal money. The description column is a fixed 40 characters
-# wide, which is where the mid-word truncation comes from.
+# unit code. The description column is 40 characters wide and *wraps* inside
+# that width -- it does not cut, which is what university_items() reads to the
+# end of.
+#
+# The unit-price column carries two OR four decimals ("2.62 26.20" but also
+# "0.1580 15.80" where the unit price is fractions of a cent). Allowing only
+# two silently skipped every fourth-decimal row: a Mouser order for ceramic
+# capacitors lost its parts entirely and kept only "SHIPPING". The total column
+# is always two.
 UNIVERSITY_ITEM = re.compile(
-    r"\b\d{3}\s+\d[\d,]*\s+[A-Z]{2,4}\s+(.{3,120}?)\s+[\d,]+\.\d\d\s+[\d,]+\.\d\d"
+    r"\b\d{3}\s+\d[\d,]*\s+[A-Z]{2,4}\s+(.{3,120}?)\s+[\d,]+\.\d{2,4}\s+[\d,]+\.\d\d"
 )
 
 # The same row, anchored to a whole line, so the lines that follow can be read
 # as the description column continuing. Used in preference to the pattern above
 # wherever the text layer still has its line breaks.
+#
+# The total column is optional because a no-charge row prints only one figure
+# ("001 1 EA ABHD5 Rabbit pAb - 100 L 0.00"). Requiring both dropped every free
+# line item -- on an antibody order that meant losing the samples and keeping
+# only what was invoiced. Optional only here: the flattened fallback has no
+# line ends to stop it, so a single money column there would run on.
 UNIVERSITY_LINE = re.compile(
-    r"^\s*\d{3}\s+\d[\d,]*\s+[A-Z]{2,4}\s+(.{3,120}?)\s+[\d,]+\.\d\d\s+[\d,]+\.\d\d\s*$"
+    r"^\s*\d{3}\s+\d[\d,]*\s+[A-Z]{2,4}\s+(.{3,120}?)\s+[\d,]+\.\d{2,4}(?:\s+[\d,]+\.\d\d)?\s*$"
 )
 
 # Lines that follow an item without belonging to its description. PDF text
@@ -278,8 +299,21 @@ def state_items(flat):
 
 
 def from_line_items(text):
-    """Every distinct line-item description, in the order they appear."""
+    """Every distinct line-item description, in the order they appear.
+
+    Which form this is gets decided before either parser runs, rather than by
+    letting whichever pattern matches first win. That ordering was a latent
+    trap: widening the University unit-price column to accept four decimals
+    made its row pattern start matching lines inside *state* food-service
+    orders, which then never reached the state parser at all. A 1,000-character
+    grocery order came back as "26 CHICKEN BREAST BONELESS 48/4OZ 1.0000 CS".
+
+    The state's table header is the discriminator. Measured over 1,025 state
+    documents it never once co-occurs with a University row.
+    """
     flat = flatten(text)
+    if STATE_TABLE in flat:
+        return state_items(flat) or university_items(flat, text)
     return university_items(flat, text) or state_items(flat)
 
 

@@ -77,8 +77,10 @@ def test_cover_sheet_present_but_empty_returns_none():
 # --- University purchase orders ---------------------------------------------
 
 # Zero-padded line number, whole quantity, alphabetic unit, two-decimal money.
-# The description column is a fixed 40 characters, which is where the mid-word
-# truncation comes from -- "Keyboar" is the state's cut, not ours.
+# This fixture is flattened onto one line, which is the collapsed-text-layer
+# case; "Keyboar" is where the 40-character column wrapped, and on a document
+# that kept its line breaks the rest of the word is on the next line. See
+# test_a_wrapped_description_is_read_to_its_end.
 UNIVERSITY_PO = (
     "Your ref.:ARIBA_P2P "
     "001 6 EA 1/4 in. Square Head and Solid Domestic B 3.53 21.18 "
@@ -150,10 +152,21 @@ def test_state_descriptions_are_not_capped_at_forty():
     assert extract_scope.from_line_items(text) == [long_item]
 
 
-def test_university_form_wins_when_both_patterns_could_fire():
-    """A document carrying both must not be parsed twice or by the wrong rule."""
+def test_the_state_header_decides_the_form_when_both_patterns_could_fire():
+    """A document carrying both must not be parsed twice or by the wrong rule.
+
+    This test previously asserted the opposite -- that the University pattern
+    wins -- which was only ever a description of the order the two parsers
+    happened to run in. It became wrong the moment the University unit-price
+    column was widened to four decimals, because its row pattern then started
+    matching lines inside state grocery orders and swallowing them.
+
+    Measured over 1,025 real state documents, the state's table header never
+    co-occurs with a University row, so no real document is ambiguous. Where a
+    pattern fires spuriously, the header is the authority.
+    """
     assert extract_scope.from_line_items(UNIVERSITY_PO + STATE_PO) == \
-        extract_scope.from_line_items(UNIVERSITY_PO)
+        extract_scope.from_line_items(STATE_PO)
 
 
 # --- collapsed layouts ------------------------------------------------------
@@ -309,3 +322,40 @@ def test_the_state_continuation_cap_sits_above_the_measured_p99():
     """At 80 the cap was below the 99th percentile of genuine tails (293), so
     it was cutting real descriptions. Asserts the property, not the number."""
     assert extract_scope.MAX_CONTINUATION >= 300
+
+
+def test_a_four_decimal_unit_price_row_is_not_skipped():
+    """Trimmed from Mouser order E001035135. The unit-price column carries
+    four decimals when the price is fractions of a cent. Allowing only two
+    skipped the row outright, so a capacitor order described itself as
+    "SHIPPING" -- the one row cheap enough to have a two-decimal price."""
+    text = ("001        100 EA  Multilayer Ceramic Capacitors MLCC - SMD 0.1580 15.80\n"
+            "Your material number: 810-CGA4J3X7R1H684MB\n"
+            "002          1 EA  SHIPPING  7.99 7.99\n")
+    items = extract_scope.from_line_items(text)
+    assert items == ["Multilayer Ceramic Capacitors MLCC - SMD", "SHIPPING"]
+
+
+def test_a_state_form_is_not_parsed_by_the_university_pattern():
+    """The form is chosen by its own header, not by whichever pattern happens
+    to match first. Widening the University unit price to four decimals made
+    its row pattern start matching inside state grocery orders, which then
+    never reached the state parser: a 1,000-character order came back as one
+    fragment carrying its own row columns."""
+    text = ("Line Description\n"
+            "26 CHICKEN BREAST BONELESS 48/4OZ 1.0000 CS 45.6700 1,187.42\n"
+            "27 POTATO HSHBRN SHD 2.0000 CS 12.5000 25.00\n")
+    items = extract_scope.from_line_items(text)
+    assert items == ["CHICKEN BREAST BONELESS 48/4OZ", "POTATO HSHBRN SHD"]
+    assert not any("1.0000" in i for i in items), "row columns leaked into a description"
+
+
+def test_a_no_charge_row_prints_one_money_column_and_still_counts():
+    """Trimmed from antibody order E001130822. Free items show a single
+    figure, so requiring both columns dropped them -- the order kept only the
+    lines it was billed for and silently lost the rest."""
+    text = ("001          1 EA  ABHD5 Rabbit pAb - 100 L 0.00\n"
+            "Your material number: A6801\n"
+            "002          1 EA  ACC1 Rabbit mAb - 100 L  358.00 358.00\n")
+    assert extract_scope.from_line_items(text) == [
+        "ABHD5 Rabbit pAb - 100 L", "ACC1 Rabbit mAb - 100 L"]

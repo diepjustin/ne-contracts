@@ -46,3 +46,10 @@ __pycache__/
 
 # OS
 .DS_Store
+
+# The published payload. Built by .github/workflows/pages.yml and deployed as a
+# Pages artifact, never committed -- ~100 MB per build entered git history
+# permanently under the old branch-publishing setup, and .git reached 546 MB.
+# Build locally with scripts/build_site.py to preview; the result stays local.
+d/
+manifest.json

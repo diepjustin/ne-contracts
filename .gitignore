@@ -39,7 +39,7 @@ data/scope.jsonl
 data/scope*.jsonl
 data/*.new.jsonl
 
-# prototype-search/ was retired in Aug 2026 (see HANDOFF.md section 8) -- the
+# prototype-search/ was retired in Aug 2026 (see README.md, "Open work") -- the
 # chunked index is no longer published. search.sqlite stays ignored because the
 # local copy is still on disk and regenerable from data/doc_text.jsonl, and it
 # must never be committed: it is 503 MB.

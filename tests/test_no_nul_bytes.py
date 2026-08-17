@@ -10,8 +10,9 @@ whether an edit landed.
   * index.html, Stage 3: a sort separator written as a literal byte where
     the escape was meant. It defeated two attempts to verify a deploy, and
     I twice told the user their change had not shipped when it had.
-  * HANDOFF.md: the paragraph explaining the bug above contained the byte
-    it was explaining, so the handoff document was itself unsearchable.
+  * The handoff document, since merged into README.md: the paragraph explaining
+    the bug above contained the byte it was explaining, so the document was
+    itself unsearchable.
 
 Both were written by an editing script that passed the byte through instead
 of the four characters that spell it. This test is the cheap standing guard:

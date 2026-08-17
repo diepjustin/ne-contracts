@@ -20,7 +20,7 @@ REPORT = os.path.join(ROOT, "data", "daily_diff_report.json")
 
 # Losing half an entity's active documents in a single day is far outside
 # plausible staggered-expiration churn -- contracts and purchase orders run
-# months to years with end dates spread across the calendar (see HANDOFF.md's
+# months to years with end dates spread across the calendar (see README.md's
 # data caveats), so natural single-day attrition should be a few percent at
 # most. A drop this size is much more likely a scrape failure (empty page
 # misread as zero results, a renamed/retired entity -- see

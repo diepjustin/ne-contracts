@@ -634,7 +634,7 @@ def save_daily_progress(path, done_entities):
 
 def run_daily(args):
     """Scrape only Status=Active for one dataset and diff against what the
-    existing CSV already knows is Active -- see scripts/README or HANDOFF.md
+    existing CSV already knows is Active -- see README.md, "Daily updates"
     for why this is safe (build_site.py's exact-fingerprint dedup) and what
     it deliberately does not catch (amendments to an already-Active record).
     """

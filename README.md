@@ -6,16 +6,29 @@ A journalism and accountability tool for scraping and publishing Nebraska state 
 records from the [Nebraska State Contracts Database](https://statecontracts.nebraska.gov/Search),
 the public database mandated by **Neb. Rev. Stat. § 84-602.04**.
 
-This folder contains two things: a scraper, and a static searchable website built from
-what it collects. `index.html` lives at the folder root, alongside the `d/<buildId>/`
-directory it reads, because that root is the published URL.
+Two things live here: a scraper, and a static searchable site built from what it
+collects. `index.html` sits at the folder root because that root is the published URL.
+There is no backend and no framework.
 
-## Coverage
+**739,605 records · 540,074 descriptions · 92 entities · one 6.81 MB page.**
 
-**738,195 records across 92 entities** — every state agency, board and commission the
+| | |
+|---|---|
+| [What's in the data](#whats-in-the-data) | coverage, caveats, descriptions |
+| [Running it](#running-it) | scrape, build, preview, restore |
+| [How it works](#how-it-works) | scraper, payload, publishing |
+| [Guard rails](#guard-rails) | read before changing anything that writes |
+| [Things that bit us](#things-that-bit-us) | expensive to rediscover |
+| [Open work](#open-work) | what is unfinished, and what is not worth doing |
+
+---
+
+## What's in the data
+
+**739,605 records across 92 entities** — every state agency, board and commission the
 database lists (83), plus all nine University of Nebraska and Nebraska State College
-campuses. Both Active and Expired documents, contracts and purchase orders.
-**Collection is complete**; the page carries no outstanding-entity warning.
+campuses. Both Active and Expired, contracts and purchase orders. **Collection is
+complete.**
 
 | | Records |
 | --- | ---: |
@@ -30,266 +43,82 @@ campuses. Both Active and Expired documents, contracts and purchase orders.
 | Peru State College | 489 |
 | Nebraska State College System | 131 |
 
-Two campuses now hold 61% of everything, almost all of it purchase orders. On the
-agency side three dominate: Correctional Services (61,783), Health & Human Services
-(60,682) and Roads (39,253) are together about 70% of state agency records.
+Two campuses hold 61% of everything, almost all purchase orders. On the agency side
+three dominate: Correctional Services (61,783), Health & Human Services (60,682) and
+Roads (39,253) are about 70% of state agency records.
 
-The page still names any outstanding entity itself, reading the scrapers' checkpoints,
-so a partly-collected entity is never silently indistinguishable from an empty one.
+The page names any outstanding entity itself, reading the scrapers' checkpoints, so a
+partly-collected entity is never silently indistinguishable from an empty one.
 
-## The scraper
-
-```bash
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-
-python3 scripts/scrape.py contract          # -> data/nu_contracts.csv
-python3 scripts/scrape.py purchase-order    # -> data/nu_purchase_orders.csv
-python3 scripts/scrape.py state             # -> data/state_agencies.csv
-```
-
-The site splits entities into two categories that need different handling. Higher
-Education searches take a Contract/Purchase Order filter and render into a
-`table#entitygrid`; State searches have no such filter and render into a
-`table#agencygrid`. `scrape.py` branches on both.
-
-The state run covers 83 agencies over many hours, so it checkpoints each completed
-`(entity, status)` combo to `data/state_scrape_progress.json` and is safe to interrupt.
-On resume it discards rows from any combo that was cut off mid-scrape, then continues.
-
-```bash
-python3 scripts/scrape.py state --status                    # progress, no network calls
-python3 scripts/scrape.py state --hours 3                   # stop cleanly after 3 hours
-python3 scripts/scrape.py state --entity "Roads, Department of"   # one agency (any dataset)
-scripts/run_state_scrape_cycles.sh 3 30                     # 3h work / 30min pause, repeating
-```
-
-`scripts/check_entity_drift.py` re-fetches both entity lists from the site and reports
-anything added, removed, or renamed. Run it before a full re-scrape — `build_site.py`
-hard-fails on any entity name in the CSVs that isn't in its list.
-
-Output columns: `Document Number`, `Document Type`, `Entity Code`, `Entity Name`,
-`Vendor`, `Amount`, `Begin Date`, `End Date`, `Status`, `Detail URL`, `View URL`.
-
-`Entity Name` holds the canonical dropdown name rather than the site's rendering of it
-(State result grids shout it in caps: `DRY BEAN COMMISSION`). Both the resume checkpoint
-and `build_site.py`'s entity guard match on that exact string. `Entity Code` still carries
-the state's own identifier.
-
-Each run stamps its completion time into `data/scrape_meta.json`, keyed by dataset, which
-is where the "Last updated" line on the page comes from. `build_site.py` publishes the
-**oldest** of the stamps — the dataset is only as current as its stalest part.
-
-`View URL` links straight to the scanned document. It is blank for 6.37% of records
-(47,050 of 738,195), where the state has not uploaded a file ("Documents not available
-for immediate viewing"). `Detail URL` is present on every row.
-
-A long paginated scrape needs one more thing to be correct. The site keeps its results
-in server-side state that expires: after roughly 2,000 pages of continuous paging every
-further page comes back "No results found", which is indistinguishable from the end of
-the data. Reading it as the end once marked UNL purchase orders complete at 144,425 of
-178,573 records, with no error anywhere. The scraper now re-runs the query and returns
-to its position; that fired twice during the Medical Center's 9,186 pages and saved
-about 170,000 records.
-
-### A note on speed
-
-Detail pages are fetched on a pool of sessions that have never run a search. This is
-not incidental: the site keeps search results in server-side session state and
-serializes every request that touches it, so concurrent fetches on the searching
-session queue behind one another. Using search-free sessions took a page of 25 detail
-fetches from ~26s to ~5s — about a 7x speedup over the full job. See `detail_session()`
-in `scripts/scrape.py` before changing it.
-
-Requests are still paced and retried with backoff.
-
-Pacing is set from measurement, not intuition. A page of 25 records costs one results
-request plus 25 detail requests, so detail fetches are ~96% of all traffic and
-`MAX_WORKERS`/`DETAIL_DELAY` are what actually govern load. Two things worth knowing
-before tuning them:
-
-- **More workers does not mean faster.** An A/B against the live site (same agency, same
-  page) had 15 and 20 workers finishing in the same ~3.98s, while median detail latency
-  rose from 1.15s to 1.42s. The site is already the bottleneck; extra concurrency only
-  queues up and makes it work harder for nothing.
-- **`PAGE_DELAY` was mostly dead time.** Consecutive results requests are already
-  separated by the ~2.6s of detail fetching between them, so a full second of additional
-  sleep bought little. It is now 0.3s.
-
-Each combo reports its median detail-fetch time, and flags a sustained climb past 2.0s.
-The site's healthy baseline is ~0.95s; a run that drifts well above that is asking for
-more than the site wants to give, and the pacing above should come back down.
-
-## Daily updates
-
-The full scrape above is a one-time (or occasional-maintenance) job. Day to day, the
-state adds records under **`Status=Active`**, which is only ~7.3% of all pages, so
-`scripts/scrape.py <dataset> --daily` re-scans just that status per entity and diffs it
-against what the existing CSV already knows is Active, matched on `Detail URL`:
-
-```bash
-python3 scripts/scrape.py contract --daily
-python3 scripts/scrape.py purchase-order --daily
-python3 scripts/scrape.py state --daily
-```
-
-A record it hasn't seen before gets a detail fetch and a new row, same as a full scrape.
-A record it already knew about is skipped entirely — no detail fetch, no rewrite. A
-record that was previously Active but doesn't show up today gets its existing row's
-`Status` flipped to `Expired` in place. This deliberately does **not** catch an amendment
-to an existing Active record's Amount/Vendor/End Date — only a full re-scrape does that.
-
-Each run appends per-entity counts to `data/daily_diff_report.json`
-(gitignored, like the other progress files). `scripts/check_daily_diff.py` reads it and
-fails if any single entity had more than half its previously-Active records flip to
-Expired in one day — implausible as real-world attrition, but exactly what a
-renamed/retired entity looks like (see `check_entity_drift.py`).
-
-`.github/workflows/ne-contracts-daily.yml` runs `--daily` for all three datasets every
-night, and on Sundays additionally runs `check_entity_drift.py` → `build_site.py` →
-`check_daily_diff.py` → commit + push, in that order, so a bad week never reaches the
-live site. See `HANDOFF.md` for the cache-bootstrap step this needs on a fresh clone.
-
-## The website
-
-`index.html` is a self-contained static site — no build step, no dependencies, no server.
-
-```bash
-python3 scripts/build_site.py   # data/*.csv -> d/<buildId>/
-python3 scripts/serve_site.py   # preview at http://127.0.0.1:8765
-```
-
-`build_site.py` normalizes 362 MB of CSV into a payload split by how the page actually
-uses it. It gets there first by exploiting the structure of the state's URLs: `DT` is
-determined by document type, `V` maps 1:1 with vendor, and `A`/`D`/`N` vary together
-across only 98 distinct combinations, so each row carries a small index instead of three
-long tokens. Every URL is round-trip verified against the original before the payload is
-written — 1,429,340 of them — so the compression is lossless.
-
-That verification is worth keeping honest about: `A`, `D` and `N` each looked
-entity-determined at two-entity scale, and still did across five. At 92 entities the
-rule breaks — twelve agencies carry more than one `N`, and three `N` values span
-agencies. The round-trip check is what caught it rather than shipping broken links.
-
-### Why the payload is columns and not JSON
-
-One JSON file of all 738,195 rows is ~104 MB, ~49 MB gzipped, and roughly 380 MB of
-heap — minutes to load and an out-of-memory crash on a phone. The same values packed
-column-wise compress about 5x better, because a column of integers is far more
-compressible than the same integers interleaved with JSON punctuation.
-
-So the payload is split by access pattern:
-
-| | gzipped, as Pages serves it |
-| --- | ---: |
-| numeric columns, vendor names, document numbers — **loaded up front** | **6.94 MB** |
-| link tokens — **fetched on demand**, in 361 blocks of 64 KB | 25.45 MB |
-
-The resident half is *smaller than the 16 MB the site used to ship for 40% of the data.*
-Link tokens are needed only for rows someone actually clicks or exports, so they wait.
-
-Two findings shaped this, both verified against the live CDN rather than assumed:
-
-- **Ranged HTTP requests are unusable on GitHub Pages.** A range request that advertises
-  gzip — which browsers always do, and `fetch()` cannot override — is served against the
-  *compressed* representation. Ask for bytes 100–115 and you get 16 bytes of a gzip
-  stream, plus a `Content-Range` denominator that is the compressed length. Deferred data
-  is therefore separate block files, never byte ranges. This probably also explains the
-  unresolved query latency in the retired `prototype-search/` prototype.
-- **Pages does gzip `application/octet-stream`**, so raw binary compresses in transit with
-  no client-side work.
-
-`scripts/ne_format.py` owns the layout and is the only place that knows it. Each file
-holds one item size, so a section's offset is `n * itemsize * index` — no header, no
-offset table, no padding, and the reader checks every file's length against `meta.count`.
-
-Client-side cost, measured in-browser on all 738,195 rows: a keystroke filters in
-**4–21 ms**, a column's first sort takes 56–199 ms and is cached after, and peak heap is
-**~90 MB** — against ~154 MB for the old payload at 40% of the size. Sorting happens once
-per column rather than once per keystroke: the page caches an ordering and filtering
-walks it, so results come out already sorted.
-
-Two things that only appear at this scale, both handled:
-
-- Row ids move on every rebuild, so the shareable `?doc=` link carries document number,
-  agency and type code instead. Document number alone is not unique — 14,633 of them are
-  reused across agencies, covering 29,321 rows.
-- Browsers cap element height at 2^24 px. All 738,195 rows at 33 px is 24.4 million, so
-  the virtual scroller's spacer rows would be truncated and the last third of the table
-  unreachable. Past 15 M px the scroll position is scaled onto the list instead.
-
-Loading `/?selftest=1` checks every column against a CRC recorded at build time and
-rebuilds 1,000 sampled URLs against addresses taken from the source CSVs. Run it against
-the deployed site, not a local server: only a real deployment exercises gzip in transit,
-and CDN behavior produced the one design-changing surprise here.
-
-Publishing needs no configuration: this folder lives in the `diepjustin.github.io`
-user site, which already serves `main` at the repo root, so pushing updates the live
-page. To refresh the data, re-run the scraper, re-run `build_site.py`, then commit the
-new `d/<buildId>/`, `manifest.json` and `data/scrape_meta.json`. `index.html` carries no
-build identity — it reads `manifest.json` with `cache: 'no-store'` — so a reader holding
-a stale copy of the page can never pair it with a different build's data.
-
-## Data caveats
+### Caveats worth knowing before you quote it
 
 The scraper reproduces the state's records faithfully, including their errors.
 
 - **This is not a complete record of state spending, and the gaps are not random.** The
-  state's own [FAQ](https://das.nebraska.gov/materiel/contract-database/faq.html) says the
-  database excludes contracts from Health & Human Services, the University of Nebraska,
-  the State Colleges, Veterans' Affairs, Education, the Commission for the Blind and
-  Visually Impaired, and the Nebraska Investment Finance Authority "that provide specific
-  aid, assistance, or services to a specific individual." Those are among the largest
-  agencies here, so their totals understate what they actually spend. Do not read an
-  agency's total as its budget.
+  state's own [FAQ](https://das.nebraska.gov/materiel/contract-database/faq.html) says
+  the database excludes contracts from Health & Human Services, the University, the
+  State Colleges, Veterans' Affairs, Education, the Commission for the Blind and
+  Visually Impaired, and the Nebraska Investment Finance Authority "that provide
+  specific aid, assistance, or services to a specific individual." Those are among the
+  largest agencies here, so their totals understate what they actually spend. **Do not
+  read an agency's total as its budget.**
+- **A handful of records carry billion-dollar values and will dominate any total.** The
+  largest is `95601`, HHS / "CREIGHTON UNIVERSITY - ALL PAYMENTS", at $38,025,000,000,
+  then three Medicaid managed-care contracts at $6,650,000,000 each and `58-1-1451`
+  (EBSCO, UNL) at $4,000,000,000. Some are plausibly real not-to-exceed ceilings on
+  multi-year statewide programs rather than errors — the state's FAQ says service
+  contracts are valued at the estimated cost of the whole contract including renewals.
+  Treat the top of the amount column as ceilings, not money spent.
+- **Vendor names are fragmented, and the site only partly repairs it.** The state
+  records one firm many ways: 26 spellings of Hausmann Construction total $1.40 B where
+  the largest single spelling shows $903 M. About 9,000 vendor strings sit in a cluster
+  with at least one other, holding **$11.02 B** between them. Four companies have been
+  reviewed by hand and grouped; the rest have not. See [Open work](#open-work).
 - **Purchase orders are not a Higher Education thing, even though the site makes them
   look like one.** The search form only offers a Contract/Purchase Order filter for
-  Higher Education, so on the agency side the distinction is invisible — but it is in the
-  records. Ten of the 32 agency document-type codes (`O9`, `OM`, `OP`, `X7`, `Y6`, `Y7`,
-  `Z8`, `Z9`, `ZO`, `ZP`) are filed under "Purchase Orders", covering 152,210 records, or
-  about 65% of all agency data. Overall the dataset is 619,601 purchase orders to 118,594
-  contracts — the reverse of what the interface implies.
-- **Document types are the source system's internal codes**, not labels — `OP`, `O4`,
-  `Z4`, `ZP` and 30 others. The state publishes no key. `scripts/type_groups.json` maps
-  each to the category its detail page files it under, which is what the page filters on;
-  the raw code stays in the table (hover the Type cell) and in the CSV export. That
-  mapping is a sampled observation, not a published key — and one code contradicts it:
-  `PO`, which the site's own Purchase Order search returns, has a detail page headed
-  "Contracts". The map overrides it, since the search filter is the better authority.
-- **Only documents active on or after January 1, 2014 are in the database at all.**
+  Higher Education, so on the agency side the distinction is invisible — but it is in
+  the records. Ten of the 32 agency document-type codes (`O9`, `OM`, `OP`, `X7`, `Y6`,
+  `Y7`, `Z8`, `Z9`, `ZO`, `ZP`) are filed under "Purchase Orders", covering 152,210
+  records, about 65% of agency data. Overall the dataset is 619,601 purchase orders to
+  118,594 contracts — the reverse of what the interface implies.
+- **Document types are the source system's internal codes**, not labels. The state
+  publishes no key. `scripts/type_groups.json` maps each to the category its detail page
+  files it under, which is what the page filters on; the raw code stays in the table
+  (hover the Type cell) and in the CSV export. That mapping is a sampled observation,
+  and one code contradicts it: `PO`, which the site's own Purchase Order search returns,
+  has a detail page headed "Contracts". The map overrides it, since the search filter is
+  the better authority.
+- **Only documents active on or after 1 January 2014 are in the database at all.**
   Anything that expired before then was never loaded, so early years are sparse in a way
   that reflects the database's construction rather than state spending.
-
-- **A handful of records carry billion-dollar values and will dominate any total you
-  compute.** The largest is `95601`, Health & Human Services / "CREIGHTON UNIVERSITY -
-  ALL PAYMENTS", at $38,025,000,000.00, followed by three Medicaid managed-care
-  contracts at $6,650,000,000.00 each and `58-1-1451` (EBSCO, UNL) at $4,000,000,000.00.
-  Some of these are plausibly real not-to-exceed ceilings on multi-year statewide
-  programs rather than errors — the state's FAQ says service contracts are valued at the
-  estimated cost of the whole contract including renewals. Either way, treat the top of
-  the amount column as ceilings and aggregates, not as money spent.
-- **Document `41780` has a begin date of 09/28/2223** and an end date of 09/28/2023 —
-  the start year should presumably be 2023. Filter on begin > end to catch this class
-  of error.
+- **The same document number can appear twice under one agency.** Usually a vendor
+  rename, sometimes a genuine amendment: `45500` at the Medical Center is $2,558,983
+  expired and $21,204,743 active. 176 triples repeat; 5 are two different documents.
+- **Document `41780` begins 09/28/2223** and ends 09/28/2023. Filter on begin > end to
+  find that class of error — the page has a checkbox for it.
 - Open-ended records commonly carry an end date of `12/31/2099` or `01/01/2099`.
-- Amounts are as recorded by the state and may not reflect amendments.
+- Amounts are as recorded by the state and may not reflect amendments. `--daily` does
+  not catch an amendment to an existing Active record; only a full re-scrape does.
+- The state's own entity list contains a typo — "Deaf & Hard of Dearing" — preserved
+  verbatim, because matching the source exactly is what makes the links work.
+- **The state updates daily** (per its FAQ).
 
-## Descriptions
+### Descriptions
 
 The state publishes no "scope of work" field, so there is nothing to scrape for it. But
-most documents already contain one, written by whoever filed them, and
-`scripts/extract_scope.py` lifts it out of the PDF **verbatim**. Nothing is generated,
-summarised or rewritten — every description on the site is the state's own words, which
-is what makes it quotable. Typos, inconsistent capitalisation and abbreviations are
-theirs and are kept.
+most documents contain one, written by whoever filed them, and `scripts/extract_scope.py`
+lifts it out of the PDF **verbatim**. Nothing is generated, summarised or rewritten —
+every description on the site is the state's own words, which is what makes it quotable.
+Typos, inconsistent capitalisation and abbreviations are theirs and are kept.
 
+**540,074 of 739,605 rows have one**, 94.8% of every document that could be read at all.
 They come from three places, in this order of preference:
 
-1. **The contract cover sheet's summary field** — a sentence a person wrote. Preferred
-   wherever it exists, because it beats a list of part numbers.
-2. **University purchase-order line items** — a 40-character-wide description column.
-3. **State agency purchase-order line items** — no fixed width.
+| source | rows | what it is |
+|---|---:|---|
+| line items | 533,497 | what was bought, off the purchase-order table |
+| cover sheet | 3,836 | a summary someone wrote by hand on a University contract |
+| SERVICES clause | 2,737 | the contract stating its own scope, where there is no cover sheet |
 
 Things worth knowing before quoting one:
 
@@ -297,22 +126,406 @@ Things worth knowing before quoting one:
   whatever the filer typed. Read the source document before quoting; every row links to
   it.
 - **Descriptions carry administrative text alongside the substance** — invoicing
-  instructions, project reference numbers, contact names, change-order logs. These are
-  kept deliberately rather than filtered, because on some documents the actual scope
-  appears *after* the boilerplate, so a filter aimed at the noise removes the substance.
-- **Both purchase-order forms wrap their description column across several lines**, and
-  until 16 Aug 2026 both parsers read only the first. On the University form that
-  truncated 93% of items — one $15 M construction PO read "GENERAL CONSTRUCTION SERVICES
-  FOR" and stopped. It was found by a reader checking a document against its source, not
-  by us. If you are checking this project's fidelity, that is the method that works.
-- **Coverage is uneven and a blank is not a statement about the contract.** An empty
-  description means the PDF could not be read — usually a scan with no text layer, or a
-  document the state's own viewer does not serve — not that the contract has no scope.
-  The page says so where it happens rather than leaving a blank cell to be misread.
-- **Searching descriptions is opt-in.** The index is a separate download, fetched only
-  when you tick the box, so it costs nothing for readers who do not use it.
+  instructions, project numbers, contact names, change-order logs. These are kept
+  deliberately rather than filtered, because on some documents the actual scope appears
+  *after* the boilerplate, so a filter aimed at the noise removes the substance.
+- **A blank is not a statement about the contract.** It means the PDF could not be read —
+  usually a scan with no text layer, or a document the state's viewer does not serve —
+  not that the contract has no scope. The page says so where it happens rather than
+  leaving an empty cell to be misread.
+- **Searching descriptions is opt-in.** The index is a separate 9.92 MB download, fetched
+  only when you tick the box, so it costs nothing for readers who do not use it.
+
+---
+
+## Running it
+
+```bash
+cd ne-contracts
+python3 -m venv venv && source venv/bin/activate && pip install -r requirements.txt
+
+python3 scripts/scrape.py contract          # -> data/nu_contracts.csv
+python3 scripts/scrape.py purchase-order    # -> data/nu_purchase_orders.csv
+python3 scripts/scrape.py state             # -> data/state_agencies.csv
+python3 scripts/scrape.py state --status    # progress, no network
+python3 scripts/scrape.py state --hours 3   # stop cleanly after 3h
+python3 scripts/scrape.py state --entity "Roads, Department of"
+python3 scripts/check_entity_drift.py       # has the state's entity list changed?
+
+python3 scripts/build_site.py               # data/*.csv -> d/<buildId>/  (~3 min, ~1.7 GB peak)
+python3 scripts/serve_site.py               # preview at http://127.0.0.1:8765
+python3 -m pytest tests/ -q
+```
+
+Every scrape checkpoints per page and resumes; interrupting is safe. A full run is 20+
+hours against a government server — **don't re-scrape casually.**
+
+Output columns: `Document Number`, `Document Type`, `Entity Code`, `Entity Name`,
+`Vendor`, `Amount`, `Begin Date`, `End Date`, `Status`, `Detail URL`, `View URL`.
+`Entity Name` holds the canonical dropdown name rather than the site's rendering of it
+(state result grids shout it: `DRY BEAN COMMISSION`), because both the resume checkpoint
+and `build_site.py`'s entity guard match on that exact string.
+
+### Daily updates
+
+The full scrape is a one-time job. Day to day the state adds records under
+`Status=Active`, only ~7.3% of pages, so `--daily` re-scans just that status and diffs it
+against what the CSV already knows, matched on `Detail URL`:
+
+```bash
+python3 scripts/scrape.py contract --daily
+python3 scripts/scrape.py purchase-order --daily
+python3 scripts/scrape.py state --daily
+```
+
+An unseen record gets a detail fetch and a new row. A known record is skipped entirely.
+A previously-Active record that does not appear today has its `Status` flipped to
+`Expired` in place. This deliberately does **not** catch an amendment to an existing
+Active record's Amount, Vendor or End Date — only a full re-scrape does.
+
+`scripts/check_daily_diff.py` fails the week if any entity had more than half its
+previously-Active records flip to Expired in a day, skipped below 5 records where the
+percentage is noise. That is implausible as real attrition but exactly what a
+renamed or retired entity looks like — which `check_entity_drift.py`, run first, is
+meant to catch before it gets this far.
+
+### Getting the data back
+
+`data/` holds two things that are expensive rather than impossible to recreate, and both
+have a home to fetch them from. Neither is in git.
+
+```bash
+# CSVs (363 MB, ~20h of scraping) — cached by the nightly workflow.
+gh workflow run ne-contracts-rescue-cache.yml --ref main   # then download its artifact
+
+# Document text and descriptions (1.5 GB, ~36h of downloading) — a Release, because
+# nothing else keeps them. doc_text.jsonl is the one that matters; scope.jsonl
+# rebuilds from it in about a minute with scripts/extract_scope.py.
+gh release download extraction-data-2026-08-17 -D ne-contracts/data
+cd ne-contracts/data && gunzip doc_text.jsonl.gz scope.jsonl.gz
+```
+
+Both were lost or nearly lost in August 2026 — the CSVs vanished from the working
+machine and survived only because CI happened to cache them. **Re-publish the Release
+after any large re-extraction.**
+
+---
+
+## How it works
+
+### The scraper
+
+The site splits entities into two categories needing different handling. Higher
+Education searches take a Contract/Purchase Order filter and render into a
+`table#entitygrid`; State searches have no such filter and render into a
+`table#agencygrid`. `scrape.py` branches on both.
+
+Detail pages are fetched on a pool of sessions that have **never run a search**. This is
+not incidental: the site keeps search results in server-side session state and serializes
+every request touching it, so concurrent fetches on the searching session queue behind
+one another. Search-free sessions took a page of 25 detail fetches from ~26s to ~5s —
+about 7x over the full job. See `detail_session()` before changing it.
+
+Pacing is set from measurement. A page of 25 records costs one results request plus 25
+detail requests, so detail fetches are ~96% of traffic and `MAX_WORKERS`/`DETAIL_DELAY`
+are what actually govern load.
+
+- **More workers is not faster.** An A/B against the live site had 15 and 20 workers
+  finishing in the same ~3.98s while median detail latency rose 1.15s → 1.42s. The site
+  is the bottleneck; extra concurrency only queues. Don't raise it.
+- **`PAGE_DELAY` was mostly dead time** — consecutive results requests are already
+  separated by the ~2.6s of detail fetching between them. It is now 0.3s.
+- **Pipelining** the next results fetch behind the current page's detail fetches bought a
+  real 36% (355 → 483 records/min) at no extra load.
+
+Each combo reports its median detail-fetch time and flags a sustained climb past 2.0s.
+The healthy baseline is ~0.95s; a run drifting well above that is asking for more than
+the site wants to give.
+
+### Why the payload is columns, not JSON
+
+One JSON file of all 739,605 rows is ~104 MB, ~49 MB gzipped, and roughly 380 MB of heap
+— minutes to load and an out-of-memory crash on a phone. Packed column-wise the same
+values compress about 5x better, because a column of integers is far more compressible
+than the same integers interleaved with JSON punctuation.
+
+So the payload is split by access pattern:
+
+| | gzipped, as Pages serves it |
+| --- | ---: |
+| numeric columns, vendor names, document numbers — **loaded up front** | **6.81 MB** |
+| link tokens — **fetched on click**, 362 blocks | 23.67 MB raw |
+| descriptions — **fetched on click**, 362 blocks | 49.95 MB raw |
+| description search index — **fetched only if you tick the box** | 9.92 MB |
+
+It also exploits the structure of the state's URLs: `DT` is determined by document type,
+`V` maps 1:1 with vendor, and `A`/`D`/`N` vary together across only 98 distinct
+combinations, so each row carries a small index instead of three long tokens. Every URL
+is round-trip verified against the original before the payload is written — 1,431,967 of
+them — so the compression is lossless.
+
+That verification earns its keep: `A`, `D` and `N` each looked entity-determined at two
+entities and still did across five. At 92 the rule breaks — twelve agencies carry more
+than one `N`, and three `N` values span agencies. The round-trip check caught it rather
+than shipping broken links.
+
+`scripts/ne_format.py` owns the layout and is the only place that knows it. Each file
+holds one item size, so a section's offset is `n * itemsize * index` — no header, no
+offset table, no padding — and the reader checks every file's length against
+`meta.count`.
+
+Measured in-browser over all rows: a keystroke filters in **4–21 ms**, a column's first
+sort takes 56–199 ms and is cached after, and peak heap is **~90 MB** (against ~154 MB
+for the old payload at 40% of the size). Sorting happens once per column rather than once
+per keystroke: the page caches an ordering and filtering walks it.
+
+Loading `/?selftest=1` checks every column against a CRC recorded at build time and
+rebuilds 1,000 sampled URLs against addresses taken from the source CSVs. **Run it
+against the deployed site, not a local server** — only a real deployment exercises gzip
+in transit, and CDN behaviour produced the one design-changing surprise here.
+
+### Publishing
+
+`.github/workflows/pages.yml` builds the payload in CI and deploys it as a **Pages
+artifact**. Pages is set to `build_type: workflow`; the site is not served from the
+branch. `d/<buildId>/` and `manifest.json` are gitignored — building locally is how you
+preview a change, and the result stays on your machine.
+
+| trigger | what happens |
+|---|---|
+| push to `main` | restores the last payload from the Actions cache and deploys it. No rebuild, so a portfolio edit does not need the CSVs. |
+| nightly, on publish day | `ne-contracts-daily.yml` dispatches `pages.yml` **after** `check_daily_diff.py` passes, so it rebuilds from fresh data. |
+
+The dispatch is deliberately not a `workflow_run` trigger. That fires on every successful
+nightly, and the guard rail only runs on the publish day — the site would have deployed
+unguarded data six days out of seven.
+
+Descriptions are built in CI from `scope.jsonl.gz`, downloaded from the newest
+`extraction-data-*` release. `carry_descriptions_forward()` remains as a fallback but
+cannot be the main path any more: it reads the build being replaced, and that build is
+no longer in the repository.
+
+`index.html` carries no build identity — it reads `manifest.json` with
+`cache: 'no-store'` — so a reader holding a stale page can never pair it with a different
+build's data.
+
+Why it works this way: under branch publishing the payload *had* to be committed to be
+served, and nothing ever left history. `.git` reached 546 MB, growing ~100 MB per
+published build, forever. Removing 1,469 files stopped that on 17 Aug 2026. It did not
+reclaim the ~450 MB already in history; that needs a force-push and would invalidate
+every clone, so it remains a separate decision.
+
+### Nightly automation
+
+`ne-contracts-daily.yml` scrapes all three datasets with `--daily` every night at 10pm
+Central. GitHub Actions cron has no DST awareness, so two entries fire daily and the gate
+compares `github.event.schedule` against the entry implied by the current offset, letting
+exactly one through. It gates on *which entry fired*, never on the wall clock: GitHub's
+scheduler routinely runs 30–90 minutes late, and an earlier hour-equals-22 check silently
+skipped entire nights, reporting success while scraping nothing. For the same reason the
+weekday is rolled back when a run lands before noon Central, so a delayed Sunday-night
+run still reaches the publish leg.
+
+**Runners are ephemeral and `data/*.csv` is gitignored**, so `data/` round-trips through
+`actions/cache`: restored under a `ne-contracts-data-` prefix, saved under a fresh
+run-scoped key (cache keys are immutable, so "latest" only works via prefix-restore plus
+a new key per save), with the oldest pruned via `gh cache delete` to stay under the
+10 GB/repo cap.
+
+**A fresh clone's first run has no cache and will fail** — `scrape.py --daily` refuses to
+treat a missing baseline as "nothing was ever active". Bootstrap once:
+
+1. Commit the existing `data/*.csv` to a **short-lived branch**, commenting out the
+   `data/*.csv` line in `.gitignore` for that commit only. Use a branch, not `main` —
+   these are ~346 MB and a revert would not remove the objects from history.
+2. Dispatch `ne-contracts-rescue-cache.yml` **on that branch**; it republishes `data/` as
+   an artifact.
+3. Dispatch `ne-contracts-seed-cache.yml` **on `main`**, passing that run's ID as
+   `artifact_run_id`.
+4. Delete the branch.
+
+**Step 3 must run from `main`.** GitHub scopes each cache to the ref that saved it and
+shares it only with that ref or the default branch, so a cache saved on a short-lived
+branch is invisible to the nightly and orphaned once the branch is deleted. An earlier
+version of this had the whole thing on the branch, and it took the nightly down for two
+days with `refusing --daily: data/nu_contracts.csv does not exist` — the seed was intact
+the whole time, just permanently out of scope.
+
+---
+
+## Guard rails
+
+Read this before changing anything that writes.
+
+**Descriptions are the state's words, verbatim.** Nothing is generated or summarised.
+Typos, boilerplate and truncation that the state itself published all stay.
+
+**Never merge vendors automatically.** `scripts/vendor_groups.json` is the only source of
+truth and every entry was read by a human. A wrong merge invents spending that never
+happened, which is worse than the fragmentation it would fix. Three properties to keep:
+no row ever displays a name the state did not publish; the aggregate is labelled as ours
+in those words (*"Grouped by us, not by the state."*); and a rescrape that renames a
+vendor fails the build rather than silently shrinking a total.
+
+**Check extraction against the source document, not against itself.** Every sanity check
+on the description parsers compared output to other output, and all of them passed while
+the University parser was truncating 93% of what it read. The bug was found by opening a
+PDF and reading it. When you change `extract_scope.py`, pull ten real documents and read
+them.
+
+**How to check a description is verbatim:** compare its words against its own document's
+text as an *ordered subsequence*, not a contiguous string. 4,000 sampled documents pass
+at 100%. The contiguous check reports 82% and every failure is spurious — University
+descriptions are reassembled across the money columns by design, so the joined string is
+genuinely not contiguous in the source. Reading that 18% as a data problem sends you
+chasing a bug that is not there.
+
+**A parse rate is not an accuracy rate.** This project reported "100%" and "97%" parses
+for the two purchase-order forms while both returned truncated text. Those numbers only
+ever meant "the pattern matched".
+
+**Count documents, not log lines.** `doc_text.jsonl` is append-only and a later entry
+supersedes the earlier one, so `wc -l` overstates by every retry. Reading it wrong
+produced two false numbers in one session: 40% complete that was really 23%, and 14,551
+errors that were really 63, because the retries that fixed them were counted alongside
+the failures they replaced. Fold on `tok`, keep the last entry, then count.
+
+**No tracked text file may carry a raw NUL byte**; `tests/test_no_nul_bytes.py` enforces
+it. `index.html` carried one for five days — a sort separator written as a raw character
+instead of the `\x00` escape. Browsers did not care, but `file` reported the page as
+`data`, `grep` matched nothing and exited silently, and **git showed no diffs for the
+project's most important file.** Then the paragraph documenting that bug contained the
+byte it was describing, so the handoff was itself unsearchable. If a tool suddenly stops
+finding text that is plainly there, check for NULs first.
+
+**`meta.incomplete` has now failed twice, both times in the same direction** — claiming
+the entire state was uncollected when it was finished. First from `load_progress()`
+returning a pair bound to one name; then from moving the build into CI and leaving the
+scrapers' checkpoints behind on the laptop. It is the project's most consequential single
+value, because it speaks to whether any number on the page can be trusted. A missing
+checkpoint now means "unknown" and claims no gaps, and the checkpoints are tracked in git
+so a public claim never depends on a file riding in a cache.
+
+**Two things the publish must never do**, both asserted in the staging step: ship
+`ne-contracts/data/` (363 MB of scraped CSVs), and deploy a `manifest.json` naming a
+build directory that is not in the artifact.
+
+**Never let an empty `data/` reach the cache.** Restore matches on prefix and takes the
+newest hit, so one cache saved from an empty directory shadows the good one on every
+subsequent run and the failure feeds itself.
+
+---
+
+## Things that bit us
+
+**Ranged HTTP requests are unusable on GitHub Pages.** A range request advertising gzip —
+which browsers always do, and `fetch()` cannot override — is served against the
+*compressed* representation. Ask for bytes 100–115 and you get 16 bytes of a gzip stream
+plus a `Content-Range` denominator that is the compressed length. This is why deferred
+data is block files, never byte ranges. Pages *does* gzip `application/octet-stream`, so
+raw binary compresses in transit with no client-side work.
+
+**The site's search results live in server-side state that expires.** After ~2,000 pages
+of continuous paging every further page returns "No results found", indistinguishable
+from the end of the data. Reading it as the end once marked UNL purchase orders complete
+at 144,425 of 178,573 records, with no error anywhere. The scraper re-runs the query and
+returns to its position; that fired twice during the Medical Center's 9,186 pages and
+saved ~170,000 records. **Any long paginated scrape of this site needs that recovery.**
+
+**A `<tr>` cannot be 24 million pixels tall.** The virtual scroller sizes spacer rows to
+the full list height, which browsers cap at 2^24 px. At 739,605 rows × 33 px that is
+24.4 M and the bottom third of the table silently becomes unreachable — the scrollbar
+just stops. The page caps the track at 15 M px and scales scroll position past that.
+
+**Both purchase-order forms wrap their description column, and both parsers stopped at
+the first line.** The single worst bug here, and it survived because the documentation
+asserted the opposite: that the University's 40-character column *cut* the text and we
+were faithfully reproducing the state's truncation. It does not cut, it wraps. A reader
+checked document `4740007268` and found the site showing "GENERAL CONSTRUCTION SERVICES
+FOR" where the state wrote "GENERAL CONSTRUCTION SERVICES FOR REMODEL OF BOB DEVANTEY
+SPORTS CENTER PER UNL INVITATION TO BID 909353-12." on a $15,027,565.88 purchase order.
+
+| | scale of the loss | cause |
+|---|---|---|
+| University | 54,280 of 58,060 items wrapped; **93% truncated** | read only the line carrying the money columns |
+| State agency | **892 of 1,367 tails discarded** | rejected any tail containing a digit |
+
+Neither continuation can simply be appended, for different reasons. On the University
+form, PDF extraction does not emit the page in reading order, so the lines under a row
+are often the vendor address block and then the table header — `FURNITURE` is the stop
+list, built by counting the most common line following an item across 40,000 documents.
+On the state form the tail may be the *next row*; the marker is its four-decimal quantity
+and unit-price columns, because nobody types "1.0000" into a description and the digit
+test that preceded it took `1/2 PINT/CONTAINER, 1%` with it.
+
+Both caps were also doing the cutting themselves — 12 lines bound 26% of University
+items, and the state's 80 characters sat below the 99th percentile of genuine tails. They
+are now 25 and 400, chosen so they never bind. If either starts binding, the form has
+changed and the fix belongs in the stop lists, not the cap.
+
+Three further row-skipping bugs came out of diffing a full re-extract rather than
+sampling: four-decimal unit prices (a capacitor order described itself as "SHIPPING", the
+one line priced in whole cents), no-charge rows printing one money column instead of two
+(an antibody order kept only what it was billed for), and the form being chosen by
+whichever pattern fired first — which made University rows start matching inside state
+grocery orders once the money pattern widened.
+
+**`A`, `D` and `N` in detail URLs are not entity-determined.** True at two entities and
+at five, false at 92. Stored as the 98 combinations that actually occur.
+
+**`load_progress()` returns a pair.** Binding it to one name made every entity test as
+uncollected. See the `meta.incomplete` guard rail above — this is half of why it is
+there.
+
+**The site renders entity names in caps on state result grids** (`DRY BEAN COMMISSION`)
+but the dropdown uses title case. Rows record the canonical dropdown name.
+
+**`write_payload()` copies the meta dict it is given.** The search index's `wordCount`
+and the vendor groups are added afterwards, so on a full build they never reached
+`meta.json` — only `--descriptions-only` rewrote the file at the end, which is the sole
+reason the published build ever had them. Every full build was shipping with vendor
+grouping silently absent. `meta.json` is now written last and re-read to confirm.
+
+---
+
+## Open work
+
+**~3,021 unreviewed vendor clusters**, holding most of the $11.02 B above.
+`scripts/suggest_vendor_groups.py` proposes candidates ranked by spend and **decides
+nothing**; a grouping exists only once somebody writes it into
+`scripts/vendor_groups.json`. The money is concentrated, so a few dozen decisions cover
+most of the error. This is the highest-value unfinished work.
+
+**89,180 scanned documents** — 42.9% of contracts — have no text layer, and no parser
+reaches them. This is the difference between 94.8% description coverage of *readable*
+documents and ~95% of *all* of them. An OCR pilot is scoped but not run: 500 known-scanned
+documents through Tesseract, accuracy measured on descriptions specifically rather than
+text generally, cost and wall-clock per thousand, compared against one cloud OCR.
+
+**Change tracking is not built.** The scraper runs daily but keeps only a snapshot, so
+`45500` going from $2,558,983 to $21,204,743 is invisible. `scrape.py --daily` already
+reads a baseline and fires `on_record_seen` for every record; recording the differences
+would turn this from a photograph into a longitudinal record. Every night it is not
+running is a night of history that cannot be recovered.
+
+**29,663 readable documents have no description and mostly never will.** This closes a
+line of investigation rather than opening one: 83% carry no numbered heading, no summary
+and no line items, because they are email threads, signature pages, notices to proceed
+and change-order stubs. There is no statement of the work in them for anything to find,
+an LLM included. Every candidate pattern measured together reached 5.4%. Three were
+tried and rejected: a "Project:" line (177 documents), an "engages" clause (647, all
+inside the SERVICES ones already parsed), an "RE:" line (21, mostly email subjects —
+a different thing wearing a description's clothes). **Do not spend a week here.**
+
+**19% of state agency documents do not exist** — the state's own viewer has no file. No
+method reaches those rows, ever.
+
+**~450 MB of superseded payloads remain in git history.** Publishing no longer adds to
+it, but reclaiming what is there needs a force-push that invalidates every clone.
+
+---
 
 ## License
 
-MIT for the code. The underlying records are public data from the Nebraska Department
-of Administrative Services.
+MIT for the code. The underlying records are public data from the Nebraska Department of
+Administrative Services.

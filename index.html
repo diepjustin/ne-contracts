@@ -817,9 +817,16 @@
   // them are reused across agencies.
   function permalink(id) {
     var e = encodeURIComponent;
-    return PAGE + "?doc=" + e(docStr(id)) +
-           "&agency=" + e(meta.entities[entityCol[id]]) +
-           "&type=" + e(meta.types[typeCol[id]]);
+    var url = PAGE + "?doc=" + e(docStr(id)) +
+              "&agency=" + e(meta.entities[entityCol[id]]) +
+              "&type=" + e(meta.types[typeCol[id]]);
+    // The state sometimes carries one document number twice under one agency:
+    // an expired version and its replacement, with different amounts. `45500`
+    // at the Medical Center is $2,558,983 expired and $21,204,743 active, so
+    // resolving to the wrong one hands a reporter a superseded figure. Those
+    // rows -- ten of 738,195 -- name their own document as well.
+    var d = meta.ambiguous && meta.ambiguous[id];
+    return d ? url + "&d=" + e(d) : url;
   }
 
   function blockOf(id) { return Math.floor(id / meta.blockSize); }
@@ -1220,6 +1227,14 @@
     $("q").value = doc;   // so the back button lands on the row, not on everything
 
     var hits = findRows(doc, params.get("agency"), params.get("type"));
+    // A link that names its document wins outright; without that a repeated
+    // triple falls through to the table, which shows both rows rather than
+    // guessing between them.
+    var want = params.get("d");
+    if (want && meta.ambiguous) {
+      var exact = hits.filter(function (id) { return meta.ambiguous[id] === want; });
+      if (exact.length === 1) hits = exact;
+    }
     if (hits.length !== 1) return false;
 
     $("count").textContent = "Opening that document at statecontracts.nebraska.gov…";

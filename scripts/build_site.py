@@ -167,26 +167,36 @@ def scraped_at():
     return oldest.isoformat(timespec="seconds")
 
 
-def find_permalink_collision(docs, entity_column, type_column):
-    """(first row, second row, triple) for the first repeat, or None.
+def find_permalink_collision(docs, entity_column, type_column, view_tokens):
+    """Rows that share a permalink while pointing at *different* documents.
 
-    The shareable link is ?doc=&agency=&type=, and it only identifies a record
-    because that triple is unique. Row ids would be shorter, but they move on
+    Returns a list of row lists, one per ambiguous group, empty when there is
+    nothing to disambiguate.
+
+    The shareable link is ?doc=&agency=&type=, and it identifies a record only
+    while that triple is unique. Row ids would be shorter, but they move on
     every rebuild -- a row-id permalink silently points at a different contract
     after the next scrape. Document number alone is not enough either: 14,633
     of them are reused across agencies, covering 29,321 rows.
 
-    Uniqueness held when checked by hand across 738,195 rows. Nothing else
-    re-checks it, and the failure mode is not an error but a link that quietly
-    resolves to the wrong record -- so check it every build.
+    The triple stopped being unique on 17 Aug 2026 and this check stopped the
+    nightly publish, which is what it was for. But it was testing a proxy. Of
+    176 repeated triples, 171 are the state carrying one contract under two
+    vendor spellings -- same amount, same dates, same document -- so a link
+    resolving to either row lands on the same PDF and nothing is wrong. Only 5
+    are genuinely two documents, and those are the ones that matter: `45500` at
+    UNMC is $2,558,983 expired and $21,204,743 active, and a reporter sent to
+    the wrong one is quoting a superseded figure.
+
+    So compare destinations, not triples. A repeat whose rows share a view
+    token is not a collision; a repeat whose rows do not is, and the page needs
+    a disambiguator for it.
     """
-    seen = {}
+    groups = collections.defaultdict(list)
     for row in range(len(docs)):
-        triple = (docs[row], entity_column[row], type_column[row])
-        if triple in seen:
-            return seen[triple], row, triple
-        seen[triple] = row
-    return None
+        groups[(docs[row], entity_column[row], type_column[row])].append(row)
+    return [rows for rows in groups.values()
+            if len(rows) > 1 and len({view_tokens[r] for r in rows}) > 1]
 
 
 def build_rows(columns, docs, dn_tokens, view_tokens):
@@ -341,14 +351,28 @@ def main():
         if size > 255:
             sys.exit(f"{name} dictionary has {size} entries — the column is a u8; widen it")
 
-    collision = find_permalink_collision(docs, columns["entity"], columns["type"])
-    if collision:
-        first, second, (doc, entity_idx, type_idx) = collision
-        sys.exit(
-            f"permalink collision: rows {first} and {second} share "
-            f"(doc={doc.decode()}, agency={ENTITIES[entity_idx]}, type={types[type_idx]}). "
-            "?doc= can no longer identify a record — add a disambiguator before publishing."
-        )
+    # Rows the triple cannot tell apart. The page appends &d=<view token> to
+    # their permalinks, so they stay individually addressable; every other row
+    # keeps the short, readable URL. Sorted so the payload is reproducible.
+    ambiguous = sorted(
+        row
+        for group in find_permalink_collision(docs, columns["entity"], columns["type"], view_tokens)
+        for row in group
+    )
+    if ambiguous:
+        print(f"note: {len(ambiguous)} rows share a permalink with a different document "
+              f"and will carry &d= to stay distinct")
+        for row in ambiguous[:10]:
+            print(f"        row {row}: {docs[row].decode()} / {ENTITIES[columns['entity'][row]]}"
+                  f" / {types[columns['type'][row]]}")
+        # The disambiguator is the document's own address on the state's site.
+        # A row without one cannot be told apart this way, and shipping it
+        # would mean a permalink that silently opens its twin.
+        missing = [row for row in ambiguous if not view_tokens[row]]
+        if missing:
+            sys.exit(
+                f"rows {missing[:5]} share a permalink with a different document but have no "
+                "view token to disambiguate them — they need a different disambiguator")
 
     scraped = scraped_at()
     if not scraped:
@@ -428,6 +452,12 @@ def main():
         "dnExceptions": dn_exceptions,
         "detailBase": DETAIL_BASE,
         "viewBase": VIEW_BASE,
+        # Rows whose ?doc=&agency=&type= triple also names a different
+        # document, mapped to the view token that tells them apart. Ten rows
+        # today, so carrying the tokens outright costs nothing and keeps the
+        # short URL for the other 738,185. The page cannot look these up
+        # itself: view tokens live in deferred blocks it has not fetched yet.
+        "ambiguous": {str(row): view_tokens[row] for row in ambiguous},
         "adn": adn,
         "DT": payload["url"]["DT"],
         "digests": {name: zlib.crc32(col.tobytes()) for name, col in columns.items()},

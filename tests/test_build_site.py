@@ -56,21 +56,42 @@ def test_unique_triples_have_no_collision():
     docs = [b"100", b"100", b"200"]
     entity = [0, 1, 0]        # same document number, different agency -- legitimate
     type_ = [5, 5, 5]
-    assert build_site.find_permalink_collision(docs, entity, type_) is None
+    assert build_site.find_permalink_collision(docs, entity, type_, ["a", "b", "c"]) == []
 
 
-def test_repeated_triple_is_found():
+def test_a_repeated_triple_pointing_at_two_documents_is_a_collision():
+    """The case worth blocking: `45500` at the Medical Center is $2,558,983
+    expired and $21,204,743 active, two different PDFs under one permalink."""
     docs = [b"100", b"200", b"100"]
     entity = [0, 1, 0]
     type_ = [5, 5, 5]
-    first, second, triple = build_site.find_permalink_collision(docs, entity, type_)
-    assert (first, second) == (0, 2)
-    assert triple == (b"100", 0, 5)
+    groups = build_site.find_permalink_collision(docs, entity, type_, ["x", "y", "z"])
+    assert groups == [[0, 2]]
+
+
+def test_a_repeated_triple_for_one_document_is_not_a_collision():
+    """171 of the 176 repeats are the state carrying one contract under two
+    vendor spellings -- same amount, same dates, same PDF. A link resolving to
+    either row lands in the right place, so blocking the publish over it stops
+    738,195 records from updating for no reader benefit. This is what the
+    first version of the guard got wrong, and it took the nightly build down
+    on 17 Aug 2026 while the five real cases went unreported."""
+    docs = [b"CW32981", b"CW32981"]
+    assert build_site.find_permalink_collision(docs, [0, 0], [5, 5], ["same", "same"]) == []
 
 
 def test_same_document_number_across_types_is_not_a_collision():
     """14,633 document numbers are reused; type is part of what separates them."""
-    assert build_site.find_permalink_collision([b"A", b"A"], [0, 0], [1, 2]) is None
+    assert build_site.find_permalink_collision([b"A", b"A"], [0, 0], [1, 2], ["p", "q"]) == []
+
+
+def test_every_row_of_an_ambiguous_group_is_reported():
+    """The page needs a disambiguator on all of them, not just the duplicate:
+    reporting only the second row would leave the first still resolving to
+    whichever the scan happened to reach first."""
+    docs = [b"9", b"9", b"9"]
+    groups = build_site.find_permalink_collision(docs, [0, 0, 0], [1, 1, 1], ["a", "b", "a"])
+    assert groups == [[0, 1, 2]]
 
 
 # --- the coverage note ------------------------------------------------------

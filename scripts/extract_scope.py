@@ -64,6 +64,30 @@ COVER_SHEET = re.compile(
     re.S,
 )
 
+# A numbered SERVICES or SCOPE OF SERVICES clause, on contract templates that
+# carry no cover sheet at all. Bounded at the next numbered heading, which is
+# what stops it swallowing DELIVERY, COMPENSATION and the rest of the contract.
+#
+# Worth knowing how little this reaches. Of 32,378 readable documents that no
+# other pattern describes, this one covers 1,494 -- 4.6%. The rest are email
+# threads, signature pages, notices to proceed and change-order stubs that
+# contain no description of the work anywhere. Three other candidates were
+# measured and rejected: a "Project:" line (177 documents), an "engages" clause
+# (647, and entirely inside the ones below), and an "RE:" line (21, mostly
+# email subjects, which is a different thing wearing a description's clothes).
+SERVICES_CLAUSE = re.compile(
+    # "SCOPE OF SERVICES" is a heading wherever it appears, numbered or not --
+    # the professional-services template writes "SCOPE OF SERVICES 1.1 The
+    # Architect...", with the number after the heading rather than before it.
+    # A bare "SERVICES" is only a heading when a clause number introduces it:
+    # unanchored it also matches inside "PROFESSIONAL SERVICES AGREEMENT".
+    r"(?:(?:\b\d{1,2}(?:\.\d+)?\.?\s+)?(?:SCOPE OF SERVICES|SCOPE OF WORK)"
+    r"|\b\d{1,2}(?:\.\d+)?\.\s+SERVICES)"
+    r"\b[:.]?\s+"
+    # A clause number belonging to the body rather than to the heading.
+    r"(?:\d{1,2}(?:\.\d+)+\s+)?"
+    r"(.{40,1200}?)(?=\s+\d{1,2}(?:\.\d+)?\.\s+[A-Z]{3}|$)", re.S)
+
 # Purchase orders come on two different forms and neither pattern matches the
 # other's layout. Anchoring on the trailing money columns is what makes the
 # description boundary unambiguous in both.
@@ -298,6 +322,27 @@ def state_items(flat):
     return dedupe(descriptions)
 
 
+def from_services_clause(text):
+    """The contract's own SERVICES clause, or None.
+
+    For contract templates with no cover sheet and no line items -- the
+    University's work-made-for-hire and professional-services agreements. The
+    clause is the state's own words like everything else here, boilerplate
+    included: "University hereby engages Copyeditor ... to copyedit the journal
+    Studies in American Indian Literatures 36, numbers 1-2, edited by Kiara
+    Vigil". The substance sits at the end of that sentence, and trimming the
+    front would mean deciding which of the state's words count.
+
+    Ranked below the cover sheet, which is a summary somebody wrote on purpose,
+    and above line items, which these documents do not have anyway.
+    """
+    match = SERVICES_CLAUSE.search(flatten(text))
+    if not match:
+        return None
+    value = flatten(match.group(1))
+    return value[:MAX_DESCRIPTION] or None
+
+
 def from_line_items(text):
     """Every distinct line-item description, in the order they appear.
 
@@ -326,6 +371,10 @@ def describe(text):
     summary = from_cover_sheet(text)
     if summary:
         return "cover_sheet", summary, []
+
+    clause = from_services_clause(text)
+    if clause:
+        return "services_clause", clause, []
 
     items = from_line_items(text)
     if items:

@@ -359,3 +359,63 @@ def test_a_no_charge_row_prints_one_money_column_and_still_counts():
             "002          1 EA  ACC1 Rabbit mAb - 100 L  358.00 358.00\n")
     assert extract_scope.from_line_items(text) == [
         "ABHD5 Rabbit pAb - 100 L", "ACC1 Rabbit mAb - 100 L"]
+
+
+# --- contract templates with no cover sheet and no line items ---------------
+
+# Trimmed from document 45837, a University Press work-made-for-hire agreement.
+# Documents like this have no cover sheet and no line-item table, so they were
+# among the 32,378 readable documents nothing described.
+SERVICES_AGREEMENT = """P2P Contract Revised 3-24-2022 Page 1 of 3
+UNIVERSITY OF NEBRASKA-LINCOLN UNIVERSITY PRESS
+COPYEDITOR WORK-MADE-FOR-HIRE AGREEMENT
+1. SERVICES University hereby engages Copyeditor, and Copyeditor agrees to be
+engaged, subject to the terms and conditions of this Agreement, to copyedit the
+journal Studies in American Indian Literatures 36, numbers 1-2, edited by Kiara
+Vigil (hereinafter referred to as the "Work").
+2. DELIVERY Copyeditor shall deliver to University on or before March 28, 2025,
+the Work in content and form satisfactory to University.
+3. COMPENSATION In full consideration for all services rendered.
+"""
+
+
+def test_a_services_clause_describes_a_contract_with_no_other_field():
+    source, description, items = extract_scope.describe(SERVICES_AGREEMENT)
+    assert source == "services_clause"
+    assert "copyedit the journal Studies in American Indian Literatures" in description
+    assert items == []
+
+
+def test_the_services_clause_stops_at_the_next_numbered_heading():
+    """Unbounded, this runs through DELIVERY, COMPENSATION and the whole
+    contract -- the same failure the cover-sheet pattern had when it only knew
+    one layout and produced a 19,405-character description."""
+    description = extract_scope.from_services_clause(SERVICES_AGREEMENT)
+    assert "DELIVERY" not in description
+    assert "COMPENSATION" not in description
+
+
+def test_a_decimal_numbered_scope_heading_also_matches():
+    """The professional-services template numbers its clauses 1.1, 1.2."""
+    text = ("SCOPE OF SERVICES 1.1 The Architect/Engineer's Basic Services with "
+            "respect to the Project consist of the architectural, mechanical and "
+            "electrical services described by the deliverables identified herein. "
+            "2. COMPENSATION The Owner shall pay.")
+    got = extract_scope.from_services_clause(text)
+    assert got and "Architect/Engineer's Basic Services" in got
+    assert "COMPENSATION" not in got
+
+
+def test_a_cover_sheet_still_outranks_a_services_clause():
+    """A summary somebody wrote on purpose beats a contract clause."""
+    source, description, _ = extract_scope.describe(COVER_SHEET + SERVICES_AGREEMENT)
+    assert source == "cover_sheet"
+    assert description == "Coaches Replay system to be used by MBB."
+
+
+def test_a_document_with_no_services_clause_is_left_undescribed():
+    """Most of the 32,378 are email threads and signature pages. Inventing a
+    description for those would be worse than leaving the cell empty, which the
+    page already explains."""
+    assert extract_scope.from_services_clause(
+        "From: Dori Smidt Sent: Wednesday, March 22, 2023 Subject: RE: When can we meet") is None

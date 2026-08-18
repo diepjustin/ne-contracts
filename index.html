@@ -1085,13 +1085,18 @@
 
   // An empty description is not the same fact as an absent one, and a reader
   // cannot tell them apart from a blank space. Say which it is: the state
-  // published no document at all, or it published one we could not read
-  // (a scan, almost always). Neither means the contract has no scope.
+  // published no document at all, or it published one we could not read.
+  // Neither means the contract has no scope.
+  //
+  // Deliberately no cause is given for the second case. The page used to say
+  // the document was "most likely a scanned image", which is true of 89,180 of
+  // the 118,843 blanks and false for the other 29,663 -- documents with a
+  // perfectly good text layer that our own parsers failed to read. Guessing a
+  // cause put a wrong statement under a quarter of them; the honest sentence
+  // is shorter anyway. See README.md, "Things that bit us".
   function whyBlank(id) {
     if (!viewPresent[id]) return "The state publishes no document for this record.";
-    return "No description could be read from this document — it is most likely " +
-           "a scanned image rather than text. That is a limit of the file the " +
-           "state published, not a statement about the contract.";
+    return "No description could be read from this document.";
   }
 
   function showDetail(id) {

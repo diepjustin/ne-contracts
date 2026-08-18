@@ -131,10 +131,22 @@ Things worth knowing before quoting one:
   instructions, project numbers, contact names, change-order logs. These are kept
   deliberately rather than filtered, because on some documents the actual scope appears
   *after* the boilerplate, so a filter aimed at the noise removes the substance.
-- **A blank is not a statement about the contract.** It means the PDF could not be read —
-  usually a scan with no text layer, or a document the state's viewer does not serve —
-  not that the contract has no scope. The page says so where it happens rather than
-  leaving an empty cell to be misread.
+- **A blank is not a statement about the contract.** It means we could not read a
+  description out of the document, not that the contract has no scope. The page says so
+  where it happens rather than leaving an empty cell to be misread. It deliberately does
+  not say *why*, because the reason varies and we were getting it wrong. Measured over
+  the 118,843 blanks where the state does publish a document:
+
+  | why it is blank | documents | share |
+  |---|---:|---:|
+  | the PDF is a scan with no text layer | 89,180 | 75.0% |
+  | readable text, but our parsers found no description in it | 22,086 | 18.6% |
+  | the state says the item was a direct purchase with no contract | 7,577 | 6.4% |
+
+  That last group is not a failure of any kind: those documents consist of a single
+  sentence from the state — *"This item involved a direct purchase which did not result
+  in a contract. Therefore, there is no contract available for this item."* — and are
+  almost entirely Department of Roads spending.
 - **Searching descriptions is opt-in.** The index is a separate 9.92 MB download, fetched
   only when you tick the box, so it costs nothing for readers who do not use it.
 
@@ -507,6 +519,20 @@ there.
 
 **The site renders entity names in caps on state result grids** (`DRY BEAN COMMISSION`)
 but the dropdown uses title case. Rows record the canonical dropdown name.
+
+**The page explained a blank description by guessing, and was wrong a quarter of the
+time.** It told readers a missing description was "most likely a scanned image rather
+than text". True of 89,180 documents; false for the 29,663 that have a perfectly good
+text layer and simply defeated our parsers — 16,736 of those carry over 2,000 characters
+of extractable text. As a population statistic the sentence was defensible; standing
+under one specific contract it was a false claim about that document, and it also
+quietly blamed the state for our own parser's limits.
+
+Spotted by reading the site, not the code: the documents looked like native PDFs. The
+page now says only "No description could be read from this document." The cause is
+knowable per document — `doc_text.jsonl` records `text` or `scanned` for every one — so
+this could be reported precisely rather than dropped, but a plain sentence beats a
+confident wrong one, and the breakdown lives here instead (see "Descriptions" above).
 
 **"No document" and "we could not find out" were the same value.** For about two days
 from 17 Aug 2026 the state stopped serving documents: `ViewDocument` returned an ASP.NET

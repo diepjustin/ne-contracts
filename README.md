@@ -122,6 +122,33 @@ They come from three places, in this order of preference:
 | cover sheet | 3,836 | a summary someone wrote by hand on a University contract |
 | SERVICES clause | 2,737 | the contract stating its own scope, where there is no cover sheet |
 
+A fourth source, `cover_sheet_form`, is in `extract_scope.py` but **not yet in the
+published data** — it lands at the next extraction run. The University has a second
+cover sheet that is a filled PDF form rather than prose, and DocuSign flattens it on
+export: every field label is written out in one run, then every filled value in another,
+so "DESCRIPTION OF PURCHASE" ends up dozens of lines from its own answer. It recovers
+**548 descriptions** out of the 22,086 readable documents nothing else describes — 2.5%,
+which is worth having and is nowhere near a solution.
+
+**How a positional parser was checked.** Nothing in that form identifies the description
+except its position in the value run, which is how one contract's words get attributed to
+another. `scripts/verify_form_geometry.py` answers an independent question: it downloads
+the real PDF and reads where the ink is, taking whatever sits level with and to the right
+of the "DESCRIPTION OF PURCHASE" label, then compares that against what the parser
+claimed from flat text. The first sample of 40 agreed 37 times; the three failures were
+real and none of them would have been caught by a test:
+
+- two documents whose description field was simply blank, so the term dates slid into its
+  place and would have been published as the contract's scope
+- one that extracted as `/\x04EZ\x03\x11h^` where the page plainly reads "travel" — a font
+  encoding pypdf cannot map
+
+With guards for both, a fresh sample of 60 agreed 60 times. This is the same lesson as
+the truncation bug, in a new form: the tests all passed both times, and only the source
+document settled it. Geometry cannot be used in the parser itself — doc_text.jsonl holds
+no coordinates and re-reading 739,605 PDFs is a 20+ hour download — so it stays a
+sampling check.
+
 Things worth knowing before quoting one:
 
 - **A description is one document's text, not the contract's official scope.** It is

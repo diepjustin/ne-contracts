@@ -229,6 +229,96 @@ def from_cover_sheet(text):
     return value or None
 
 
+# The University's other cover sheet: a filled PDF form, not prose. It defeats
+# COVER_SHEET entirely because the form is flattened on export -- every field
+# label is emitted first, in a block, and only then every filled value, in the
+# same order. "DESCRIPTION OF PURCHASE" and its answer end up dozens of lines
+# apart, so there is nothing for a label-anchored pattern to grab.
+#
+# What survives is the ordering: the value after the supplier's name is the
+# description. That is positional, which is exactly the kind of assumption that
+# quietly attributes one contract's words to another, so it is checked rather
+# than trusted -- see the verification note in README.md. Empty fields are
+# omitted from the value run, which is the failure mode the guards below exist
+# to catch: with the description blank, the term dates slide into its place.
+FORM_LABELS = {
+    "UNIVERSITY OF NEBRASKA", "CONTRACT COVER SHEET", "CONTRACT TYPE", "EXPENDITURE",
+    "FEE-FOR-SERVICE", "IT", "OTHER", "SUPPLIER NAME", "DESCRIPTION OF", "PURCHASE",
+    "DESCRIPTION OF PURCHASE", "TERM START AND END DATE", "TERM LENGTH", "DOLLAR AMOUNT",
+    "BUYER NAME/OWNER", "BUYER NAME", "PURCHASED FOR", "(DEPARTMENT)?", "BID#",
+    "SOLE SOURCE", "BOR REPORTABLE?", "BOR DATE", "RENEWAL REMINDERS TO:", "NOTES:",
+    "COMMODITY TYPE", "IANR BUSINESS CENTER", "UNIVERSITY SIGNER", "ZERO DOLLAR LEASE",
+    "FUNDING SOURCE", "REVENUE", "NON-EXPENDITURE", "AMENDMENT", "CONTRACT",
+}
+FORM_REVISED = re.compile(r"^Revised\s+[\d/\.\-]+$", re.I)
+FORM_CHECK = {"\u2714", "\u2713", "X", "x", "N/A", "n/a", "\x14"}
+FORM_MONEY = re.compile(r"\$\s?[\d,]+(?:\.\d\d)?")
+FORM_TERM = re.compile(r"\d{1,2}/\d{1,2}/\d{2,4}|\b\d+\s+(?:year|month|day)s?\b|"
+                       r"\b(?:annual|ongoing|perpetual|one[- ]time)\b", re.I)
+# "9/28/2020 - 9/27/2023" and friends. Three real misreads in a sample of 40 were
+# exactly this: a blank description field, and the term picked up in its place.
+FORM_DATE_RANGE = re.compile(
+    r"^\s*(?:\S.*?)?\d{1,2}/\d{1,2}/\d{2,4}\s*(?:-|\u2013|to|through)\s*"
+    r"\d{1,2}/\d{1,2}/\d{2,4}\s*$", re.I)
+
+
+def form_readable(value):
+    """False for text the PDF's font encoding defeated.
+
+    One document in the same sample extracted as '/\x04EZ\x03\x11h^/E\x1c^^' where
+    the page plainly reads 'travel'. Publishing that as the state's own words is
+    worse than publishing nothing, and no later check would have caught it.
+    """
+    if not value:
+        return False
+    if any(ord(c) < 32 for c in value):
+        return False
+    letters = sum(c.isalpha() or c.isspace() for c in value)
+    return letters / len(value) >= 0.6
+
+
+def from_cover_sheet_form(text):
+    """The DESCRIPTION OF PURCHASE field off the flattened form, or None."""
+    lines = [l.strip() for l in text.split("\n") if l.strip()]
+    if len(lines) < 10:
+        return None
+    if "CONTRACT COVER SHEET" not in " ".join(lines[:4]).upper():
+        return None
+
+    # The label run ends where lines stop being labels; a stray revision stamp
+    # sits among them, so allow a short gap before calling it finished.
+    last_label = -1
+    for i, line in enumerate(lines[:40]):
+        if line.upper() in FORM_LABELS or FORM_REVISED.match(line):
+            last_label = i
+        elif i - last_label > 3:
+            break
+    if last_label < 4:
+        return None
+
+    values = [l for l in lines[last_label + 1:last_label + 12]
+              if l not in FORM_CHECK and not FORM_REVISED.match(l)
+              and l.upper() not in FORM_LABELS]
+    if len(values) < 2:
+        return None
+
+    value = values[1].strip()
+    if not (3 <= len(value) <= 300):
+        return None
+    if FORM_MONEY.fullmatch(value) or value.isdigit() or FORM_TERM.fullmatch(value):
+        return None
+    if FORM_DATE_RANGE.match(value) or not form_readable(value):
+        return None
+    if value.upper() in FORM_LABELS:
+        return None
+    # Alignment proof: whatever follows the description must be a term or an
+    # amount. If it is neither, we are not where we think we are in the form.
+    tail = " ".join(values[2:5])
+    if not (FORM_MONEY.search(tail) or FORM_TERM.search(tail)):
+        return None
+    return value
+
+
 def dedupe(candidates):
     """Distinct, in first-seen order. A purchase order repeats identical rows."""
     seen = set()
@@ -371,6 +461,10 @@ def describe(text):
     summary = from_cover_sheet(text)
     if summary:
         return "cover_sheet", summary, []
+
+    form = from_cover_sheet_form(text)
+    if form:
+        return "cover_sheet_form", form, []
 
     clause = from_services_clause(text)
     if clause:

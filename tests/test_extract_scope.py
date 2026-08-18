@@ -419,3 +419,79 @@ def test_a_document_with_no_services_clause_is_left_undescribed():
     page already explains."""
     assert extract_scope.from_services_clause(
         "From: Dori Smidt Sent: Wednesday, March 22, 2023 Subject: RE: When can we meet") is None
+
+
+# --- the University's flattened cover-sheet form -----------------------------
+#
+# Labels are emitted as one run and values as another, so the description sits
+# dozens of lines from its own label and only its position identifies it. Each
+# test below is a failure mode found by checking 100 real documents against
+# their PDF's own geometry -- see README.md, "Descriptions".
+
+FORM_LABELS_BLOCK = """UNIVERSITY OF NEBRASKA
+CONTRACT COVER SHEET
+CONTRACT TYPE
+EXPENDITURE
+FEE-FOR-SERVICE
+IT
+OTHER
+SUPPLIER NAME
+DESCRIPTION OF
+PURCHASE
+COMMODITY TYPE
+TERM START AND END DATE
+DOLLAR AMOUNT
+BUYER NAME/OWNER
+NOTES:
+"""
+
+
+def a_form(*values):
+    return FORM_LABELS_BLOCK + "✔\n" + "\n".join(values) + "\n"
+
+
+def test_reads_the_description_after_the_supplier():
+    text = a_form("Leica Microsystems Inc.",
+                  "3-Year Service Agreement for the Peloris II# Dual Tissue Processor",
+                  "9/28/2020 - 9/27/2023", "$49,995")
+    assert extract_scope.from_cover_sheet_form(text) == \
+        "3-Year Service Agreement for the Peloris II# Dual Tissue Processor"
+
+
+def test_tolerates_a_filled_commodity_type_between_description_and_term():
+    """A real layout: COMMODITY TYPE sits between them and is often filled."""
+    text = a_form("Whelan Event Services", "Event Security Services",
+                  "Professional Services",
+                  "August 15, 2020 through August 14, 2022", "Estimated $69,837.60")
+    assert extract_scope.from_cover_sheet_form(text) == "Event Security Services"
+
+
+def test_blank_description_does_not_promote_the_term_dates():
+    """The commonest real misread: with the description empty, the term slides
+    into its slot and would be published as the contract's scope."""
+    text = a_form("Some Vendor Inc.", "2/1/2020 - 1/31/2023", "$12,000")
+    assert extract_scope.from_cover_sheet_form(text) is None
+
+
+def test_mojibake_is_never_published():
+    """One document extracted as control characters where the page reads
+    'travel'. Nothing downstream would have caught it."""
+    text = a_form("Some Vendor Inc.", "/\x04EZ\x03\x11h^/E\x1c^^\x03\x12\x1cEd\x1cZ",
+                  "1/1/2020 - 1/1/2021", "$500")
+    assert extract_scope.from_cover_sheet_form(text) is None
+
+
+def test_a_bare_amount_is_not_a_description():
+    text = a_form("Some Vendor Inc.", "$65,420", "9/1/2020 - 8/31/2021")
+    assert extract_scope.from_cover_sheet_form(text) is None
+
+
+def test_requires_a_term_or_amount_after_the_description():
+    """The alignment proof. Without it we cannot claim to know where we are."""
+    text = a_form("Some Vendor Inc.", "Widgets", "Jane Doe", "Purchasing")
+    assert extract_scope.from_cover_sheet_form(text) is None
+
+
+def test_a_different_document_is_left_alone():
+    assert extract_scope.from_cover_sheet_form(
+        "STATE OF NEBRASKA CONTRACT AWARD\nLine Description\n001 5 EA WIDGETS 1.0000\n") is None

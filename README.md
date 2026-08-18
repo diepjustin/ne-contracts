@@ -389,6 +389,12 @@ no row ever displays a name the state did not publish; the aggregate is labelled
 in those words (*"Grouped by us, not by the state."*); and a rescrape that renames a
 vendor fails the build rather than silently shrinking a total.
 
+**Never record an absence you did not observe.** A failed fetch is not evidence that a
+contract has no document, that a field is empty, or that a record is gone. Keep the two
+apart in the value itself — `""` for "read it, there is nothing" and `None` for "could
+not find out" — and hold back anything unknown rather than writing it. The CSV is a
+record of what the state published, so a value in it must be something we actually saw.
+
 **Check extraction against the source document, not against itself.** Every sanity check
 on the description parsers compared output to other output, and all of them passed while
 the University parser was truncating 93% of what it read. The bug was found by opening a
@@ -501,6 +507,29 @@ there.
 
 **The site renders entity names in caps on state result grids** (`DRY BEAN COMMISSION`)
 but the dropdown uses title case. Rows record the canonical dropdown name.
+
+**"No document" and "we could not find out" were the same value.** For about two days
+from 17 Aug 2026 the state stopped serving documents: `ViewDocument` returned an ASP.NET
+error page, and detail pages kept returning HTTP 200 while quietly rendering no link at
+all. That is byte-for-byte what a contract with no document attached looks like, and
+`get_view_url()` returned `""` for both — so a scrape during the outage would have
+recorded "no document" as a fact for every new contract and published a site with
+silently missing links. No step would have failed.
+
+Nothing was actually damaged, but only by luck: the state's *search* was down at the same
+time, so the nightly found no records to write, and the weekly publish gate meant no
+build shipped. A partial outage — search up, documents down — would have poisoned the
+data on any publish day.
+
+`get_view_url()` now answers three ways: a URL, `""` for a page read cleanly that offers
+nothing (a real fact), and `None` for could-not-tell. A `None` record is held back rather
+than written, so it stays unknown to the CSV and the next run asks again. Because the
+outage made detail pages look *legitimately* empty, no amount of page parsing can tell
+the two apart — so `document_service_healthy()` checks three documents known to carry
+files before a scrape starts, and both `--daily` and a full sweep refuse to run when all
+three have stopped offering theirs. It is deliberately biased towards "up": a canary that
+cannot be fetched proves nothing and is skipped, so rotted canary URLs cannot silently
+halt every run. One request when the state is healthy.
 
 **`write_payload()` copies the meta dict it is given.** The search index's `wordCount`
 and the vendor groups are added afterwards, so on a full build they never reached

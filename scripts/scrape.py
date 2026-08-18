@@ -142,7 +142,18 @@ def get_token(session):
 
 
 def get_view_url(detail_url):
-    """Fetch the detail page and return the View URL, or empty string if unavailable."""
+    """Fetch the detail page and return the View URL.
+
+    Three outcomes, deliberately distinct -- see README.md, "Things that bit
+    us". Returning "" for both of the last two is what made the 17 Aug 2026
+    outage dangerous: the state stopped offering documents, and a blank would
+    have been written as though those contracts simply had no file attached.
+
+      a URL -- the page offers a document
+      ""    -- the page was read cleanly and offers no document (a real fact)
+      None  -- we could not find out (fetch failed); the caller must not
+               record this as "no document"
+    """
     if not detail_url:
         return ""
     try:
@@ -157,7 +168,7 @@ def get_view_url(detail_url):
         return BASE_URL + view_link["href"] if view_link else ""
     except Exception as e:
         print(f"    Warning: could not fetch view URL: {e}")
-        return ""
+        return None
 
 
 def drain_latency():
@@ -186,6 +197,44 @@ def _fetch_page(session, page):
 def fetch_view_urls_parallel(records):
     """Fetch view URLs for a page of records in parallel, on search-free sessions."""
     return list(_detail_pool.map(lambda r: get_view_url(r["detail_url"]), records))
+
+
+# Three documents confirmed to carry a file. They are the only way to tell the
+# state's document service being down from a contract genuinely having no
+# document attached: during the 17-18 Aug 2026 outage the detail pages still
+# returned HTTP 200 and simply rendered no link, which is exactly what a
+# document-less contract looks like. If all three stop offering their files,
+# the service is down and every "no document" result that run is meaningless.
+CANARY_DOCUMENTS = {
+    "80-2-1555": "https://statecontracts.nebraska.gov/Search/SearchDocuments?A=JzaHHD760b8rdX81uloiRg%3D%3D&D=GxHL1l2mAft6sKHhVz8uqw%3D%3D&DN=gAjNnsOJRLzIbjJg2AGS%2Fw%3D%3D&N=PRMfkBXqcZegg9sdKXw1Lul3Fxe2B71Qc3b2LTSP1js%3D&DT=alQT0%2B51hm2oW6NMeITLVg%3D%3D&V=Vyq9bnboIUEIEOc9KpdakDF1mS79Sy4Ct%2FObKZSljxht2MIJSSl2nn76ptH0xy1sxtgWROJy7mYt72W7e%2FeK3g%3D%3D",
+    "80-2-1468": "https://statecontracts.nebraska.gov/Search/SearchDocuments?A=JzaHHD760b8rdX81uloiRg%3D%3D&D=GxHL1l2mAft6sKHhVz8uqw%3D%3D&DN=yVq7GmvYRDwOK3nz%2FBAkdQ%3D%3D&N=PRMfkBXqcZegg9sdKXw1Lul3Fxe2B71Qc3b2LTSP1js%3D&DT=alQT0%2B51hm2oW6NMeITLVg%3D%3D&V=qHt%2BZVskc%2BlCzCaF0qJkip3%2BiXkq7UwM%2FHqv05kNaoRkDeQrMN4MWRsRPonbcE1c",
+    "80-2-1726": "https://statecontracts.nebraska.gov/Search/SearchDocuments?A=JzaHHD760b8rdX81uloiRg%3D%3D&D=GxHL1l2mAft6sKHhVz8uqw%3D%3D&DN=bZNGd7yFWZxPEM9k2x7PPg%3D%3D&N=PRMfkBXqcZegg9sdKXw1Lul3Fxe2B71Qc3b2LTSP1js%3D&DT=alQT0%2B51hm2oW6NMeITLVg%3D%3D&V=ZIuoaTkaf7JjmSN%2Bq%2FOwzx8KfuSYTfATMkmFHCz%2BL6o%3D",
+}
+
+
+def document_service_healthy():
+    """Is the state still serving documents at all?
+
+    Returns True unless every canary document reports "no document" while its
+    page reads cleanly. Deliberately biased towards True: a canary we cannot
+    fetch proves nothing (the URL may simply have rotted), so it is skipped
+    rather than counted against the state. Only a clean page that has stopped
+    offering a file we know exists is treated as evidence.
+    """
+    checked = 0
+    for doc, detail_url in CANARY_DOCUMENTS.items():
+        result = get_view_url(detail_url)
+        if result is None:
+            continue          # could not tell -- proves nothing either way
+        checked += 1
+        if result:
+            return True       # one working document is enough
+        print(f"    Canary {doc}: page reads clean but offers no document.")
+    if checked == 0:
+        print("    Warning: no canary document could be checked; assuming the "
+              "state is up. If this persists the canary URLs have rotted.")
+        return True
+    return False
 
 
 def parse_results_page(soup):
@@ -292,6 +341,7 @@ def scrape_entity(session, entity_name, entity_val, status, entity_type, doc_typ
         page = start_page
 
     total = 0
+    deferred = 0      # records held back because their detail page could not be read
     prefetch = None   # next page's response, fetched while this page's details are in flight
     recovered = False
 
@@ -357,6 +407,13 @@ def scrape_entity(session, entity_name, entity_val, status, entity_type, doc_typ
             if record_filter is not None and not record_filter(record):
                 continue
             view_url = view_url_by_detail.get(record["detail_url"], "")
+            if view_url is None:
+                # We could not read this record's detail page, so we do not know
+                # whether it has a document. Writing it now would record "no
+                # document" as a fact. Leave it out: it stays unknown to the CSV,
+                # so the next run picks it up again and asks properly.
+                deferred += 1
+                continue
             writer.writerow([
                 record["doc_number"],
                 record["doc_type"],
@@ -429,6 +486,10 @@ def scrape_entity(session, entity_name, entity_val, status, entity_type, doc_typ
             print(f"  NOTE: {total:,} rows for {last_page:,} pages, fewer than the "
                   f"~{expected:,} expected -- records may have shifted mid-scrape.")
 
+    if deferred:
+        print(f"  {entity_name}: {deferred:,} record(s) held back -- their detail pages "
+              "could not be read, so whether they carry a document is still unknown. "
+              "They stay unrecorded and will be retried on the next run.")
     return total, True
 
 
@@ -719,6 +780,18 @@ def run_daily(args):
               "to diff against.", file=sys.stderr)
         sys.exit(1)
 
+    # Check the state is still serving documents before scraping a single page.
+    # A run made while its document service is down records "no document" for
+    # every new contract, which is indistinguishable afterwards from the truth
+    # and would ship to the site as missing links. One request answers this;
+    # the alternative is thousands of requests producing poisoned rows.
+    if not document_service_healthy():
+        print("ERROR: refusing --daily: the state is not serving documents right now, so "
+              "every new record would be written as having none. Nothing was scraped. "
+              "Re-run once https://statecontracts.nebraska.gov is serving documents again.",
+              file=sys.stderr)
+        sys.exit(1)
+
     progress_path = daily_progress_file(args.dataset)
     done_today = load_daily_progress(progress_path)
 
@@ -866,6 +939,17 @@ def main():
         entities = {name: entities[name] for name in args.entity}
 
     os.makedirs("data", exist_ok=True)
+
+    # Same guard as --daily, and it matters more here: a full sweep is 20+ hours,
+    # so an outage that starts mid-run would silently mark every remaining
+    # contract as document-less. --status takes no network calls and skips it.
+    if not args.status and not document_service_healthy():
+        print("ERROR: the state is not serving documents right now, so every record "
+              "scraped would be written as having none. Nothing was scraped. Re-run "
+              "once https://statecontracts.nebraska.gov is serving documents again.",
+              file=sys.stderr)
+        sys.exit(1)
+
     progress_path = progress_file(args.dataset)
 
     if args.fresh:

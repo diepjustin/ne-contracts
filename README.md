@@ -221,7 +221,11 @@ python3 scripts/scrape.py state --daily
 
 An unseen record gets a detail fetch and a new row. A known record is not rewritten. A
 previously-Active record that does not appear today has its `Status` flipped to `Expired`
-in place.
+in place — **unless the disappearance is too large to be real**. An entity that returns
+no records at all while it had active ones, or that loses more than half of 20 or more,
+is refused and re-checked on the next run. That is not hypothetical tidiness: without it,
+one outage expired all 44,063 active records in a single green run (see "Things that bit
+us").
 
 **Amendments are recorded rather than discarded.** Amount, vendor, begin and end date are
 compared against what the CSV already held, and any move is appended to
@@ -429,7 +433,15 @@ in those words (*"Grouped by us, not by the state."*); and a rescrape that renam
 vendor fails the build rather than silently shrinking a total.
 
 **Never record an absence you did not observe.** A failed fetch is not evidence that a
-contract has no document, that a field is empty, or that a record is gone. Keep the two
+contract has no document, that a field is empty, or that a record is gone. A silent
+source is the one input that looks identical to "nothing there", and it has now caused
+the two worst data failures in this project: blank descriptions attributed to the state,
+and every active contract expired at once.
+
+**Put the refusal where the write is.** A check that runs before publishing cannot
+protect data that the scrape has already written and cached. `check_daily_diff.py` was
+built for exactly the mass-expiry case and never fired, because it guards the weekly
+publish leg rather than the daily write. Keep the two
 apart in the value itself — `""` for "read it, there is nothing" and `None` for "could
 not find out" — and hold back anything unknown rather than writing it. The CSV is a
 record of what the state published, so a value in it must be something we actually saw.
@@ -546,6 +558,53 @@ there.
 
 **The site renders entity names in caps on state result grids** (`DRY BEAN COMMISSION`)
 but the dropdown uses title case. Rows record the canonical dropdown name.
+
+**A two-day outage marked every active contract in the database Expired.** On the night
+of 17 Aug 2026 the state's search answered "No results found" for every entity. That is
+not a shape `--daily` was built to doubt: `scrape_entity` re-runs the query and resumes
+when a page *after* the first comes back empty — the guard that saved 170,000 records
+from expiring session state — but an empty *first* page is treated as a clean finish.
+So `seen` came back empty, `known - seen` was everything, and one run wrote:
+
+```
+Patched 10,358 row(s) Active -> Expired.
+Patched 12,233 row(s) Active -> Expired.
+Patched 21,472 row(s) Active -> Expired.
+```
+
+44,063, which is every active record there was. The run was green and every step
+succeeded. Nothing in the data could show it had happened, and nothing could undo it:
+`--daily` only ever flips Active to Expired, so there was no path back to the truth.
+
+**A guard rail for exactly this existed and did not fire.** `check_daily_diff.py` fails
+the week when an entity loses more than half its active records in a day. It runs
+`if: publish == 'true'` — the weekly publish leg. 17 Aug was a Monday. And even on a
+Sunday it would have been too late: it gates *publishing*, while the damage is done by
+the scrape, which has already rewritten the CSV and saved it to the Actions cache. A
+check that runs before publishing cannot protect data that is already written.
+
+So the refusal now lives in the scrape, where the write happens. An entity that returns
+nothing while it had active records is refused, as is one where more than half of 20+
+active records vanish at once; both re-check next run. Ordinary expiries still flip, and
+a small body genuinely clearing out its four contracts still flips — a guard that freezes
+the database would be its own bug, so both cases have tests.
+
+**It compounded quietly.** Once every record read Expired, the next night's scrape had no
+memory of them: `known_active` was empty, so all 44,063 active contracts looked new and
+were written again as fresh rows. The only reason that never reached readers is that
+publishing is gated to Sundays, so no build shipped in between. Repaired by deleting the
+two poisoned Actions caches and rebuilding from the pre-outage one; the restored counts
+came back at exactly 44,063 active and 695,542 expired, which is the local count less the
+128 duplicate rows the build drops — that reconciliation is what proved the older cache
+was undamaged.
+
+**The End column was blank for every row, from the first build.** A local `var end` for
+the virtual scroller's row window shadowed the module-level `end` column, so
+`fmtDate(end[id])` read a property off a Number. Three things hid it: the payload was
+always correct, the crc32 selftest on `end` passed the entire time because it checks the
+payload rather than the page, and the CSV export sits outside that function — so exported
+files carried end dates while the table never did. Renamed to `stop`. Both of these were
+found by Justin reading the live site, not by any check in this repo.
 
 **The page explained a blank description by guessing, and was wrong a quarter of the
 time.** It told readers a missing description was "most likely a scanned image rather

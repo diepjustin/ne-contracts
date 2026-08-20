@@ -840,13 +840,36 @@ def run_daily(args):
                 print(f"  {entity_name}: not finished this run, will re-scan from the top later.")
                 continue
 
+            # An entity that returns nothing is the state failing, not 20,000
+            # contracts ending overnight. On 17-18 Aug 2026 its search answered
+            # "No results found" for every entity for two days; scrape_entity
+            # treats an empty first page as a clean finish, so `seen` came back
+            # empty, `known - seen` was everything, and a single run marked all
+            # 44,063 active records in the database Expired. Nothing failed, and
+            # nothing could undo it: --daily only ever flips Active -> Expired.
+            #
+            # So a flip has to be evidence of an ending, not of an absence.
+            # Refuse the two shapes that cannot be real and re-check next run.
+            vanished = known - seen
+            share = len(vanished) / len(known) if known else 0
+            if known and not seen:
+                print(f"  {entity_name}: saw 0 records but {len(known):,} were active -- "
+                      "refusing to expire them. The state is answering empty, not "
+                      "reporting an ending. Will re-check next run.")
+                continue
+            if len(known) >= 20 and share > 0.5:
+                print(f"  {entity_name}: {len(vanished):,} of {len(known):,} active records "
+                      f"({share:.0%}) vanished at once -- refusing to expire them. Will "
+                      "re-check next run.")
+                continue
+
             report[entity_name] = {
                 "previously_active": len(known),
                 "still_active": len(seen & known),
                 "newly_active": len(seen - known),
-                "flipped_to_expired": len(known - seen),
+                "flipped_to_expired": len(vanished),
             }
-            flips[entity_name] = known - seen
+            flips[entity_name] = vanished
 
             done_today.add(entity_name)
             save_daily_progress(progress_path, done_today)

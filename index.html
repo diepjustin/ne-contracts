@@ -773,18 +773,24 @@
 
     var first = at / ROW_H;                                   // fractional row at the top edge
     var start = Math.max(0, Math.floor(first) - BUF);
-    var end = Math.min(view.length, Math.ceil((at + h) / ROW_H) + BUF);
+    // Named "stop", not "end": there is a module-level `end` column holding every
+    // row's end date, and a local `end` here shadowed it. fmtDate(end[id]) then
+    // read a property off a Number, so every End cell in the table rendered
+    // blank -- for every row, from the first build onwards. The payload was
+    // always correct and the CSV export, which sits outside this function, was
+    // always right, which is why no check caught it.
+    var stop = Math.min(view.length, Math.ceil((at + h) / ROW_H) + BUF);
 
     // Place the block so the row the scroll position points at lands under the
     // viewport's top edge, then let the trailing spacer make up the rest.
     var lead = Math.max(0, Math.round(top - (first - start) * ROW_H));
-    var body = (end - start) * ROW_H;
+    var body = (stop - start) * ROW_H;
     var track = scale > 1 ? MAX_H : full;
 
     var html = "";
     if (lead > 0) html += '<tr style="height:' + lead + 'px"></tr>';
 
-    for (var i = start; i < end; i++) {
+    for (var i = start; i < stop; i++) {
       var id = view[i], t = typeCol[id];
       html += '<tr data-row="' + id + '"' + (id === picked ? ' class="picked"' : '') +
         (hasDesc ? ' tabindex="0" role="button" aria-expanded="' +

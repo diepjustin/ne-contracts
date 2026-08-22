@@ -23,6 +23,7 @@ Layout, where n = row count and V = vendor count:
     cols.f64.bin     amount[n]                                 (8 bytes each)
     cols.u8.bin      status[n], entity[n], type[n], adnIdx[n],
                      viewPresent[n], docLen[n]                 (1 byte each)
+    descsrc.bin      descSource[n]                             (1 byte each)
     docs.bin         document numbers, packed, no separators
     vendors.bin      len[V] as u8, then vendor names packed as UTF-8
     vtok.bin         units[V] as u8, then V tokens packed as raw bytes
@@ -34,6 +35,15 @@ nothing to get wrong except the row count -- which meta.count states and the
 reader checks against the file length. Grouping by item size is what makes
 that work: a file of one item size needs no alignment padding, and a fetched
 ArrayBuffer always starts aligned at offset 0.
+
+descsrc.bin is a column and would sit in cols.u8.bin but for one thing: it is
+a fact about the descriptions, not about the rows, and descriptions can be
+attached to a payload that is already built and live (build_site.py's
+--descriptions-only). That path deliberately writes no byte of any resident
+column file, so a seventh u8 column would go stale there -- descriptions
+present, every row reporting it has none, and nothing failing. Its own file
+lets whichever path writes the descriptions write this alongside them, which
+is the only arrangement in which the two cannot disagree.
 
 Little-endian is assumed. Every browser this will run in is little-endian,
 but meta records it and the page asserts it rather than rendering whatever
@@ -65,6 +75,7 @@ VTOK = "vtok.bin"
 SELFTEST = "selftest.json"
 TOK_DIR = "tok"
 DESC_DIR = "desc"
+DESC_SRC = "descsrc.bin"
 WORDS = "words.bin"
 POSTINGS = "postings.bin"
 VGROUP = "vgroup.bin"
@@ -218,6 +229,38 @@ def write_desc_blocks(outdir, descriptions, n):
             f.write(lengths.tobytes())
             for text in chunk:
                 f.write(text)
+
+
+def write_desc_sources(outdir, sources, n):
+    """Which parser produced each row's description. `sources` maps row -> code.
+
+    One byte per row, no header: the row count is meta.count and the reader
+    checks it against the file length, same as the column files. A row with no
+    description is 0, which is also what a build made before this file existed
+    reads as -- the page treats a missing descsrc.bin as "nothing is known
+    about sources" rather than "no row has a description".
+
+    Written next to the description blocks and by the same callers, so the two
+    are always made together. See the note at the top of this file.
+    """
+    column = array.array("B", bytes(n))
+    for row, code in sources.items():
+        column[row] = code
+    with open(os.path.join(outdir, DESC_SRC), "wb") as f:
+        f.write(column.tobytes())
+
+
+def read_desc_sources(outdir, n):
+    """The source code per row, or None if this build predates the file."""
+    path = os.path.join(outdir, DESC_SRC)
+    if not os.path.exists(path):
+        return None
+    data = open(path, "rb").read()
+    if len(data) != n:
+        raise ValueError(f"{DESC_SRC} is {len(data)} bytes, expected {n}")
+    column = array.array("B")
+    column.frombytes(data)
+    return column
 
 
 def read_desc_blocks(outdir, n):

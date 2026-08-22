@@ -491,9 +491,10 @@ def main():
     meta["digests"][ne_format.VENDORS] = zlib.crc32(
         bytes(len(v) for v in vendor_names) + b"".join(vendor_names))
 
-    descriptions = load_descriptions(view_tokens)
+    descriptions, desc_sources = load_descriptions(view_tokens)
     meta["descCount"] = len(descriptions)
     meta["descBytes"] = sum(len(d) for d in descriptions.values())
+    add_source_meta(meta, desc_sources)
 
     # Keep what write_payload returns: it adds each resident file's size, and
     # the two writers below add keys of their own. meta.json is rewritten after
@@ -501,6 +502,13 @@ def main():
     meta = ne_format.write_payload(outdir, columns, docs, vendor_names, vtok_bytes, meta)
     ne_format.write_token_blocks(outdir, dn_bytes, view_bytes, n)
     ne_format.write_desc_blocks(outdir, descriptions, n)
+    ne_format.write_desc_sources(outdir, desc_sources, n)
+    meta["bytes"][ne_format.DESC_SRC] = os.path.getsize(
+        os.path.join(outdir, ne_format.DESC_SRC))
+    # ?selftest=1 is meant to cover everything the page loads, and this is now
+    # one of those files.
+    meta["digests"][ne_format.DESC_SRC] = zlib.crc32(
+        open(os.path.join(outdir, ne_format.DESC_SRC), "rb").read())
     write_search_index(outdir, descriptions, meta)
     write_vendor_groups(outdir, vendor_names, columns, meta)
     write_selftest(outdir, sources, columns["viewPresent"], n)
@@ -509,7 +517,7 @@ def main():
     # A key added after write_payload and lost before the file was written is
     # invisible: the page just behaves as though the feature is not there.
     on_disk = json.load(open(os.path.join(outdir, ne_format.META), encoding="utf-8"))
-    for key in ("wordCount", "vendorGroups", "descCount", "bytes", "digests"):
+    for key in ("wordCount", "vendorGroups", "descCount", "descSources", "bytes", "digests"):
         if key not in on_disk:
             sys.exit(f"meta.json is missing {key!r} — it was added after the file was written")
     with open(os.path.join(OUT_DIR, "manifest.json"), "w", encoding="utf-8") as f:
@@ -564,15 +572,25 @@ def add_descriptions_to_build():
         if columns["viewPresent"][i]:
             view_tokens[i] = quote(base64.b64encode(view[i]).decode(), safe="")
 
-    descriptions = load_descriptions(view_tokens, carry=False)
+    descriptions, desc_sources = load_descriptions(view_tokens, carry=False)
     if not descriptions:
         sys.exit(f"nothing to attach — {SCOPE_JSONL} is missing or matched no rows")
 
     ne_format.write_desc_blocks(outdir, descriptions, n)
+    # Written here as well as in the full build, and that is the reason it is
+    # its own file rather than a seventh u8 column: this path must never touch
+    # cols.u8.bin, and a source column stranded there would say every row has
+    # no description while the blocks beside it hold 540,000.
+    ne_format.write_desc_sources(outdir, desc_sources, n)
+    meta.setdefault("bytes", {})[ne_format.DESC_SRC] = os.path.getsize(
+        os.path.join(outdir, ne_format.DESC_SRC))
+    meta.setdefault("digests", {})[ne_format.DESC_SRC] = zlib.crc32(
+        open(os.path.join(outdir, ne_format.DESC_SRC), "rb").read())
     verify_descriptions(outdir, descriptions, n)
 
     meta["descCount"] = len(descriptions)
     meta["descBytes"] = sum(len(d) for d in descriptions.values())
+    add_source_meta(meta, desc_sources)
     write_search_index(outdir, descriptions, meta)
     write_vendor_groups(outdir, vendors, columns, meta)
     with open(os.path.join(outdir, ne_format.META), "w", encoding="utf-8") as f:
@@ -750,8 +768,51 @@ def carry_descriptions_forward(view_tokens):
     return carried
 
 
+# Which parser produced a description, as stored in descsrc.bin. This order is
+# the on-disk encoding: append only, never renumber, or an old payload read by
+# a newer page relabels every row.
+#
+# UNKNOWN exists for descriptions carried forward from a previous build, where
+# the text survives and the source does not. That is not "no source" -- it is
+# "we did not keep it", and the page says nothing rather than guessing.
+DESC_SOURCES = ("", "line_items", "cover_sheet", "services_clause",
+                "cover_sheet_form", "purchasing_bureau", "direct_purchase",
+                "unknown")
+DESC_SOURCE_CODE = {name: i for i, name in enumerate(DESC_SOURCES) if name}
+
+# What the page prints above a description. Kept here rather than in index.html
+# so that adding a parser needs no page change: the page reads the label from
+# meta. A description reads very differently once you know it is a list of what
+# was bought rather than a statement of what the contract is for.
+DESC_SOURCE_LABELS = {
+    "line_items": "Itemised on the purchase order",
+    "cover_sheet": "Summary written on the University's contract cover sheet",
+    "services_clause": "The contract's own scope-of-services clause",
+    "cover_sheet_form": "The University cover sheet's description-of-purchase field",
+    "purchasing_bureau": "The State Purchasing Bureau's description of the award",
+    "direct_purchase": "The state's note that this purchase produced no contract",
+    "unknown": "",
+}
+
+
+def add_source_meta(meta, desc_sources):
+    """The source dictionary and per-source counts the page renders from.
+
+    The labels travel in the payload rather than living in index.html, so a
+    build carrying a parser the page has never heard of still labels its rows,
+    and an older payload read by a newer page labels its own the old way.
+    """
+    meta["descSources"] = [DESC_SOURCE_LABELS.get(name, "") for name in DESC_SOURCES]
+    counts = collections.Counter(desc_sources.values())
+    # Code 0 is every row the map says nothing about, which is most of the
+    # point: 199,527 rows have no description, and a zero here would report the
+    # opposite of the number a reader most wants.
+    counts[0] = meta["count"] - sum(n for code, n in counts.items() if code)
+    meta["descSourceCounts"] = [counts.get(code, 0) for code in range(len(DESC_SOURCES))]
+
+
 def load_descriptions(view_tokens, carry=True):
-    """Row -> description bytes, keyed off each row's view token.
+    """(row -> description bytes, row -> source code), keyed off view tokens.
 
     scripts/extract_scope.py records the token it was fetched under, which is
     the same string the scrape found in the View URL -- an exact key, unlike
@@ -767,15 +828,20 @@ def load_descriptions(view_tokens, carry=True):
     # strictly newer: it covers every document extracted so far, including any
     # collected since that build was made.
     descriptions = carry_descriptions_forward(view_tokens) if carry else {}
+    # Everything carried forward arrived as text alone, so its source is not
+    # knowable. Recorded as such, and overwritten below by anything scope.jsonl
+    # also covers -- which, on a build with a current scope.jsonl, is all of it.
+    sources = {row: DESC_SOURCE_CODE["unknown"] for row in descriptions}
 
     if not os.path.exists(SCOPE_JSONL):
         if not descriptions:
             print(f"note: no {SCOPE_JSONL} and nothing to carry forward — "
                   "building without descriptions")
-        return descriptions
+        return descriptions, sources
 
     row_of = {token: i for i, token in enumerate(view_tokens) if token}
     added, unmatched = 0, 0
+    unnamed = collections.Counter()
     with open(SCOPE_JSONL, encoding="utf-8") as f:
         for line in f:
             record = json.loads(line)
@@ -786,11 +852,21 @@ def load_descriptions(view_tokens, carry=True):
             if row not in descriptions:
                 added += 1
             descriptions[row] = record["description"].encode("utf-8")
+            source = record.get("source") or ""
+            if source and source not in DESC_SOURCE_CODE:
+                # A parser this build has never heard of. Publishing it as 0
+                # would say the row has no description while its text sits in
+                # the block beside it, so it is named "unknown" and counted.
+                unnamed[source] += 1
+            sources[row] = DESC_SOURCE_CODE.get(source, DESC_SOURCE_CODE["unknown"])
 
     print(f"descriptions  : {len(descriptions):,} joined to rows"
           + (f", {added:,} new since the last build" if added else "")
           + (f", {unmatched:,} unmatched" if unmatched else ""))
-    return descriptions
+    for source, count in unnamed.most_common():
+        print(f"    note: {count:,} rows carry source {source!r}, which this build "
+              f"does not know — add it to DESC_SOURCES to label them")
+    return descriptions, sources
 
 
 SELFTEST_ROWS = 1000
@@ -873,8 +949,22 @@ def verify_descriptions(outdir, descriptions, n):
             sys.exit(f"row {row}: description round trip failed\n"
                      f"  wrote {want[:80]!r}\n  read  {decoded[row][:80]!r}")
     present = sum(1 for d in decoded if d)
+
+    # The two files are only useful together, and the failure that matters is
+    # them disagreeing: a row the filter offers as having a description, whose
+    # block is empty, or the reverse. Neither would raise anything on its own.
+    codes = ne_format.read_desc_sources(outdir, n)
+    if codes is None:
+        sys.exit(f"{ne_format.DESC_SRC} was not written — the filter would report "
+                 "that no row has a description")
+    for row in range(n):
+        if bool(decoded[row]) != bool(codes[row]):
+            sys.exit(f"row {row}: description text and source disagree\n"
+                     f"  text   {decoded[row][:60]!r}\n"
+                     f"  source {codes[row]}")
+
     print(f"descriptions round-trip verified: {present:,} rows across "
-          f"{ne_format.block_count(n):,} blocks")
+          f"{ne_format.block_count(n):,} blocks, sources agree on every row")
 
 
 def verify_payload(outdir, columns, docs, vendor_names, vtok_bytes,

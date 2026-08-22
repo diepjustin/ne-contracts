@@ -97,6 +97,12 @@
   #detail .who b { color: var(--text); font-variant-numeric: tabular-nums; }
   #detail .words { white-space: pre-wrap; }
   #detail .none { color: var(--muted); font-style: italic; }
+  /* Where the description came from. Muted and small: it frames the state's
+     words without competing with them. */
+  #detail .descfrom {
+    margin-bottom: 4px; font-size: 12px; color: var(--muted);
+    white-space: normal;
+  }
   #detail .company {
     margin: 2px 0 5px; font-size: 12px; color: var(--muted);
   }
@@ -215,6 +221,14 @@
     <label>&nbsp;</label>
     <button id="csv-src" title="Same, but with each document's own address on the state's site — needs an extra download">Export + source links</button>
   </div>
+  <div class="field" id="descfield" hidden>
+    <label for="desc">Description</label>
+    <select id="desc">
+      <option value="">All records</option>
+      <option value="1">Has one</option>
+      <option value="0">Has none</option>
+    </select>
+  </div>
   <div class="field">
     <label for="baddates">Data quality</label>
     <label class="check"><input type="checkbox" id="baddates"> ends before it begins</label>
@@ -287,6 +301,7 @@
 
   var COLS_I32 = "cols.i32.bin", COLS_F64 = "cols.f64.bin", COLS_U8 = "cols.u8.bin";
   var DOCS = "docs.bin", VENDORS = "vendors.bin", VTOK = "vtok.bin";
+  var DESC_SRC = "descsrc.bin";
   var RESIDENT = [COLS_I32, COLS_F64, COLS_U8, DOCS, VENDORS];
 
   // --- payload ------------------------------------------------------------
@@ -304,6 +319,9 @@
   // the canonical names. Optional: a build made before the review existed, or
   // with an empty vendor_groups.json, simply has neither.
   var vgroup = null, groupNames = [], groupSpend = null;
+  // One byte per row naming the parser its description came from; null on a
+  // payload built before descsrc.bin existed.
+  var descSrc = null;
   var vtokLoad = null;           // promise for vtok.bin, fetched only when needed
 
   // --- view state ---------------------------------------------------------
@@ -495,7 +513,7 @@
       .then(function (got) {
         RESIDENT.forEach(function (f, i) { files[f] = got[i]; });
         decode();
-        return loadVendorGroups();
+        return Promise.all([loadVendorGroups(), loadDescSources()]);
       });
   }
 
@@ -559,6 +577,41 @@
         vgroup = null;   // grouping is an enhancement; never block the page for it
         groupNames = [];
       });
+  }
+
+  // Which parser produced each row's description: one byte per row, 740 KB raw
+  // and about 31 KB over the wire, because Pages gzips it and the column holds
+  // seven distinct values across 739,605 rows.
+  //
+  // Worth that, because without it a reader cannot tell a row with a
+  // description from one without until they click it -- and on University
+  // contracts five of every six clicks land on nothing, which reads as though
+  // the database has no descriptions at all rather than as though this
+  // particular kind of record is poorly documented by the state.
+  //
+  // Loaded like the vendor groups and just as optional: a payload built before
+  // this file existed simply has no filter, and everything else works.
+  function loadDescSources() {
+    if (!hasDesc) return Promise.resolve();
+    return fetch(BASE + dir + DESC_SRC).then(ok)
+      .then(function (r) { return r.arrayBuffer(); })
+      .then(function (ab) {
+        need(ab.byteLength === N,
+             DESC_SRC + " is " + ab.byteLength + " bytes for " + N + " rows");
+        descSrc = new Uint8Array(ab);
+        $("descfield").hidden = false;
+      }, function () {
+        descSrc = null;
+      });
+  }
+
+  // The label for a row's description, or "" when this build carries no
+  // sources, the row has none, or the source was not recorded. Read out of
+  // meta rather than written here, so a build that learns a new parser labels
+  // its rows without the page being changed.
+  function descLabel(id) {
+    if (!descSrc || !meta.descSources) return "";
+    return meta.descSources[descSrc[id]] || "";
   }
 
   // What the state has paid every spelling of one company, summed once and
@@ -720,6 +773,11 @@
     // filter. Rows missing either date are not claimed to be wrong.
     var onlyBadDates = $("baddates").checked;
 
+    // "" is every row; "1" only rows carrying a description; "0" only rows
+    // without one. Inert unless descsrc.bin loaded, so an older payload
+    // filters exactly as it did before.
+    var descWant = descSrc ? $("desc").value : "";
+
     var sIdx = si === "" ? -1 : +si, eIdx = ei === "" ? -1 : +ei;
     var d0 = isNaN(y0) ? 0 : y0 * 10000;
     var d1 = isNaN(y1) ? 0 : y1 * 10000 + 9999;
@@ -733,6 +791,8 @@
       if (sIdx >= 0 && statusCol[j] !== sIdx) continue;
       if (eIdx >= 0 && entityCol[j] !== eIdx) continue;
       if (onlyBadDates && !(begin[j] && end[j] && begin[j] > end[j])) continue;
+      if (descWant === "1" && !descSrc[j]) continue;
+      if (descWant === "0" && descSrc[j]) continue;
       if (d0 && begin[j] && begin[j] < d0) continue;
       if (d1 && begin[j] && begin[j] > d1) continue;
       if (hasMn && amount[j] < mn) continue;
@@ -1125,7 +1185,20 @@
       if (picked !== id) return;   // reader moved on before this landed
       var words = $("detail-words");
       if (text) {
-        words.textContent = text;
+        // Where the words came from, before the words themselves. A list of
+        // part numbers and a scope of work look identical in a bare paragraph,
+        // and a reader who does not know which one they are reading cannot
+        // judge either -- "Itemised on the purchase order" is the difference
+        // between odd-looking prose and a list of what was bought.
+        var from = descLabel(id);
+        words.textContent = "";
+        if (from) {
+          var tag = document.createElement("div");
+          tag.className = "descfrom";
+          tag.textContent = from;
+          words.appendChild(tag);
+        }
+        words.appendChild(document.createTextNode(text));
       } else {
         words.className = "words none";
         words.textContent = whyBlank(id);
@@ -1413,6 +1486,14 @@
       say(want === undefined || got === want, "crc32 " + f + " = " + got +
           (want === undefined ? " (no digest in meta)" : got === want ? "" : " — expected " + want));
     });
+    // Loaded separately from the resident bundle, and checked here for the
+    // same reason as the rest: this report is meant to cover everything the
+    // page actually fetched, not everything that happens to be convenient.
+    if (descSrc) {
+      var dsGot = crc32(descSrc), dsWant = meta.digests[DESC_SRC];
+      say(dsWant === undefined || dsGot === dsWant, "crc32 " + DESC_SRC + " = " + dsGot +
+          (dsWant === undefined ? " (no digest in meta)" : dsGot === dsWant ? "" : " — expected " + dsWant));
+    }
 
     say(docOff[N] === docs.length, "document numbers span " + docOff[N] + " bytes of " + DOCS);
     say(vendors.length === meta.vendorCount, vendors.length + " vendor names decoded");
@@ -1475,7 +1556,7 @@
     ["q", "y0", "y1", "min", "max"].forEach(function (id) {
       $(id).addEventListener("input", debounced);
     });
-    ["type", "status", "entity", "baddates"].forEach(function (id) {
+    ["type", "status", "entity", "baddates", "desc"].forEach(function (id) {
       $(id).addEventListener("change", apply);
     });
     $("indesc").addEventListener("change", function () {
@@ -1492,7 +1573,7 @@
     $("csv-src").addEventListener("click", exportWithSources);
     $("reset").addEventListener("click", function () {
       ["q", "y0", "y1", "min", "max"].forEach(function (id) { $(id).value = ""; });
-      ["type", "status", "entity"].forEach(function (id) { $(id).value = ""; });
+      ["type", "status", "entity", "desc"].forEach(function (id) { $(id).value = ""; });
       $("indesc").checked = false;
       $("baddates").checked = false;
       searchDesc = false;

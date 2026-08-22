@@ -176,6 +176,34 @@ Things worth knowing before quoting one:
   almost entirely Department of Roads spending.
 - **Searching descriptions is opt-in.** The index is a separate 9.92 MB download, fetched
   only when you tick the box, so it costs nothing for readers who do not use it.
+- **Filtering by whether a row has one is not.** The page's Description control —
+  all records / has one / has none — reads `descsrc.bin`, which is resident, and each
+  description is captioned with where it came from. Both exist because the same text
+  reads completely differently depending on which parser produced it, and because a
+  reader clicking University contracts hits a blank five times in six and reasonably
+  concludes the database has no descriptions at all.
+
+**94.8% is a coverage figure for readable documents, and it hides where the gap is.**
+Purchase orders carry the vast majority of the descriptions, and a purchase order's
+description is a list of what was bought. Contracts — the records worth reading — are
+where there is almost nothing:
+
+| | rows | has a description | blank, document exists | no document |
+| --- | ---: | ---: | ---: | ---: |
+| University contracts | 35,681 | **12.8%** | 82.9% | 4.3% |
+| State agency records | 235,410 | **42.0%** | 40.3% | 17.7% |
+| Purchase orders | 468,642 | **93.2%** | 5.9% | 0.8% |
+
+**On a large share of University contracts the scope is not in the document at all.**
+1,161 of the blank ones carry the identical sentence *"...to render the services and
+provide the deliverables identified in Section 1 of Exhibit A"*, and the state publishes
+the agreement without the exhibit. That is a limit of what is disclosed, not of the
+parsers: no pattern and no OCR run reaches a scope that was never filed. A heading-based
+parser was measured against those 7,165 documents and rejected — 56% of what it returned
+was template boilerplate repeated across hundreds of contracts and 32% began mid-sentence,
+which would have published a tax clause as a contract's scope. Guarded hard enough to be
+safe it reached 154 documents, 2.1%, and still got Oracle's warranty clause. This agrees
+with the 5.4% ceiling under "Open work"; do not spend a week here either.
 
 ---
 
@@ -329,9 +357,18 @@ So the payload is split by access pattern:
 | | gzipped, as Pages serves it |
 | --- | ---: |
 | numeric columns, vendor names, document numbers — **loaded up front** | **6.81 MB** |
+| which parser wrote each description (`descsrc.bin`) — **loaded up front** | 0.03 MB |
 | link tokens — **fetched on click**, 362 blocks | 23.67 MB raw |
 | descriptions — **fetched on click**, 362 blocks | 49.95 MB raw |
 | description search index — **fetched only if you tick the box** | 9.92 MB |
+
+`descsrc.bin` is one byte per row and would be a seventh column in `cols.u8.bin` but for
+`build_site.py --descriptions-only`, which attaches descriptions to a payload that is
+already built and live and deliberately writes no byte of any resident column file. A
+column there would have gone stale on that path — descriptions present, every row
+reporting it has none, nothing failing. Its own file means whichever path writes the
+descriptions writes this beside them, and `verify_descriptions()` fails the build if the
+two ever disagree on a row.
 
 It also exploits the structure of the state's URLs: `DT` is determined by document type,
 `V` maps 1:1 with vendor, and `A`/`D`/`N` vary together across only 98 distinct

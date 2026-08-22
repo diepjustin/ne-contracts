@@ -10,7 +10,7 @@ Two things live here: a scraper, and a static searchable site built from what it
 collects. `index.html` sits at the folder root because that root is the published URL.
 There is no backend and no framework.
 
-**739,605 records · 540,074 descriptions · 92 entities · one 6.81 MB page.**
+**739,605 records · 540,074 descriptions · 92 entities · one 6.85 MB page.**
 
 | | |
 |---|---|

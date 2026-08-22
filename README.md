@@ -122,8 +122,34 @@ They come from three places, in this order of preference:
 | cover sheet | 3,836 | a summary someone wrote by hand on a University contract |
 | SERVICES clause | 2,737 | the contract stating its own scope, where there is no cover sheet |
 
-A fourth source, `cover_sheet_form`, is in `extract_scope.py` but **not yet in the
-published data** — it lands at the next extraction run. The University has a second
+Three more are in `extract_scope.py` and **none of them is in the published data yet** —
+all three land at the next extraction run, and the two written on 22 Aug 2026 are still
+short of the check this file demands of them (see below).
+
+| source | rows | what it is |
+|---|---:|---|
+| direct_purchase | 7,577 | Roads' one-sentence notice that a purchase produced no contract |
+| purchasing_bureau | 879 | the State Purchasing Bureau's "Contract to supply and deliver…" |
+| cover_sheet_form | 548 | the University's flattened DocuSign cover sheet |
+
+`purchasing_bureau` is ranked below line items, not above. It was tried above them, on
+the strength of a purchase order that reads "GSA MODEL; FRIEGHT; HULL QUOTE ITEM F" off
+its table and "One Time Purchase to supply and deliver AirBoats to the State of Nebraska"
+here. Across the corpus that ordering rewrote 671 existing descriptions and the trade
+went both ways: a boat whose line items gave its length, beam and transom became "to
+supply and deliver boat", and "SNOW GROOMER FOUR CYLINDER" became "SNOW GROOMER". The
+state writing a headline is not the state writing a better description, and choosing
+between two of its own phrasings is not this file's call. So it fills blanks and touches
+nothing already described.
+
+**Both parsers are unverified against source documents.** All 8,456 extractions are
+ordered subsequences of their own document's text, and the tests pass, and that is
+exactly the evidence that was sufficient for the truncation bug too. The state's document
+service has been down since 22 Aug 2026, so the ten-real-documents check under "Guard
+rails" has not been run. Do not publish an extraction release built from these until it
+has.
+
+`cover_sheet_form` is the oldest of the three. The University has a second
 cover sheet that is a filled PDF form rather than prose, and DocuSign flattens it on
 export: every field label is written out in one run, then every filled value in another,
 so "DESCRIPTION OF PURCHASE" ends up dozens of lines from its own answer. It recovers
@@ -173,7 +199,10 @@ Things worth knowing before quoting one:
   That last group is not a failure of any kind: those documents consist of a single
   sentence from the state — *"This item involved a direct purchase which did not result
   in a contract. Therefore, there is no contract available for this item."* — and are
-  almost entirely Department of Roads spending.
+  every one of them Department of Roads spending. From the next extraction run they stop
+  being blank: the sentence is the state's own answer, published verbatim as the
+  `direct_purchase` source, and it beats our "No description could be read from this
+  document" because it is true and ours is merely not false.
 - **Searching descriptions is opt-in.** The index is a separate 9.92 MB download, fetched
   only when you tick the box, so it costs nothing for readers who do not use it.
 - **Filtering by whether a row has one is not.** The page's Description control —

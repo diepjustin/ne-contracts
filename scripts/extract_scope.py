@@ -7,7 +7,7 @@ in plain English, by the person who filed the document, and can be lifted
 verbatim. Nothing here is generated or summarized; every string this script
 emits is the state's own text.
 
-Two sources, in descending order of how much they tell you:
+Several sources, in descending order of how much they tell you:
 
   * A **cover sheet**. University of Nebraska contracts carry a Procure-to-Pay
     page whose "Contract Summary (brief description and/or event name)" field
@@ -27,6 +27,16 @@ Two sources, in descending order of how much they tell you:
     and discarding 892 of 1,367 state tails. A reader caught it by comparing a
     $15 M purchase order against its source PDF. Do the same before trusting
     any change here -- comparing output to output cannot see this class of bug.
+
+  * The **State Purchasing Bureau's opening sentence**, on the award and
+    purchase-order forms state agencies file: "Contract to supply and deliver
+    Fine Gradation Brining Salt to the State of Nebraska." The state agency
+    side of the database has no cover sheet, and this is the nearest thing.
+
+  * The **direct-purchase notice**, which describes no work at all. Roads files
+    it instead of a document when it bought something outright, and it is here
+    because the state saying "there is no contract for this item" is a better
+    answer than our own "no description could be read".
 
 Reads whatever text scripts/extract_text.py has already captured and writes
 one record per document it can describe. It makes no network requests, so it
@@ -319,6 +329,133 @@ def from_cover_sheet_form(text):
     return value
 
 
+# The Department of Roads files a one-sentence notice in place of a document
+# for items it bought outright. The whole PDF is this and nothing else, one
+# wording exactly, 7,577 times, every one of them Roads:
+#
+#   "This item involved a direct purchase which did not result in a contract.
+#    Therefore, there is no contract available for this item. Questions
+#    regarding these transactions should be directed to the NDOR Communication
+#    Division at 402-479-4512."
+#
+# These rows used to fall through to the page's "No description could be read
+# from this document", which is true of our parsers and unfair to the state --
+# it did answer, in writing, and its answer is better than our sentence. It is
+# published whole, phone number included, on the same rule that keeps invoicing
+# boilerplate in line items: which of the state's words are worth keeping is
+# not our call.
+#
+# Matched at the start of the document rather than anywhere in it. The sentence
+# also turns up quoted inside correspondence about such a purchase, where it
+# describes some other item and not the one this row is about.
+DIRECT_PURCHASE = re.compile(
+    r"^\s*This item involved a direct purchase which did not result in a "
+    r"contract\.", re.I)
+
+
+def from_direct_purchase(text):
+    """The state's own account of a purchase it made without a contract."""
+    flat = flatten(text)
+    if not DIRECT_PURCHASE.match(flat):
+        return None
+    return flat[:MAX_DESCRIPTION] or None
+
+
+# The State Purchasing Bureau's award, amendment and purchase-order forms open
+# their free-text block with a sentence saying what the state bought: "Contract
+# to supply and deliver Fine Gradation Brining Salt to the State of Nebraska as
+# per the attached specifications for the contract period November 14, 2022
+# through November 13, 2023." It is the closest thing to a scope of work on the
+# state agency side of the database, and it reaches 876 documents that no other
+# pattern here describes.
+#
+# Anchored to the start of a line. Unanchored it also matches inside running
+# contract prose ("...agreement to provide a certain number of shows..."),
+# which would publish a fragment of one clause as the contract's scope.
+PURCHASING_BUREAU = re.compile(
+    r"(?m)^[ \t]*((?:Contract|One Time Purchase|Purchase Order)\s+to\s+"
+    r"(?:supply|provide|furnish)\b[^\n]*)")
+
+# Where the sentence stops being about the purchase and starts being about
+# process. Built the way FURNITURE was, by counting what actually follows the
+# lead across every document that carries it rather than from a guess: the
+# vendor's contact block accounts for 205 of them and the ACH enrolment notice
+# for 148.
+#
+# Renewal and term sentences are deliberately not here. "This is the first
+# renewal of the contract as amended" is the state describing this contract,
+# not administrative furniture, and it survives into the description.
+BUREAU_TAIL = re.compile(
+    r"(?:"
+    r"Vendor\s+(?:Point\s+of\s+)?Contact"
+    r"|The State may request that payment"
+    r"|The Contractor is required and hereby agrees"
+    r"|found at:\s*<?http"
+    r"|Payment(?:\s+Terms)?:\s"
+    r"|IMPORTANT NOTE:"
+    r"|A response to this Solicitation"
+    r"|PLEASE READ CAREFULLY"
+    r")", re.I)
+
+# The form wraps its own lead and the text layer sometimes emits the wrapped
+# half twice: "Contract to supply and deliver Contract to supply and deliver
+# Armor Coat, Surfacing, Windrow and Deicing Gravel". Collapsing the repeat is
+# not editing the state's words -- the doubling is an artifact of the text
+# extraction, and the page would otherwise print a stutter the PDF does not
+# have.
+BUREAU_STUTTER = re.compile(
+    r"^((?:Contract|One Time Purchase|Purchase Order)\s+to\s+"
+    r"(?:supply|provide|furnish)(?:\s+and\s+deliver)?\s+)\1", re.I)
+
+# How far past the lead line to keep reading. The sentence wraps across at most
+# three continuation lines in every document measured; the cap is insurance
+# against a text layer with no line ends, not a truncator.
+BUREAU_CONTINUATION_LINES = 4
+
+
+def from_purchasing_bureau(text):
+    """The State Purchasing Bureau's "Contract to supply and deliver" sentence.
+
+    Ranked last, so it only ever fills a blank. It was tried above line items
+    first, on the strength of a purchase order that reads "GSA MODEL; FRIEGHT;
+    HULL QUOTE ITEM F" off its table and "One Time Purchase to supply and
+    deliver AirBoats to the State of Nebraska" here. Run across the whole
+    corpus that ordering rewrote 671 existing descriptions and the trade went
+    both ways: it buys readability with specifics. A boat whose items gave its
+    length, beam, transom and deck became "to supply and deliver boat"; "SNOW
+    GROOMER FOUR CYLINDER" became "SNOW GROOMER"; a Network Nebraska circuit
+    lost the school it was for.
+
+    The state writing a headline is not the state writing a better description,
+    and choosing between two of its own phrasings is an editorial call this
+    file has no business making. So: 879 rows that had nothing now have this,
+    and nothing that already had a description changes.
+    """
+    match = PURCHASING_BUREAU.search(text)
+    if not match:
+        return None
+
+    lines = [match.group(1)]
+    for follower in text[match.end():].split("\n")[:BUREAU_CONTINUATION_LINES]:
+        if not follower.strip():
+            continue
+        if BUREAU_TAIL.search(follower):
+            break
+        lines.append(follower.strip())
+
+    value = flatten(" ".join(lines))
+    tail = BUREAU_TAIL.search(value)
+    if tail:
+        value = value[:tail.start()].strip()
+    value = BUREAU_STUTTER.sub(r"\1", value)
+
+    # Long enough to name a thing. Anything shorter is the lead sentence with
+    # its object on a line the text layer put somewhere else entirely.
+    if len(value) < 30:
+        return None
+    return value[:MAX_DESCRIPTION]
+
+
 def dedupe(candidates):
     """Distinct, in first-seen order. A purchase order repeats identical rows."""
     seen = set()
@@ -457,7 +594,16 @@ def describe(text):
 
     Cover sheet wins where both exist: a purchase order attached to a contract
     carries both, and the sentence a person wrote beats a list of part numbers.
+
+    The direct-purchase notice is tried first and not because it tells you the
+    most -- it tells you the least. Those documents contain that sentence and
+    nothing else, so nothing below it could fire anyway, and matching it up
+    front keeps the reason a row is bare out of the parsers that describe work.
     """
+    notice = from_direct_purchase(text)
+    if notice:
+        return "direct_purchase", notice, []
+
     summary = from_cover_sheet(text)
     if summary:
         return "cover_sheet", summary, []
@@ -473,6 +619,10 @@ def describe(text):
     items = from_line_items(text)
     if items:
         return "line_items", "; ".join(items), items
+
+    bureau = from_purchasing_bureau(text)
+    if bureau:
+        return "purchasing_bureau", bureau, []
 
     return None
 

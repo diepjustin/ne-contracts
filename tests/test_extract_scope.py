@@ -495,3 +495,105 @@ def test_requires_a_term_or_amount_after_the_description():
 def test_a_different_document_is_left_alone():
     assert extract_scope.from_cover_sheet_form(
         "STATE OF NEBRASKA CONTRACT AWARD\nLine Description\n001 5 EA WIDGETS 1.0000\n") is None
+
+
+# --- the direct-purchase notice ---------------------------------------------
+
+# Roads files this instead of a document when it bought something outright.
+# 7,577 documents, one wording, and the notice is the whole file.
+DIRECT_PURCHASE = """
+This item involved a direct purchase which did not result in a contract.
+Therefore, there is no contract available for this item. Questions regarding
+these transactions should be directed to the NDOR Communication Division at
+402-479-4512.
+"""
+
+
+def test_direct_purchase_notice_is_kept_whole():
+    """Including the phone number. Which of the state's words are worth
+    keeping is the same call this file declines to make everywhere else."""
+    assert extract_scope.from_direct_purchase(DIRECT_PURCHASE) == (
+        "This item involved a direct purchase which did not result in a contract. "
+        "Therefore, there is no contract available for this item. Questions "
+        "regarding these transactions should be directed to the NDOR "
+        "Communication Division at 402-479-4512.")
+
+
+def test_the_notice_quoted_inside_a_larger_document_is_not_this_row():
+    """It turns up quoted in correspondence about such a purchase, where it
+    describes some other item -- which is how one row's words end up under
+    another row's money."""
+    letter = ("Nebraska Department of Transportation\nDear Ms Chapman,\n"
+              "You asked about invoice 4417. This item involved a direct purchase "
+              "which did not result in a contract. Therefore, there is no contract "
+              "available for this item.\n")
+    assert extract_scope.from_direct_purchase(letter) is None
+
+
+def test_the_notice_is_reported_as_its_own_source():
+    source, description, items = extract_scope.describe(DIRECT_PURCHASE)
+    assert source == "direct_purchase"
+    assert description.startswith("This item involved a direct purchase")
+    assert items == []
+
+
+# --- the State Purchasing Bureau's opening sentence -------------------------
+
+# The award form. The sentence wraps, and the lines under it are the vendor's
+# contact block rather than more of the description.
+BUREAU_AWARD = """STATE OF NEBRASKA CONTRACT AWARD State Purchasing Bureau
+R43500|NISC0001|NISC0001 20210628
+Original/Bid Document 5931 OF
+Contract to supply and deliver Capitol Watermark Bond Roll Stock Paper to the
+State of Nebraska as per the attached specifications for the contract period
+December 12, 2020 through December 11, 2021.
+Vendor Contact: Bruce Juelfs Phone: 970-541-8834
+"""
+
+
+def test_the_bureau_sentence_is_read_across_its_wrap():
+    assert extract_scope.from_purchasing_bureau(BUREAU_AWARD) == (
+        "Contract to supply and deliver Capitol Watermark Bond Roll Stock Paper "
+        "to the State of Nebraska as per the attached specifications for the "
+        "contract period December 12, 2020 through December 11, 2021.")
+
+
+def test_the_vendor_contact_block_is_not_part_of_the_purchase():
+    assert "Bruce Juelfs" not in extract_scope.from_purchasing_bureau(BUREAU_AWARD)
+
+
+def test_a_renewal_sentence_is_the_state_describing_this_contract():
+    """Not administrative furniture. It stays."""
+    text = ("Contract to supply and deliver Sign Sheeting to the State of Nebraska.\n"
+            "This is the initial term of the contract as amended.\n")
+    assert extract_scope.from_purchasing_bureau(text).endswith(
+        "This is the initial term of the contract as amended.")
+
+
+def test_the_wrapped_lead_is_not_printed_twice():
+    """The text layer emits the wrapped half of the lead again on some awards.
+    The stutter is an extraction artifact and is not in the PDF."""
+    text = ("Contract to supply and deliver Contract to supply and deliver Armor "
+            "Coat, Surfacing, Windrow and Deicing Gravel to the State of Nebraska.\n")
+    assert extract_scope.from_purchasing_bureau(text) == (
+        "Contract to supply and deliver Armor Coat, Surfacing, Windrow and "
+        "Deicing Gravel to the State of Nebraska.")
+
+
+def test_the_same_words_inside_running_prose_are_not_a_heading():
+    """Unanchored, this pattern matches mid-clause and publishes a fragment of
+    somebody's terms as the contract's scope."""
+    prose = ("Presenter acknowledges that this is an agreement to provide a certain "
+             "number of shows to a Theatre or contractor, and that Presenter shall "
+             "not assign it without written consent.\n")
+    assert extract_scope.from_purchasing_bureau(prose) is None
+
+
+def test_line_items_beat_the_bureau_sentence():
+    """Ranked last on purpose: the headline reads better and says less. Across
+    the corpus, preferring it rewrote 671 descriptions and lost a boat's hull
+    dimensions to the word "boat"."""
+    both = STATE_PO + "\nOne Time Purchase to supply and deliver a garage to the State of Nebraska.\n"
+    source, description, items = extract_scope.describe(both)
+    assert source == "line_items"
+    assert description == "LABOR FOR BUILDING 14'X20' STORAGE GARAGE"

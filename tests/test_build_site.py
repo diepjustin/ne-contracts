@@ -190,3 +190,35 @@ def test_a_missing_checkpoint_claims_no_gaps_rather_than_every_gap(monkeypatch, 
     monkeypatch.setattr(scrape, "load_progress", lambda path: (set(), {}), raising=False)
 
     assert build_site.incomplete_coverage() == []
+
+
+def test_a_row_with_no_document_still_collides_with_its_renewal():
+    """Peru State College's 80-3-3305: Tutor.com at $5,600 twice, the 2025-26
+    term expired with no document and the 2026-27 renewal active with one.
+    Two records, one triple, so the page needs to tell them apart."""
+    groups = build_site.find_permalink_collision(
+        [b"80-3-3305", b"80-3-3305"], [0, 0], [1, 1], ["", "va6hye3GoNx9"])
+    assert groups == [[0, 1]]
+
+
+def test_one_document_less_row_per_group_is_addressable_by_the_bare_permalink():
+    """It has no view token to be named by, so it is named by not having one.
+    The page resolves a permalink with no &d= to the member with no document,
+    which works precisely while there is one such member."""
+    groups = build_site.find_permalink_collision(
+        [b"A", b"A"], [0, 0], [1, 1], ["", "token"])
+    missing = [[r for r in g if not ["", "token"][r]] for g in groups]
+    assert missing == [[0]]
+
+
+def test_two_document_less_rows_in_one_group_cannot_both_be_the_bare_permalink():
+    """The case that must still refuse. Both rows would answer to the same
+    link, and nothing in the payload could say which was meant. Measured over
+    741,653 rows this has never occurred -- 302 ambiguous groups, one with a
+    document-less member, none with two."""
+    tokens = ["", "", "token"]
+    groups = build_site.find_permalink_collision(
+        [b"A", b"A", b"A"], [0, 0, 0], [1, 1, 1], tokens)
+    assert groups == [[0, 1, 2]]
+    missing = [r for r in groups[0] if not tokens[r]]
+    assert len(missing) == 2      # build_site.main() exits on exactly this

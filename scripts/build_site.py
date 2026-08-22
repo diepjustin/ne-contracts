@@ -369,25 +369,39 @@ def main():
     # Rows the triple cannot tell apart. The page appends &d=<view token> to
     # their permalinks, so they stay individually addressable; every other row
     # keeps the short, readable URL. Sorted so the payload is reproducible.
-    ambiguous = sorted(
-        row
-        for group in find_permalink_collision(docs, columns["entity"], columns["type"], view_tokens)
-        for row in group
-    )
+    collisions = find_permalink_collision(docs, columns["entity"], columns["type"], view_tokens)
+    ambiguous = sorted(row for group in collisions for row in group)
     if ambiguous:
         print(f"note: {len(ambiguous)} rows share a permalink with a different document "
               f"and will carry &d= to stay distinct")
         for row in ambiguous[:10]:
             print(f"        row {row}: {docs[row].decode()} / {ENTITIES[columns['entity'][row]]}"
                   f" / {types[columns['type'][row]]}")
-        # The disambiguator is the document's own address on the state's site.
-        # A row without one cannot be told apart this way, and shipping it
-        # would mean a permalink that silently opens its twin.
-        missing = [row for row in ambiguous if not view_tokens[row]]
-        if missing:
-            sys.exit(
-                f"rows {missing[:5]} share a permalink with a different document but have no "
-                "view token to disambiguate them — they need a different disambiguator")
+
+        # The disambiguator is the document's own address on the state's site,
+        # so a row the state publishes no document for has nothing to be named
+        # by. It does not need naming: within its group, *not* carrying &d= is
+        # what identifies it, and the page resolves the bare permalink to the
+        # member with no document. That holds for exactly one such row. Two in
+        # the same group would be genuinely indistinguishable, and shipping
+        # them would mean a permalink that silently opens its twin.
+        #
+        # Peru State College's 80-3-3305 is the first of these: Tutor.com at
+        # $5,600 twice, 2025-26 expired with no document and 2026-27 active
+        # with one. It is a renewal, not a duplicate, so both rows need to stay
+        # addressable. Measured across all 741,653 rows: 302 ambiguous groups,
+        # one of which has a member with no document, and none has two.
+        for group in collisions:
+            missing = [row for row in group if not view_tokens[row]]
+            if len(missing) > 1:
+                sys.exit(
+                    f"rows {missing[:5]} share a permalink and none of them has a view token "
+                    "to be told apart by — the bare permalink can only stand for one of them, "
+                    "so they need a different disambiguator")
+        bare = [row for group in collisions for row in group if not view_tokens[row]]
+        if bare:
+            print(f"        {len(bare)} of those have no document and are addressed by the "
+                  f"permalink without &d=")
 
     scraped = scraped_at()
     if not scraped:

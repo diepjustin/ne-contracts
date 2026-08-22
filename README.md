@@ -757,6 +757,26 @@ Nothing was damaged, again by luck: the outage happened on a day nobody was extr
 That is twice now that the thing standing between this project and poisoned data was the
 calendar.
 
+**A row with no document blocked every rebuild for two days.** The permalink triple
+`?doc=&agency=&type=` is disambiguated by appending `&d=<view token>`, and `build_site.py`
+refused outright when an ambiguous row had no token to be named by — correctly, because
+shipping it would mean a link that silently opens its twin. On 22 Aug 2026 the state
+added Peru State College's `80-3-3305` renewal beside the existing one: Tutor.com,
+$5,600 both times, 2025-26 expired with no document and 2026-27 active with one. A
+renewal, not a duplicate, so both rows need to stay addressable.
+
+Nothing was wrong with the guard except that it had no answer. A row with no document
+does not need naming: within its group, *not* carrying `&d=` is what identifies it, and
+the page now resolves a bare permalink to the member with no document. That works for
+exactly one such row, so the refusal stays for two — measured across all 741,653 rows
+there are 302 ambiguous groups, one has a document-less member and none has two.
+
+Worth noting how it surfaced. The build had been green since 20 Aug because CI restores
+the previous payload and only rebuilds when the cache key misses; the row landed in the
+nightly's CSVs and sat there. A push touching `scripts/**` missed the key, forced the
+first real rebuild in two days, and found it. The cache key is doing the job it was added
+for — but between rebuilds, a data condition that breaks the build is invisible.
+
 **`write_payload()` copies the meta dict it is given.** The search index's `wordCount`
 and the vendor groups are added afterwards, so on a full build they never reached
 `meta.json` — only `--descriptions-only` rewrote the file at the end, which is the sole

@@ -1318,6 +1318,16 @@
     if (want && meta.ambiguous) {
       var exact = hits.filter(function (id) { return meta.ambiguous[id] === want; });
       if (exact.length === 1) hits = exact;
+    } else if (!want && meta.ambiguous && hits.length > 1) {
+      // The mirror of the rule above. A row the state publishes no document
+      // for has no address to be named by, so it is named by the absence of
+      // one: if exactly one row in this triple has no document, the link
+      // without &d= is its link. The build refuses to ship a group where two
+      // rows would both answer to that, so "exactly one" is guaranteed rather
+      // than hoped for. Peru State College's 80-3-3305 is the first: a
+      // 2025-26 contract with no document beside its 2026-27 renewal.
+      var bare = hits.filter(function (id) { return !meta.ambiguous[id]; });
+      if (bare.length === 1) hits = bare;
     }
     if (hits.length !== 1) return false;
 

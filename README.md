@@ -193,10 +193,20 @@ python3 scripts/scrape.py state --hours 3   # stop cleanly after 3h
 python3 scripts/scrape.py state --entity "Roads, Department of"
 python3 scripts/check_entity_drift.py       # has the state's entity list changed?
 
+python3 scripts/extract_text.py             # -> data/doc_text.jsonl (the 36h one)
+python3 scripts/extract_text.py --status    # progress, no network
+python3 scripts/extract_text.py --retry-errors    # re-ask the 14,586 that failed
+python3 scripts/extract_text.py --retry-non-pdf   # re-ask the 32,227 non-PDF answers
+python3 scripts/extract_scope.py            # doc_text.jsonl -> data/scope.jsonl (~1 min)
+
 python3 scripts/build_site.py               # data/*.csv -> d/<buildId>/  (~3 min, ~1.7 GB peak)
 python3 scripts/serve_site.py               # preview at http://127.0.0.1:8765
 python3 -m pytest tests/ -q
 ```
+
+`extract_text.py` refuses to start while the state is not serving documents, for the
+reason under "Things that bit us". `--status` still answers, because it makes no network
+calls.
 
 Every scrape checkpoints per page and resumes; interrupting is safe. A full run is 20+
 hours against a government server — **don't re-scrape casually.**
@@ -446,6 +456,12 @@ apart in the value itself — `""` for "read it, there is nothing" and `None` fo
 not find out" — and hold back anything unknown rather than writing it. The CSV is a
 record of what the state published, so a value in it must be something we actually saw.
 
+Every script that writes needs its own refusal, not one somewhere upstream.
+`document_service_healthy()` guarded `scrape.py` from Aug 2026 and not
+`extract_text.py`, which fetches documents itself and files two of its four verdicts
+permanently. It guards both now, and the canary is imported rather than copied so there
+is only one to keep current.
+
 **Check extraction against the source document, not against itself.** Every sanity check
 on the description parsers compared output to other output, and all of them passed while
 the University parser was truncating 93% of what it read. The bug was found by opening a
@@ -642,6 +658,38 @@ files before a scrape starts, and both `--daily` and a full sweep refuse to run 
 three have stopped offering theirs. It is deliberately biased towards "up": a canary that
 cannot be fetched proves nothing and is skipped, so rotted canary URLs cannot silently
 halt every run. One request when the state is healthy.
+
+**Not one of the 32,227 "unavailable" documents was ever a 404.** `extract_text.py`
+filed a document as unavailable — the state has no file, never asked about again — on
+either a 404 or a 200 whose body was not a PDF. Only the second ever happened. Every one
+of those verdicts was reached from a 200, 17,991 of them `image/tiff`: real scans the
+state does hold and we could not parse. The corpus reported "the state has no file to
+serve" for 32,227 documents, and the run summary printed those words, without the state
+having once said so.
+
+Found while adding the health gate below. The classifier now separates a 404
+(`unavailable`) from a file we cannot read (`unsupported`, not retried but not an
+absence either) from anything that is not a file at all (`error`, retryable), and
+`--retry-non-pdf` re-asks the ones already on disk. It also keeps a hash and the first
+300 characters of any non-PDF body, because the 14,185 HTML answers already recorded
+cannot be told apart from an outage page — nothing kept the body.
+
+**The state's document service went down again on 22 Aug 2026, and `extract_text.py`
+had no guard.** Every `ViewDocument` request returned HTTP 200 with an HTML error page:
+*"An internal error occured: An error occurred within the Unity API: The type
+initializer for 'Hyland.Core.CoreUtility' threw an exception."* `document_service_healthy()`
+had guarded `scrape.py` since the August outage, but `extract_text.py` fetches documents
+on its own and was never taught the lesson.
+
+A run started that morning would have recorded a permanent absence for every document it
+touched. Worse, `--retry-errors` — the pass most worth running, over 14,586 recoverable
+documents — would have spent that verdict on exactly those. The gate is now in front of
+the extraction loop, one request before the run and nothing written until it answers,
+and `run_extraction_cycles.sh` stops rather than spinning because it runs under `set -e`.
+
+Nothing was damaged, again by luck: the outage happened on a day nobody was extracting.
+That is twice now that the thing standing between this project and poisoned data was the
+calendar.
 
 **`write_payload()` copies the meta dict it is given.** The search index's `wordCount`
 and the vendor groups are added afterwards, so on a full build they never reached

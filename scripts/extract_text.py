@@ -34,6 +34,8 @@ document processed twice (e.g. after a bug fix) just keeps its last entry.
 
 import argparse
 import base64
+import collections
+import hashlib
 import json
 import os
 import random
@@ -159,13 +161,33 @@ def extract(session, url, store_chars=STORE_CHARS):
     than failing the whole document -- a 40-page contract shouldn't lose
     every page's text because one page is odd.
 
-    "unavailable" and "error" are kept separate on purpose: unavailable means
-    the state doesn't have a file to serve here (a 404, or a 200 that isn't
-    actually a PDF -- both observed on this site for other records), which is
-    an expected, unfixable condition. "error" means something worth
-    investigating or retrying later (network failure, or a PDF too malformed
-    to even open). Conflating them would make a healthy long run's error
-    count look alarming for no reason.
+    Four outcomes, and which one a document gets decides whether it is ever
+    asked about again:
+
+      unavailable  a 404. The state has no file here. Never retried.
+      unsupported  a 200 carrying a real file we cannot parse -- 17,991 TIFFs,
+                   plus a handful of Word documents and JPEGs. Not retried
+                   either, but it is not the same fact as "no file": these are
+                   documents that exist and would answer to OCR.
+      error        anything that might succeed on a second ask -- a network
+                   failure, a PDF too malformed to open, or an HTML page where
+                   a document should be.
+      text/scanned a PDF we read.
+
+    An HTML 200 used to be filed as "unavailable", on the reasoning that a 200
+    which is not a PDF means the state has nothing here. It means no such
+    thing. On 22 Aug 2026 every document request on the site returned this:
+
+        An internal error occured: An error occurred within the Unity API:
+        The type initializer for 'Hyland.Core.CoreUtility' threw an exception.
+
+    -- a 200, an HTML body, and every document in the database still perfectly
+    present. Recording that as "the state has no file" would have been a
+    fabricated absence, permanent and unretried; a --retry-errors pass run
+    during that window would have converted 14,586 recoverable documents into
+    exactly that. HTML is now an error, which is retryable, and the body's hash
+    and opening text are kept so an outage page can later be told apart from
+    whatever else the state might serve.
     """
     try:
         resp = session.get(url, timeout=60)
@@ -180,7 +202,7 @@ def extract(session, url, store_chars=STORE_CHARS):
         return {"status": "error", "detail": str(e)[:200]}
 
     if resp.content[:4] != b"%PDF":
-        return {"status": "unavailable", "detail": f"non-PDF response ({resp.headers.get('Content-Type', '?')})"}
+        return classify_non_pdf(resp)
 
     try:
         reader = PdfReader(BytesIO(resp.content))
@@ -233,6 +255,40 @@ def extract(session, url, store_chars=STORE_CHARS):
         return {"status": "scanned", "pages": pages, "chars": chars, **result_extra}
 
     return {"status": "text", "pages": pages, "chars": chars, "text": "\n\n".join(texts), **result_extra}
+
+
+# Content types that are a document the state really does hold, just not one
+# pypdf can open. Counted across the 32,227 non-PDF responses on disk: 17,991
+# image/tiff, 34 .docx, 7 image/jpeg, 7 application/msword. Every one of those
+# is a scan or a file awaiting OCR, and calling them "unavailable" says the
+# state published nothing when it published something we cannot read.
+FILE_TYPES = ("image/", "application/msword", "application/vnd.openxmlformats",
+              "application/vnd.ms-", "application/rtf", "text/rtf")
+
+# Kept on any non-PDF answer, so the next person can tell an outage page from a
+# real one without re-fetching 14,000 documents. A hash collapses "they all
+# served the identical error" into one line; the opening text says which error.
+BODY_HEAD_CHARS = 300
+
+
+def classify_non_pdf(resp):
+    """A 200 that is not a PDF: a file we cannot read, or not a file at all."""
+    content_type = (resp.headers.get("Content-Type") or "?").lower()
+    record = {
+        "detail": f"non-PDF response ({content_type})",
+        "contentType": content_type,
+        "bodySha256": hashlib.sha256(resp.content).hexdigest(),
+    }
+    if any(content_type.startswith(t) for t in FILE_TYPES):
+        # A real file. Not retryable -- asking again returns the same TIFF --
+        # but not an absence either.
+        return {"status": "unsupported", **record}
+
+    # HTML, or anything else that is not a document. This is what the state
+    # serves while its document service is down, so it must stay retryable.
+    record["bodyHead"] = " ".join(
+        resp.text[:2000].split())[:BODY_HEAD_CHARS] if resp.text else ""
+    return {"status": "error", **record}
 
 
 def with_pdfminer(content, pypdf_error, store_chars=STORE_CHARS):
@@ -313,6 +369,40 @@ def load_targets(group=None, entities=None):
     return meta["viewBase"], targets
 
 
+def never_proven_absent(record):
+    """True for a stored "unavailable" that no 404 ever justified.
+
+    32,224 records on disk say "unavailable" because a 200 came back carrying
+    something other than a PDF, under the old reading that this meant the state
+    had no file. Two different things are sitting in there:
+
+      * 17,991 TIFFs and a few Word documents -- files that exist and are now
+        classified "unsupported". They will come back the same way; the point
+        of re-asking is to stop the corpus calling them missing.
+      * 14,185 HTML answers, which cannot be told apart from the error page the
+        state served all day on 22 Aug 2026, because no body was kept. Any of
+        them may be a document that was simply unreachable that hour.
+
+    A 404 is left alone. That one was an answer.
+    """
+    if record.get("status") != "unavailable":
+        return False
+    return "404" not in (record.get("detail") or "")
+
+
+def document_service_healthy():
+    """scrape.py's canary, borrowed rather than copied.
+
+    Imported the same lazy way entity_filter() takes its entity lists. Two
+    canaries kept in step by hand would drift, and the one that mattered would
+    be the one that had.
+    """
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from scrape import document_service_healthy as healthy  # noqa: E402
+
+    return healthy()
+
+
 def entity_filter(which):
     """The set of entity names for --entities, or None for all 92."""
     if which == "all":
@@ -352,6 +442,11 @@ def main():
     parser.add_argument("--retry-errors", action="store_true",
                          help="also re-fetch documents whose last attempt errored; without "
                               "this they count as done and are skipped forever")
+    parser.add_argument("--retry-non-pdf", action="store_true",
+                         help="also re-fetch the 32,224 documents recorded as unavailable "
+                              "because a 200 returned something other than a PDF. A 404 is "
+                              "left alone. Sorts the TIFFs (real files, now 'unsupported') "
+                              "from the HTML answers, which may only have been an outage")
     args = parser.parse_args()
 
     view_base, targets = load_targets(args.group, entity_filter(args.entities))
@@ -359,11 +454,12 @@ def main():
     store = load_checkpoint()
     # A recorded error counts as done, which is right for a resumable run and
     # wrong forever after: network blips and malformed PDFs would never be
-    # retried. "unavailable" is deliberately not included -- the state has no
-    # file to serve for those, and re-asking will not change that.
+    # retried. A 404 stays excluded -- the state has no file for those, and
+    # re-asking will not change that.
     todo = [(dn, tok) for dn, tok in targets
             if tok not in store
-            or (args.retry_errors and store[tok].get("status") == "error")]
+            or (args.retry_errors and store[tok].get("status") == "error")
+            or (args.retry_non_pdf and never_proven_absent(store[tok]))]
     # Against the selected targets, not the whole checkpoint: with a --group or
     # --entities filter those differ, and reporting the checkpoint total would
     # claim work was done on documents this run has not looked at.
@@ -387,7 +483,24 @@ def main():
         print(f"limiting this run to {len(todo):,} new documents"
               + (" (random order)" if args.shuffle else ""))
 
-    counts = {"text": 0, "scanned": 0, "unavailable": 0, "error": 0}
+    # The same gate scrape.py puts in front of --daily and a full sweep, and it
+    # belongs here for the same reason: this script's failure statuses are
+    # written to an append-only log and two of them are never asked about
+    # again. During the 22 Aug 2026 outage every fetch returned an error page,
+    # so a run started that morning would have recorded a permanent absence for
+    # every document it touched -- and with --retry-errors it would have spent
+    # those verdicts on the 14,586 documents most worth recovering.
+    #
+    # Checked here rather than in fetch_and_extract(): one request before the
+    # run, not one per document, and nothing is written before it answers.
+    if todo and not document_service_healthy():
+        print("ERROR: refusing to run: the state is not serving documents right now, so "
+              "every document fetched would be recorded as one it does not have. Nothing "
+              "was written. Re-run once https://statecontracts.nebraska.gov is serving "
+              "documents again.", file=sys.stderr)
+        sys.exit(1)
+
+    counts = collections.Counter()
     start = time.time()
     deadline = start + args.hours * 3600 if args.hours else None
     processed = 0
@@ -415,6 +528,11 @@ def main():
                 except Exception as e:
                     result = {"status": "error", "detail": f"worker crashed: {e}"[:200], "doc": dn}
                 counts[result["status"]] += 1
+                # Only classify_non_pdf() sets this, and only when the answer
+                # was not a file of any kind -- which is what an outage looks
+                # like from here.
+                if "bodyHead" in result:
+                    counts["not_a_file"] += 1
                 new_items.append((tok, result))
 
             append_checkpoint(new_items)
@@ -424,23 +542,32 @@ def main():
             rate = processed / elapsed if elapsed else 0
             done_so_far = min(chunk_start + CHUNK_SIZE, len(todo))
             print(f"  {done_so_far:,}/{len(todo):,}  text={counts['text']} scanned={counts['scanned']} "
-                  f"unavailable={counts['unavailable']} error={counts['error']}  "
-                  f"({rate:.2f}/s, {elapsed:.0f}s elapsed)")
+                  f"unavailable={counts['unavailable']} unsupported={counts['unsupported']} "
+                  f"error={counts['error']}  ({rate:.2f}/s, {elapsed:.0f}s elapsed)")
 
     if not stopped_early:
         print(f"\nFinished this run's queue ({processed:,} documents).")
 
     total = len(store) + processed  # store wasn't updated in-place; this run's items are on disk, not re-read
-    text_n = counts["text"]
-    scanned_n = counts["scanned"]
-    unavailable_n = counts["unavailable"]
-    error_n = counts["error"]
     print(f"\nThis run: {processed:,} documents processed.")
     if processed:
-        print(f"  text        : {text_n:,} ({text_n / processed * 100:.1f}%)")
-        print(f"  scanned     : {scanned_n:,} ({scanned_n / processed * 100:.1f}%)")
-        print(f"  unavailable : {unavailable_n:,} ({unavailable_n / processed * 100:.1f}%)  -- state has no file to serve")
-        print(f"  error       : {error_n:,} ({error_n / processed * 100:.1f}%)  -- worth a retry pass")
+        for status, note in (
+                ("text", ""),
+                ("scanned", "-- a PDF with no text layer; only OCR reaches these"),
+                ("unavailable", "-- 404, the state has no file to serve"),
+                ("unsupported", "-- a real file we cannot parse, mostly TIFF scans"),
+                ("error", "-- worth a retry pass"),
+        ):
+            n = counts[status]
+            print(f"  {status:12}: {n:,} ({n / processed * 100:.1f}%)  {note}".rstrip())
+        # An error rate this high is not a bad batch of PDFs. It is the symptom
+        # the health gate exists to catch mid-run, after it has already passed
+        # once at the start.
+        not_a_file = counts["not_a_file"]
+        if not_a_file > processed * 0.5:
+            print(f"\n  WARNING: {not_a_file:,} of {processed:,} documents answered with "
+                  f"something that was not a file at all. Check that the state is still "
+                  f"serving documents before trusting this run.")
     print(f"Cumulative total on disk: {total:,} documents.")
 
 

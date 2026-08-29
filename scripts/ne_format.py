@@ -22,12 +22,13 @@ Layout, where n = row count and V = vendor count:
     cols.i32.bin     vendorIdx[n], begin[n], end[n]            (4 bytes each)
     cols.f64.bin     amount[n]                                 (8 bytes each)
     cols.u8.bin      status[n], entity[n], type[n], adnIdx[n],
-                     viewPresent[n], docLen[n]                 (1 byte each)
+                     viewPresent[n], docLen[n], docCount[n]    (1 byte each)
     descsrc.bin      descSource[n]                             (1 byte each)
     docs.bin         document numbers, packed, no separators
     vendors.bin      len[V] as u8, then vendor names packed as UTF-8
     vtok.bin         units[V] as u8, then V tokens packed as raw bytes
     tok/NNNNN.bin    per block: DN bytes then view bytes, TOKEN_BYTES each
+    xdoc/NNNNN.bin   per block: the document list for rows publishing several
 
 Every section holds exactly n (or V) elements, so a section's offset is just
 `n * itemsize * sectionIndex`. No header, no offset table, no padding, and
@@ -36,14 +37,17 @@ reader checks against the file length. Grouping by item size is what makes
 that work: a file of one item size needs no alignment padding, and a fetched
 ArrayBuffer always starts aligned at offset 0.
 
-descsrc.bin is a column and would sit in cols.u8.bin but for one thing: it is
-a fact about the descriptions, not about the rows, and descriptions can be
-attached to a payload that is already built and live (build_site.py's
---descriptions-only). That path deliberately writes no byte of any resident
-column file, so a seventh u8 column would go stale there -- descriptions
-present, every row reporting it has none, and nothing failing. Its own file
-lets whichever path writes the descriptions write this alongside them, which
-is the only arrangement in which the two cannot disagree.
+descsrc.bin looks like a u8 column and is deliberately not one: it is a fact
+about the descriptions, not about the rows, and descriptions can be attached
+to a payload that is already built and live (build_site.py's
+--descriptions-only). That path writes no byte of any resident column file, so
+a column there would go stale -- descriptions present, every row reporting it
+has none, and nothing failing. Its own file lets whichever path writes the
+descriptions write this alongside them, which is the only arrangement in which
+the two cannot disagree.
+
+docCount, by contrast, belongs in cols.u8.bin: it is a fact about the row,
+comes from the scrape, and is only ever written by a full build.
 
 Little-endian is assumed. Every browser this will run in is little-endian,
 but meta records it and the page asserts it rather than rendering whatever
@@ -54,7 +58,16 @@ import array
 import json
 import os
 
-FORMAT_VERSION = 1
+FORMAT_VERSION = 2
+
+# What each format version had in cols.u8.bin. Columns are only ever appended,
+# so an older payload is a prefix of the current list and can still be read --
+# which matters because build_site.py carries descriptions forward out of the
+# previous build, and a version bump must not quietly drop 540,000 of them.
+# Never renumber and never insert; add to the end and bump the version.
+#
+#   1  status, entity, type, adnIdx, viewPresent, docLen
+#   2  ... and docCount
 
 # Rows per token block. 2048 rows is 64 KiB of tokens -- one fetch per click,
 # fast enough not to be felt, while keeping the file count in the hundreds.
@@ -75,6 +88,7 @@ VTOK = "vtok.bin"
 SELFTEST = "selftest.json"
 TOK_DIR = "tok"
 DESC_DIR = "desc"
+XDOC_DIR = "xdoc"
 DESC_SRC = "descsrc.bin"
 WORDS = "words.bin"
 POSTINGS = "postings.bin"
@@ -87,7 +101,20 @@ RESIDENT = (COLS_I32, COLS_F64, COLS_U8, DOCS, VENDORS)
 # write_payload/read_payload, and the order here IS the on-disk order.
 I32_COLUMNS = ("vendorIdx", "begin", "end")
 F64_COLUMNS = ("amount",)
-U8_COLUMNS = ("status", "entity", "type", "adnIdx", "viewPresent", "docLen")
+U8_COLUMNS = ("status", "entity", "type", "adnIdx", "viewPresent", "docLen", "docCount")
+U8_COLUMNS_BY_VERSION = {1: U8_COLUMNS[:6], 2: U8_COLUMNS}
+
+# docCount's reserved value for "nobody has asked this row yet".
+#
+# 0 means the state publishes no document, 1..254 mean that many, and this
+# means unknown. The distinction is not pedantry: the backfill that fills this
+# column in takes ~33 hours and is meant to be run in sittings, so a build made
+# between them has hundreds of thousands of rows nobody has looked at. Without
+# a separate value they would read as "one document" -- a claim, made about
+# rows we know nothing about, in a payload whose whole point is that its
+# numbers can be trusted. meta.incomplete has already been wrong twice in
+# exactly this direction; see README.md.
+DOC_COUNT_UNKNOWN = 255
 
 _TYPECODE = {4: "i", 8: "d", 1: "B"}
 
@@ -152,6 +179,10 @@ def write_payload(outdir, columns, docs, vendors, vtokens, meta):
     # while the reader yields decompressed bytes. Stating them here is what lets
     # the loader show a progress bar that means something.
     meta = dict(meta)
+    # Stamped by the writer rather than trusted from the caller, so the file
+    # and the version claiming to describe it cannot disagree -- read_payload
+    # picks its column list from this.
+    meta["formatVersion"] = FORMAT_VERSION
     meta["bytes"] = {name: os.path.getsize(os.path.join(outdir, name))
                      for name in RESIDENT + (VTOK,)}
 
@@ -261,6 +292,101 @@ def read_desc_sources(outdir, n):
     column = array.array("B")
     column.frombytes(data)
     return column
+
+
+# ---------------------------------------------------------------- documents
+#
+# The document list for rows that publish more than one. Same block layout as
+# the descriptions above -- a u16 length per row, then the packed payload --
+# and for the same reason: it is wanted only for rows a reader actually opens,
+# and ranged requests are unusable on Pages, so deferred data is block files.
+#
+# Rows with one document store nothing here. Their document is already the
+# row's view token, and ~90% of the corpus is such a row.
+#
+# Per document inside a row's payload:
+#
+#     TOKEN_BYTES   the ViewDocument token, raw bytes
+#     u8 + bytes    the state's file name  ("DOC2061661286", or a UUID)
+#     u8 + bytes    the state's size string ("2Mb", "923Kb")
+#
+# Name and size are the state's own values, kept verbatim so a reader can
+# check our list against the source. Both are far below 255 bytes; a longer
+# one is a page change worth failing the build over rather than truncating.
+
+def xdoc_path(outdir, block):
+    return os.path.join(outdir, XDOC_DIR, f"{block:05d}.bin")
+
+
+def pack_documents(documents):
+    """One row's document list as bytes. See the layout note above."""
+    out = bytearray()
+    for doc in documents:
+        token = doc["token"]
+        if len(token) != TOKEN_BYTES:
+            raise ValueError(f"document token is {len(token)} bytes, expected {TOKEN_BYTES}")
+        name = doc["name"].encode("utf-8")
+        size = doc["size"].encode("utf-8")
+        for field, value in (("name", name), ("size", size)):
+            if len(value) > 255:
+                raise ValueError(f"document {field} is {len(value)} bytes; the length is a u8")
+        out += token + bytes([len(name)]) + name + bytes([len(size)]) + size
+    return bytes(out)
+
+
+def unpack_documents(blob):
+    """The inverse, for the round-trip check and the tests."""
+    documents = []
+    at = 0
+    while at < len(blob):
+        token = blob[at:at + TOKEN_BYTES]
+        at += TOKEN_BYTES
+        name_len = blob[at]; at += 1
+        name = blob[at:at + name_len].decode("utf-8"); at += name_len
+        size_len = blob[at]; at += 1
+        size = blob[at:at + size_len].decode("utf-8"); at += size_len
+        documents.append({"token": token, "name": name, "size": size})
+    return documents
+
+
+def write_xdoc_blocks(outdir, packed, n):
+    """One block per BLOCK_ROWS rows. `packed` maps row -> pack_documents bytes."""
+    os.makedirs(os.path.join(outdir, XDOC_DIR), exist_ok=True)
+    for b in range(block_count(n)):
+        lo = b * BLOCK_ROWS
+        hi = min(lo + BLOCK_ROWS, n)
+        chunk = [packed.get(i, b"") for i in range(lo, hi)]
+        for blob in chunk:
+            if len(blob) > 65535:
+                raise ValueError(f"a row's document list is {len(blob)} bytes; "
+                                 "the length is a u16")
+        lengths = array.array(DESC_LENGTH, [len(blob) for blob in chunk])
+        with open(xdoc_path(outdir, b), "wb") as f:
+            f.write(lengths.tobytes())
+            for blob in chunk:
+                f.write(blob)
+
+
+def read_xdoc_blocks(outdir, n):
+    """Every row's packed document list, reassembled from the blocks."""
+    out = [b""] * n
+    for b in range(block_count(n)):
+        lo = b * BLOCK_ROWS
+        hi = min(lo + BLOCK_ROWS, n)
+        rows = hi - lo
+        data = open(xdoc_path(outdir, b), "rb").read()
+        header = rows * 2
+        if len(data) < header:
+            raise ValueError(f"document block {b}: {len(data)} bytes, header alone is {header}")
+        lengths = array.array(DESC_LENGTH)
+        lengths.frombytes(data[:header])
+        pos = header
+        for i, length in enumerate(lengths):
+            out[lo + i] = data[pos:pos + length]
+            pos += length
+        if pos != len(data):
+            raise ValueError(f"document block {b}: {len(data) - pos} bytes past the last row")
+    return out
 
 
 def read_desc_blocks(outdir, n):
@@ -438,7 +564,14 @@ def read_payload(outdir):
     columns = {}
     columns.update(_read_columns(os.path.join(outdir, COLS_I32), I32_COLUMNS, 4, n))
     columns.update(_read_columns(os.path.join(outdir, COLS_F64), F64_COLUMNS, 8, n))
-    columns.update(_read_columns(os.path.join(outdir, COLS_U8), U8_COLUMNS, 1, n))
+    # Read the columns this payload was actually written with, not the ones
+    # the current code knows about.
+    version = meta.get("formatVersion", 1)
+    u8_names = U8_COLUMNS_BY_VERSION.get(version)
+    if u8_names is None:
+        raise ValueError(f"payload format version {version} is newer than this reader "
+                         f"knows about (up to {FORMAT_VERSION})")
+    columns.update(_read_columns(os.path.join(outdir, COLS_U8), u8_names, 1, n))
 
     doc_len = columns["docLen"]
     blob = open(os.path.join(outdir, DOCS), "rb").read()

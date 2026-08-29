@@ -5,6 +5,7 @@ from bs4 import BeautifulSoup
 from concurrent.futures import ThreadPoolExecutor
 import argparse
 import datetime
+import hashlib
 import json
 import statistics
 import sys
@@ -141,21 +142,64 @@ def get_token(session):
     return token["value"]
 
 
-def get_view_url(detail_url):
-    """Fetch the detail page and return the View URL.
+def parse_documents(html):
+    """Every document a detail page offers, in the order the state lists them.
+
+    Returns a list of {"name", "size", "token"} -- the state's own file name
+    (DOC2061661286), its own size string ("2Mb", "923Kb"), and the ViewDocument
+    D token. An empty list means the page offered nothing.
+
+    Read out of the "File Name | File Size" table rather than by scanning the
+    page for ViewDocument hrefs. The name and size come free that way, and they
+    are the state's own values, so a reader can check our list against the
+    source. A bare href scan would also go on quietly returning a number after
+    a page redesign, where a row that stops looking like a file row is
+    something we want to notice.
+
+    Each document contributes two ViewDocument links -- the file name and the
+    "View" beside it, same D token -- plus a DownloadDocument link to the same
+    file. Dedupe on the token, keeping first appearance, so the list is
+    documents rather than links.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+
+    documents = []
+    seen = set()
+    for row in soup.find_all("tr"):
+        cells = row.find_all("td")
+        if len(cells) < 2:
+            continue                     # header row: it carries <th>, not <td>
+        link = cells[0].find("a", href=lambda h: h and "ViewDocument" in h)
+        if not link:
+            continue
+        href = link["href"]
+        token = href.split("D=", 1)[1] if "D=" in href else ""
+        if not token or token in seen:
+            continue
+        seen.add(token)
+        documents.append({
+            "name": cells[0].get_text(" ", strip=True),
+            "size": cells[1].get_text(" ", strip=True),
+            "token": token,
+        })
+    return documents
+
+
+def get_documents(detail_url):
+    """Fetch a record's detail page and return every document it offers.
 
     Three outcomes, deliberately distinct -- see README.md, "Things that bit
-    us". Returning "" for both of the last two is what made the 17 Aug 2026
-    outage dangerous: the state stopped offering documents, and a blank would
-    have been written as though those contracts simply had no file attached.
+    us". Collapsing the last two is what made the 17 Aug 2026 outage dangerous:
+    the state stopped offering documents, and an empty answer would have been
+    written as though those records simply had no file attached.
 
-      a URL -- the page offers a document
-      ""    -- the page was read cleanly and offers no document (a real fact)
-      None  -- we could not find out (fetch failed); the caller must not
-               record this as "no document"
+      [{...}, ...] -- the page offers these documents, in the state's order
+      []           -- the page was read cleanly and offers none (a real fact)
+      None         -- we could not find out (fetch failed); the caller must not
+                      record this as "no document"
     """
     if not detail_url:
-        return ""
+        return []
     try:
         time.sleep(DETAIL_DELAY)
         started = time.time()
@@ -163,12 +207,32 @@ def get_view_url(detail_url):
         with _latency_lock:
             _latencies.append(time.time() - started)
         resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "html.parser")
-        view_link = soup.find("a", href=lambda h: h and "ViewDocument" in h)
-        return BASE_URL + view_link["href"] if view_link else ""
+        return parse_documents(resp.text)
     except Exception as e:
-        print(f"    Warning: could not fetch view URL: {e}")
+        print(f"    Warning: could not fetch documents: {e}")
         return None
+
+
+def view_url_for(documents):
+    """The CSV's View URL for a record: its first document, or "" for none.
+
+    `documents` is a list from get_documents. None is not a valid argument:
+    "we could not find out" has no View URL to write, and the caller has to
+    handle that rather than pass it through here.
+    """
+    if not documents:
+        return ""
+    return f"{BASE_URL}/Search/ViewDocument?D={documents[0]['token']}"
+
+
+def get_view_url(detail_url):
+    """The primary document's URL, keeping get_documents' three outcomes.
+
+    Whether a record offers anything at all is a genuinely different question
+    from what it offers, and the canary check only asks the first one.
+    """
+    documents = get_documents(detail_url)
+    return None if documents is None else view_url_for(documents)
 
 
 def drain_latency():
@@ -195,8 +259,21 @@ def _fetch_page(session, page):
 
 
 def fetch_view_urls_parallel(records):
-    """Fetch view URLs for a page of records in parallel, on search-free sessions."""
+    """Fetch view URLs for a page of records in parallel, on search-free sessions.
+
+    Kept alongside fetch_documents_parallel because the two answer different
+    questions and the tests speak in this one's terms.
+    """
     return list(_detail_pool.map(lambda r: get_view_url(r["detail_url"]), records))
+
+
+def fetch_documents_parallel(records):
+    """Every document for a page of records, in parallel on search-free sessions.
+
+    One entry per record, each a list from get_documents (or None where the
+    detail page could not be read).
+    """
+    return list(_detail_pool.map(lambda r: get_documents(r["detail_url"]), records))
 
 
 # Three documents confirmed to carry a file. They are the only way to tell the
@@ -398,8 +475,15 @@ def scrape_entity(session, entity_name, entity_val, status, entity_type, doc_typ
             prefetch = _page_pool.submit(_fetch_page, session, page + 1)
 
         to_fetch = [r for r in records if record_filter is None or record_filter(r)]
-        view_urls = fetch_view_urls_parallel(to_fetch)
-        view_url_by_detail = dict(zip((r["detail_url"] for r in to_fetch), view_urls))
+        documents_by_detail = dict(zip((r["detail_url"] for r in to_fetch),
+                                       fetch_documents_parallel(to_fetch)))
+        # The CSV keeps holding one URL per row -- its primary document -- while
+        # the full list goes to documents.jsonl. Splitting them this way means
+        # no CSV consumer has to change and the ~10% of records that publish
+        # more than one document stop being invisible. See README.md.
+        view_url_by_detail = {d: (None if docs is None else view_url_for(docs))
+                              for d, docs in documents_by_detail.items()}
+        document_entries = []
 
         for record in records:
             if on_record_seen:
@@ -433,6 +517,13 @@ def scrape_entity(session, entity_name, entity_val, status, entity_type, doc_typ
                 record["detail_url"],
                 view_url,
             ])
+            document_entries.append(documents_entry(
+                record["doc_number"], entity_name, record["detail_url"],
+                documents_by_detail.get(record["detail_url"], [])))
+
+        # Written only for rows that made it into the CSV, so the two files can
+        # never disagree about which records were read.
+        append_documents(document_entries, os.path.join(ROOT, DOCUMENTS_JSONL))
 
         total += len(records)
         if page % 20 == 0 or page == last_page or page == start_page:
@@ -582,6 +673,112 @@ def drop_unfinished_rows(csv_path, keep):
 # Fields worth watching for change, as (record key, CSV column, label).
 # Deliberately not Status: --daily already derives Active -> Expired from
 # presence, patches the CSV, and counts it in the diff report.
+DOCUMENTS_JSONL = "data/documents.jsonl"
+
+
+def document_key(detail_url):
+    """A row's stable key, hashed from its full Detail URL.
+
+    The full URL is the only thing that identifies a row, and every shorter key
+    silently merges records. Measured over all 741,653 rows: 14,769 DN tokens
+    map to more than one distinct detail URL, covering 29,597 rows, and
+    (DN, document number) still collides on 14,957 pairs. record_changes() keys
+    on the same URL for the same reason.
+
+    Hashed rather than written out because at ~290 characters a row the keys
+    alone would be 215 MB. Twelve bytes is far more than 741,605 rows need to
+    stay collision-free, and the entry carries `doc` and `entity` besides, so
+    the file is still greppable by the values a human would search for.
+    """
+    return hashlib.blake2b(detail_url.encode("utf-8"), digest_size=12).hexdigest()
+
+
+def documents_entry(doc_number, entity_name, detail_url, documents, seen=None):
+    """One documents.jsonl line. `documents` is get_documents' list, never None.
+
+    Single-document rows -- ~90% of the corpus -- carry only the count, because
+    their one document is already the CSV's View URL and repeating it here
+    would double the file for nothing. Rows with more carry the whole list and
+    their detail URL, which are the rows anyone actually opens this file to
+    read.
+    """
+    entry = {
+        "k": document_key(detail_url),
+        "doc": doc_number,
+        "entity": entity_name,
+        "n": len(documents),
+        "seen": seen or datetime.date.today().isoformat(),
+    }
+    if len(documents) > 1:
+        entry["u"] = detail_url
+        entry["documents"] = documents
+    return entry
+
+
+def append_documents(entries, out_path=DOCUMENTS_JSONL):
+    """Append entries and get them onto the disk. Returns how many were written.
+
+    fsync, not just flush, because this file is written by a run that is
+    expected to be stopped -- a closed lid or a moved laptop should cost the
+    rows in flight and nothing already reported as done.
+    """
+    if not entries:
+        return 0
+    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+    with open(out_path, "a", encoding="utf-8") as f:
+        for entry in entries:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        f.flush()
+        os.fsync(f.fileno())
+    return len(entries)
+
+
+def load_documents(path=DOCUMENTS_JSONL):
+    """Fold the log into {key: entry}, last entry winning.
+
+    Fold, never count lines: this log is append-only and a re-check supersedes
+    its earlier entry, so `wc -l` overstates by every row ever revisited. That
+    exact mistake reported 23% complete as 40% once already.
+
+    A truncated final line is expected rather than exceptional -- it is what a
+    hard kill mid-write leaves behind -- so it is *truncated away*, not merely
+    skipped. Skipping is not enough: the next run appends after the fragment,
+    which turns it into a broken line in the middle of the file, and from then
+    on every load would halt. Repairing debris once beats reading past it
+    forever. A broken line anywhere earlier is left alone and does halt:
+    something rewrote history there, and continuing would silently treat
+    unchecked rows as done.
+    """
+    store = {}
+    if not os.path.exists(path):
+        return store
+
+    with open(path, "rb") as f:
+        raw = f.readlines()
+
+    offset = 0
+    for i, blob in enumerate(raw):
+        start, offset = offset, offset + len(blob)
+        line = blob.decode("utf-8", "replace").strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            if i == len(raw) - 1:
+                print(f"    Note: {path} ends mid-write, which is what stopping "
+                      f"the run abruptly leaves behind. Truncating {len(blob)} "
+                      "bytes of a partial line; that row is simply checked again.")
+                os.truncate(path, start)
+                break
+            raise SystemExit(
+                f"{path} line {i + 1} is not valid JSON, and it is not the last "
+                "line. Something rewrote this log rather than appending to it; "
+                "refusing to run, because the rows after it cannot be trusted.")
+        store[entry["k"]] = entry
+    return store
+
+
 WATCHED_FIELDS = (
     ("amount", 5, "amount"),
     ("vendor", 4, "vendor"),

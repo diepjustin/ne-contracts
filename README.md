@@ -104,6 +104,22 @@ The scraper reproduces the state's records faithfully, including their errors.
 - The state's own entity list contains a typo — "Deaf & Hard of Dearing" — preserved
   verbatim, because matching the source exactly is what makes the links work.
 - **The state updates daily** (per its FAQ).
+- **A record can publish several documents, and until Aug 2026 only the first was
+  captured.** `get_view_url` used `soup.find` where it wanted `find_all`. UNL's Axon
+  contract `CW33053` publishes nine; this held one. Measured on a 900-row random sample:
+
+  | | rows sampled | rows with a document | rows with more than one | documents published | held |
+  |---|---:|---:|---:|---:|---:|
+  | Purchase orders | 400 | 396 | 0 | 396 | 396 (100%) |
+  | University contracts | 200 | 194 | 19 (9.8%) | 221 | 194 (88%) |
+  | State agencies | 300 | 249 | 48 (19.3%) | 328 | 249 (76%) |
+
+  About **67,000 documents corpus-wide**, ~93% of them state agency. A purchase order is
+  one document and sampled 0-for-400; contracts accumulate amendments and renewals.
+  `scripts/backfill_documents.py` re-asks every already-scraped record and writes
+  `data/documents.jsonl`; the page lists them when you click a row. **Rows the backfill
+  has not reached yet are `docCount` 255 — unknown — and the page says nothing about
+  them.** Coverage so far is `meta.docCheckedRows`.
 
 ### Descriptions
 
@@ -250,6 +266,11 @@ python3 scripts/scrape.py state --hours 3   # stop cleanly after 3h
 python3 scripts/scrape.py state --entity "Roads, Department of"
 python3 scripts/check_entity_drift.py       # has the state's entity list changed?
 
+python3 scripts/backfill_documents.py       # -> data/documents.jsonl (the 33h one)
+python3 scripts/backfill_documents.py --dataset contract   # one dataset at a time
+python3 scripts/backfill_documents.py --hours 3            # stop cleanly after 3h
+python3 scripts/backfill_documents.py --status             # coverage + is a run going, no network
+
 python3 scripts/extract_text.py             # -> data/doc_text.jsonl (the 36h one)
 python3 scripts/extract_text.py --status    # progress, no network
 python3 scripts/extract_text.py --retry-errors    # re-ask the 14,586 that failed
@@ -374,6 +395,42 @@ Each combo reports its median detail-fetch time and flags a sustained climb past
 The healthy baseline is ~0.95s; a run drifting well above that is asking for more than
 the site wants to give.
 
+### The document backfill
+
+`scripts/backfill_documents.py` re-asks every record we already hold what it publishes.
+It reads `Detail URL` straight out of the CSVs, so it runs **no searches at all** — which
+matters more than it sounds. The site's search results live in server-side state that
+expires after ~2,000 pages, the failure that nearly cost 170,000 UNL records; detail URLs
+have no such state, and 900 of them were fetched cold, with no session or cookie, while
+measuring the loss. At the measured ~6-9 rows/s it is roughly 33 hours for all 741,653.
+
+**Stopping it is normal.** `Ctrl-C` finishes the batch in flight, writes it, and exits 0;
+the same command resumes. `data/documents.jsonl` is itself the checkpoint — folded on
+start, never counted by line — so there is no second progress file to drift away from the
+data it describes. Batches are fsynced, not merely flushed, because this is a job run on a
+laptop that gets carried between networks.
+
+Two brakes exist because a long run can outlive the conditions it started in:
+
+| breaker | what it catches |
+|---|---|
+| 25 consecutive fetch failures | a closed lid, a dropped VPN, a changed network. Nothing is written for those rows, so they are simply asked again. |
+| 25 consecutive "publishes nothing" | the 17 Aug 2026 outage signature, in the one shape the start-up canary check cannot catch: a run that began healthy and went dark fourteen hours in. The canaries are re-asked *before* any of those rows is recorded. |
+
+A row is written only once its page has actually been read, so an unrecorded row and a
+row not yet reached are the same thing — which is the truth, and is what makes resuming
+safe.
+
+`--status` also says whether a run is going, asked of `ps` rather than a pidfile: a
+pidfile outlives the run it describes, and the one that died in a laptop sleep on
+28 Aug 2026 would have left one behind claiming to be alive. If `ps` cannot be asked it
+reports *that*, rather than "nothing is running" — the same distinction the rest of this
+project turns on. **The run's own log is not evidence of anything.** That sleep left the
+log with three NUL bytes and stale disk blocks from other files spliced into its tail, so
+`grep` treated it as binary and silently found nothing in a file that plainly had
+content. `data/documents.jsonl` came through it with zero NULs and every line valid,
+because it is fsynced every 50 rows and only ever appended to.
+
 ### Why the payload is columns, not JSON
 
 One JSON file of all 739,605 rows is ~104 MB, ~49 MB gzipped, and roughly 380 MB of heap
@@ -385,13 +442,20 @@ So the payload is split by access pattern:
 
 | | gzipped, as Pages serves it |
 | --- | ---: |
-| numeric columns, vendor names, document numbers — **loaded up front** | **6.81 MB** |
+| numeric columns, vendor names, document numbers — **loaded up front** | **6.83 MB** |
 | which parser wrote each description (`descsrc.bin`) — **loaded up front** | 0.03 MB |
 | link tokens — **fetched on click**, 362 blocks | 23.67 MB raw |
+| document lists for rows publishing several — **fetched on click**, 363 blocks | 1.51 MB raw |
 | descriptions — **fetched on click**, 362 blocks | 49.95 MB raw |
 | description search index — **fetched only if you tick the box** | 9.92 MB |
 
-`descsrc.bin` is one byte per row and would be a seventh column in `cols.u8.bin` but for
+`docCount` joined `cols.u8.bin` as a seventh column and moved the resident figure by
+0.001 MB, because it is one byte a row and gzip eats a near-constant column. It will grow
+as the backfill fills in real counts; re-measure rather than trusting this line once it
+has finished. The document-list blocks are mostly their own u16 length header — an empty
+block gzips to 25 bytes, and the fullest one measured is 18 KB, paid once per click.
+
+`descsrc.bin` is one byte per row and looks like it belongs in `cols.u8.bin` but for
 `build_site.py --descriptions-only`, which attaches descriptions to a payload that is
 already built and live and deliberately writes no byte of any resident column file. A
 column there would have gone stale on that path — descriptions present, every row
@@ -445,6 +509,14 @@ Descriptions are built in CI from `scope.jsonl.gz`, downloaded from the newest
 `extraction-data-*` release. `carry_descriptions_forward()` remains as a fallback but
 cannot be the main path any more: it reads the build being replaced, and that build is
 no longer in the repository.
+
+**`documents.jsonl.gz` rides on the same release**, for the same reason: it is the output
+of ~23 hours of detail fetches and will never be produced in CI. It is optional — a
+release without it builds with every row's document count unknown, and the page then
+claims nothing about any row, which is what a partly-finished backfill looks like anyway.
+**Re-upload it after any backfill sitting, or the site keeps publishing the coverage the
+release last carried.** That is the one way this can go quietly stale: the code will be
+live and correct while the data behind it is a sitting old.
 
 `index.html` carries no build identity — it reads `manifest.json` with
 `cache: 'no-store'` — so a reader holding a stale page can never pair it with a different
@@ -500,6 +572,19 @@ Read this before changing anything that writes.
 
 **Descriptions are the state's words, verbatim.** Nothing is generated or summarised.
 Typos, boilerplate and truncation that the state itself published all stay.
+
+**A row's primary document must not move.** `doc_text.jsonl` and `scope.jsonl` are keyed
+by view token, so the row's first document is what every description hangs off. The state
+does not list documents in date order, so a newly filed one can appear first and shift it
+— `build_site.py` therefore keeps whatever the CSV already says and only *reports* the
+drift. Three of the first 750 rows checked had already moved. Silently adopting the new
+first token orphans that row's description without failing anything.
+
+**`docCount` 255 means "nobody has asked", never "one".** The backfill runs over ~33 hours
+in sittings, so a build between them has hundreds of thousands of unchecked rows. Reading
+unknown as one would put a claim on the page about rows nothing is known about. This is
+`meta.incomplete`'s failure mode, which has now happened twice, written down before it
+happens a third time.
 
 **Never merge vendors automatically.** `scripts/vendor_groups.json` is the only source of
 truth and every entry was read by a human. A wrong merge invents spending that never
@@ -578,6 +663,18 @@ subsequent run and the failure feeds itself.
 ---
 
 ## Things that bit us
+
+**`find` where it wanted `find_all`, for about a year.** `get_view_url` took the first
+`ViewDocument` link on a record's detail page and stopped. Every record with amendments,
+renewals or a signed copy alongside the award kept one document and dropped the rest —
+~67,000 documents, ~9% of contracts and ~19% of state agency rows. Nothing failed: every
+row had a working link to a real PDF, the round-trip URL verification passed, and the page
+looked complete. It was found by a reader clicking through to the state's own page for a
+UNL Axon contract and counting nine documents where the site offered one.
+
+The general shape is worth more than the fix: **a scraper that takes the first match will
+never tell you there was a second.** When a page can hold a list, count it and record the
+count, even when today's answer is always one.
 
 **Ranged HTTP requests are unusable on GitHub Pages.** A range request advertising gzip —
 which browsers always do, and `fetch()` cannot override — is served against the

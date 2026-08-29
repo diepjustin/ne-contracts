@@ -129,15 +129,38 @@ def worker_session():
 
 
 def load_checkpoint():
+    """Fold the log into {token: data}, last entry winning.
+
+    A truncated final line is what stopping this job abruptly leaves behind, so
+    it is removed rather than skipped: skipping is not enough, because the next
+    run appends after the fragment and turns it into a broken line in the
+    middle of the file, which would then fail every load. A broken line
+    anywhere earlier is real corruption and is left to raise -- the entries
+    after it cannot be trusted. Same rule as scrape.load_documents.
+    """
     store = {}
-    if os.path.exists(OUT_JSONL):
-        with open(OUT_JSONL, encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                rec = json.loads(line)
-                store[rec["tok"]] = rec["data"]  # later lines win on a re-processed token
+    if not os.path.exists(OUT_JSONL):
+        return store
+
+    with open(OUT_JSONL, "rb") as f:
+        raw = f.readlines()
+
+    offset = 0
+    for i, blob in enumerate(raw):
+        start, offset = offset, offset + len(blob)
+        line = blob.decode("utf-8", "replace").strip()
+        if not line:
+            continue
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            if i != len(raw) - 1:
+                raise
+            print(f"    Note: {OUT_JSONL} ends mid-write; truncating {len(blob)} bytes "
+                  "of a partial line. That document is simply fetched again.")
+            os.truncate(OUT_JSONL, start)
+            break
+        store[rec["tok"]] = rec["data"]  # later lines win on a re-processed token
     return store
 
 

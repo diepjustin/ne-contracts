@@ -30,6 +30,12 @@ data/*_daily_progress.json*
 data/changes.jsonl
 data/daily_diff_report.json
 
+# Which documents each record publishes -- one line per row, ~60 MB once the
+# backfill has run. Same category as changes.jsonl above: it rides in the
+# Actions cache and must go onto the extraction Release, because regenerating
+# it means ~33 hours of detail fetches against a government server.
+data/documents.jsonl
+
 # Working output of scripts/extract_text.py — an append-only checkpoint log
 # that grows as documents are processed, not something to commit while
 # prototyping.

@@ -159,3 +159,46 @@ def test_trailing_bytes_in_postings_are_rejected(tmp_path):
         f.write(b"\x00")
     with pytest.raises(ValueError, match="past the last word"):
         ne_format.read_index(str(tmp_path))
+
+
+# --- document blocks: the rows that publish more than one -------------------
+
+def _documents(*names):
+    return [{"token": bytes([i + 1]) * ne_format.TOKEN_BYTES,
+             "name": n, "size": "2Mb"} for i, n in enumerate(names)]
+
+
+def test_a_rows_document_list_survives_the_round_trip(tmp_path):
+    packed = {3: ne_format.pack_documents(_documents("DOC1", "DOC2", "DOC3"))}
+    ne_format.write_xdoc_blocks(str(tmp_path), packed, 10)
+    back = ne_format.read_xdoc_blocks(str(tmp_path), 10)
+
+    got = ne_format.unpack_documents(back[3])
+    assert [d["name"] for d in got] == ["DOC1", "DOC2", "DOC3"]
+    assert [d["size"] for d in got] == ["2Mb"] * 3
+    assert got[0]["token"] == b"\x01" * ne_format.TOKEN_BYTES
+
+
+def test_rows_with_one_document_cost_nothing_in_these_blocks(tmp_path):
+    """~90% of the corpus. Their document is already the row's view token."""
+    ne_format.write_xdoc_blocks(str(tmp_path), {}, 10)
+    assert ne_format.read_xdoc_blocks(str(tmp_path), 10) == [b""] * 10
+    # header only: a u16 length per row, no payload
+    assert os.path.getsize(ne_format.xdoc_path(str(tmp_path), 0)) == 20
+
+
+def test_the_states_own_name_and_size_survive_verbatim(tmp_path):
+    """Both are reproduced, not reformatted -- a reader checks our list against
+    the state's page with them, and the names are not all of one shape: some
+    records use DOC ids and some use UUIDs."""
+    docs = [{"token": b"\x07" * ne_format.TOKEN_BYTES,
+             "name": "AA77C1E2-3C42-4E8B-8BB8-89E376C80E8C", "size": "923Kb"}]
+    ne_format.write_xdoc_blocks(str(tmp_path), {0: ne_format.pack_documents(docs)}, 1)
+    back = ne_format.unpack_documents(ne_format.read_xdoc_blocks(str(tmp_path), 1)[0])
+    assert back == docs
+
+
+def test_a_wrong_length_token_fails_the_build(tmp_path):
+    """Never widen every record for an outlier, and never write a short one."""
+    with pytest.raises(ValueError, match="expected"):
+        ne_format.pack_documents([{"token": b"short", "name": "D", "size": "1Mb"}])

@@ -21,7 +21,29 @@ sys.path.insert(0, SCRIPTS)
 import scrape  # noqa: E402
 
 
-LINK_PAGE = '<html><body><a href="/Home/ViewDocument?id=7">View</a></body></html>'
+def doc_row(name, size, token):
+    """One file's row as the state renders it: the name links to the document,
+    and so do the View and Download controls beside it -- three links, one file."""
+    return (f'<tr><td><a href="/Search/ViewDocument?D={token}">{name}</a></td>'
+            f'<td>{size}</td>'
+            f'<td><a href="/Search/ViewDocument?D={token}">View</a> '
+            f'<a href="/Search/DownloadDocument?D={token}">Download</a></td></tr>')
+
+
+def documents_page(*rows):
+    return ('<html><body><h2>Document Results</h2><table>'
+            '<tr><th>File Name</th><th>File Size</th><th></th></tr>'
+            + "".join(rows) + '</table></body></html>')
+
+
+LINK_PAGE = documents_page(doc_row("DOC1738782367", "150Kb", "aVw1%3D%3D"))
+
+# Shaped after UNL's Axon contract CW33053, which publishes nine documents
+# where this project captured one. See README.md, "Things that bit us".
+MULTI_PAGE = documents_page(doc_row("DOC2061661286", "2Mb", "eJUl%3D%3D"),
+                            doc_row("DOC2061539553", "8Mb", "owmB%3D%3D"),
+                            doc_row("DOC2074267252", "10Mb", "DDYa%3D%3D"))
+
 NO_LINK_PAGE = '<html><body><p>Documents not available for immediate viewing.</p></body></html>'
 
 
@@ -60,7 +82,7 @@ def use_session(monkeypatch, pages):
 
 def test_page_offering_a_document_returns_its_url(monkeypatch):
     use_session(monkeypatch, {"u": LINK_PAGE})
-    assert scrape.get_view_url("u") == scrape.BASE_URL + "/Home/ViewDocument?id=7"
+    assert scrape.get_view_url("u") == scrape.BASE_URL + "/Search/ViewDocument?D=aVw1%3D%3D"
 
 
 def test_clean_page_without_a_link_returns_empty_string(monkeypatch):
@@ -80,6 +102,70 @@ def test_missing_detail_url_is_a_real_absence(monkeypatch):
     """No detail URL at all is genuinely nothing to view -- not an unknown."""
     use_session(monkeypatch, {})
     assert scrape.get_view_url("") == ""
+
+
+# --- get_documents: every document, not just the first ---------------------
+
+def test_every_document_on_the_page_is_captured(monkeypatch):
+    """The bug Justin found: `find` kept document 1 of 9 and dropped the rest."""
+    use_session(monkeypatch, {"u": MULTI_PAGE})
+    assert [d["name"] for d in scrape.get_documents("u")] == [
+        "DOC2061661286", "DOC2061539553", "DOC2074267252"]
+
+
+def test_documents_keep_the_states_order(monkeypatch):
+    """The state's order is not date order, and it decides which document is
+    primary -- so it is data, not presentation, and must not be re-sorted."""
+    use_session(monkeypatch, {"u": MULTI_PAGE})
+    assert [d["token"] for d in scrape.get_documents("u")] == [
+        "eJUl%3D%3D", "owmB%3D%3D", "DDYa%3D%3D"]
+
+
+def test_the_states_own_name_and_size_are_kept_verbatim(monkeypatch):
+    """Both are the state's values. A reader checks our list against the source
+    with them, so they are reproduced rather than reformatted."""
+    use_session(monkeypatch, {"u": MULTI_PAGE})
+    assert scrape.get_documents("u")[2] == {
+        "name": "DOC2074267252", "size": "10Mb", "token": "DDYa%3D%3D"}
+
+
+def test_one_file_with_three_links_counts_once(monkeypatch):
+    """Each row carries the name, View and Download pointing at the same file.
+    Counting links instead of files would have trebled every count."""
+    use_session(monkeypatch, {"u": LINK_PAGE})
+    assert len(scrape.get_documents("u")) == 1
+
+
+def test_the_primary_document_is_the_one_the_csv_already_holds(monkeypatch):
+    """Continuity, and the reason descriptions survive this change.
+    doc_text.jsonl and scope.jsonl are keyed by the view token, so the first
+    document must stay the first document or every description is orphaned."""
+    use_session(monkeypatch, {"u": MULTI_PAGE})
+    documents = scrape.get_documents("u")
+    assert scrape.view_url_for(documents) == scrape.get_view_url("u")
+    assert scrape.view_url_for(documents).endswith("D=eJUl%3D%3D")
+
+
+def test_a_clean_page_offering_nothing_is_an_empty_list(monkeypatch):
+    """A real fact, and distinct from the None below."""
+    use_session(monkeypatch, {"u": NO_LINK_PAGE})
+    assert scrape.get_documents("u") == []
+
+
+def test_a_failed_fetch_is_none_not_an_empty_list(monkeypatch):
+    """The 17 Aug 2026 signature in its new shape. An empty list says the state
+    publishes nothing; None says we could not find out. Collapsing them is how
+    an outage gets recorded as fact."""
+    use_session(monkeypatch, {"u": RuntimeError("connection reset")})
+    assert scrape.get_documents("u") is None
+
+
+def test_a_page_whose_rows_stop_being_file_rows_yields_nothing():
+    """A redesign that drops the file table should read as "no documents" and
+    be caught by the canaries -- never as a silently smaller count."""
+    assert scrape.parse_documents('<html><body><table>'
+                                  '<tr><td>Something else entirely</td><td>x</td></tr>'
+                                  '</table></body></html>') == []
 
 
 # --- document_service_healthy: the canary ----------------------------------
@@ -141,16 +227,26 @@ def a_record(doc, detail):
             "end_date": "12/31/2026", "detail_url": detail}
 
 
-def drive_one_page(monkeypatch, records, view_urls):
+def drive_one_page(monkeypatch, records, view_urls, tmp_path=None):
     """Run scrape_entity over a single fabricated results page.
 
-    `view_urls` maps detail URL -> what get_view_url should hand back, using
-    the same three-way vocabulary the real one uses (a URL, "" or None)."""
+    `view_urls` maps detail URL -> what the detail fetch should hand back, in
+    the same three-way vocabulary the real one uses. A URL string stands for a
+    record offering that one document, "" for one offering none, and None for
+    a detail page we could not read at all."""
+    def as_documents(url):
+        if url is None:
+            return None
+        return [{"name": "DOC1", "size": "1Mb", "token": url.split("D=")[-1]}] if url else []
+
     monkeypatch.setattr(scrape, "get_token", lambda _s: "token")
     monkeypatch.setattr(scrape.time, "sleep", lambda _s: None)
     monkeypatch.setattr(scrape, "parse_results_page", lambda _soup: (records, 1))
-    monkeypatch.setattr(scrape, "fetch_view_urls_parallel",
-                        lambda rs: [view_urls[r["detail_url"]] for r in rs])
+    monkeypatch.setattr(scrape, "fetch_documents_parallel",
+                        lambda rs: [as_documents(view_urls[r["detail_url"]]) for r in rs])
+    # Keep the log out of data/ -- these tests fabricate records, and this file
+    # is real scrape output that build_site.py reads.
+    monkeypatch.setattr(scrape, "append_documents", lambda entries, path=None: len(entries))
 
     class Session:
         def post(self, *a, **k):
@@ -182,9 +278,13 @@ def test_a_genuine_absence_is_still_written(monkeypatch):
 
 
 def test_a_document_url_lands_in_the_last_column(monkeypatch):
+    """The CSV's last column stays one URL -- the record's primary document --
+    even now that the full list is captured. Every downstream consumer of these
+    files, build_site.py included, still reads exactly one View URL per row."""
     records = [a_record("A", "url-a")]
-    rows = drive_one_page(monkeypatch, records, {"url-a": "https://example.test/doc"})
-    assert rows[0][-1] == "https://example.test/doc"
+    view = scrape.BASE_URL + "/Search/ViewDocument?D=aVw1%3D%3D"
+    rows = drive_one_page(monkeypatch, records, {"url-a": view})
+    assert rows[0][-1] == view
 
 
 # --- the same distinction, one layer down in extract_text --------------------

@@ -61,6 +61,69 @@ OUT_JSON = os.path.join(OUT_DIR, "data.json")
 DETAIL_BASE = "https://statecontracts.nebraska.gov/Search/SearchDocuments"
 VIEW_BASE = "https://statecontracts.nebraska.gov/Search/ViewDocument?D="
 
+def load_document_counts(detail_urls, view_tokens):
+    """(docCount column, row -> packed document list, drift report).
+
+    Joins data/documents.jsonl onto the payload's rows by the hash of each
+    row's detail URL. Rows the backfill has not reached get DOC_COUNT_UNKNOWN
+    rather than 1: the backfill runs in sittings over ~33 hours, so a build
+    between them has hundreds of thousands of unasked rows, and calling those
+    "one document" would be a claim about rows nobody has looked at. See
+    ne_format.DOC_COUNT_UNKNOWN.
+
+    The row's primary document stays whatever the CSV already says. The state
+    does not list documents in date order, so a newly filed one can appear
+    first and shift the row's first token -- and descriptions are keyed by that
+    token, so adopting the new one would orphan them. Two different things can
+    happen and only the second is a problem:
+
+      moved    the CSV's document is still published, just no longer first
+      gone     the CSV's document is no longer published at all, so that
+               row's description now describes a document the state has
+               withdrawn
+
+    Both are counted and reported; neither changes what is written.
+    """
+    sys.path.insert(0, os.path.join(ROOT, "scripts"))
+    from scrape import document_key, load_documents  # noqa: E402
+
+    store = load_documents(os.path.join(ROOT, "data", "documents.jsonl"))
+    counts = array.array("B", bytes([ne_format.DOC_COUNT_UNKNOWN]) * len(detail_urls))
+    packed = {}
+    moved = gone = clamped = 0
+
+    for row, detail in enumerate(detail_urls):
+        entry = store.get(document_key(detail))
+        if entry is None:
+            continue
+
+        count = entry["n"]
+        if count > 254:
+            # 255 is the unknown sentinel, so a genuinely enormous list has to
+            # stop at 254 rather than wrap into "nobody asked".
+            clamped += 1
+            count = 254
+        counts[row] = count
+
+        documents = entry.get("documents")
+        if not documents:
+            continue
+
+        tokens = [d["token"] for d in documents]
+        if view_tokens[row]:
+            if view_tokens[row] not in tokens:
+                gone += 1
+            elif tokens[0] != view_tokens[row]:
+                moved += 1
+        packed[row] = ne_format.pack_documents(
+            [{"token": base64.b64decode(unquote(d["token"])),
+              "name": d["name"], "size": d["size"]} for d in documents])
+
+    checked = sum(1 for c in counts if c != ne_format.DOC_COUNT_UNKNOWN)
+    return counts, packed, {"checked": checked, "moved": moved, "gone": gone,
+                            "clamped": clamped}
+
+
 def load_entities():
     """Every entity the scraper knows about, alphabetized.
 
@@ -282,6 +345,7 @@ def main():
     docs = []          # document numbers, as bytes
     dn_tokens = []     # DN, still base64 text at this point
     view_tokens = []   # view-URL suffix, still percent-encoded text
+    detail_urls = []   # what documents.jsonl is keyed on, row by row
 
     sources = []       # parallel to the columns: original URLs, for round-trip verification
 
@@ -354,6 +418,7 @@ def main():
                 docs.append(doc)
                 dn_tokens.append(dn)
                 view_tokens.append(view_suffix)
+                detail_urls.append(detail)
 
                 sources.append((detail, view))
 
@@ -365,6 +430,28 @@ def main():
     for name, size in (("entity", len(ENTITIES)), ("type", len(types)), ("adnIdx", len(adn))):
         if size > 255:
             sys.exit(f"{name} dictionary has {size} entries — the column is a u8; widen it")
+
+    # Which documents each row publishes, joined on from the backfill's log.
+    # Unasked rows stay DOC_COUNT_UNKNOWN, so a half-finished backfill claims
+    # nothing about the rows it has not reached.
+    doc_counts, xdoc_packed, doc_drift = load_document_counts(detail_urls, view_tokens)
+    columns["docCount"] = doc_counts
+    if doc_drift["checked"]:
+        print(f"documents     : {doc_drift['checked']:,} of {n:,} rows checked, "
+              f"{sum(1 for c in doc_counts if 1 < c < 255):,} publish more than one")
+        if doc_drift["moved"]:
+            print(f"                {doc_drift['moved']:,} row(s) have gained a document "
+                  "that now sorts ahead of the one the CSV points at (harmless: the "
+                  "description still has its document)")
+        if doc_drift["gone"]:
+            print(f"                {doc_drift['gone']:,} row(s) no longer publish the "
+                  "document their description was read from — the state withdrew it")
+        if doc_drift["clamped"]:
+            print(f"                {doc_drift['clamped']:,} row(s) publish more than 254 "
+                  "documents; the column is a u8 and stops there")
+    else:
+        print(f"documents     : none of {n:,} rows checked yet — "
+              "run scripts/backfill_documents.py; the page will claim nothing")
 
     # Rows the triple cannot tell apart. The page appends &d=<view token> to
     # their permalinks, so they stay individually addressable; every other row
@@ -510,6 +597,13 @@ def main():
     meta["descBytes"] = sum(len(d) for d in descriptions.values())
     add_source_meta(meta, desc_sources)
 
+    # How much of the corpus has actually been asked what it publishes. The
+    # page needs this to describe its own coverage honestly while the backfill
+    # is only part-way through, and the README quotes it.
+    meta["docCheckedRows"] = doc_drift["checked"]
+    meta["docMultiRows"] = sum(1 for c in doc_counts if 1 < c < ne_format.DOC_COUNT_UNKNOWN)
+    meta["docCountUnknown"] = ne_format.DOC_COUNT_UNKNOWN
+
     # Keep what write_payload returns: it adds each resident file's size, and
     # the two writers below add keys of their own. meta.json is rewritten after
     # them, because write_payload works on a copy and cannot see them.
@@ -517,6 +611,7 @@ def main():
     ne_format.write_token_blocks(outdir, dn_bytes, view_bytes, n)
     ne_format.write_desc_blocks(outdir, descriptions, n)
     ne_format.write_desc_sources(outdir, desc_sources, n)
+    ne_format.write_xdoc_blocks(outdir, xdoc_packed, n)
     meta["bytes"][ne_format.DESC_SRC] = os.path.getsize(
         os.path.join(outdir, ne_format.DESC_SRC))
     # ?selftest=1 is meant to cover everything the page loads, and this is now
@@ -556,6 +651,10 @@ def main():
           f"(fetched on click)")
     print(f"descriptions  : {desc / 1e6:6.2f} MB raw in {ne_format.block_count(n):,} blocks "
           f"({meta['descCount']:,} rows have one)")
+    xdoc = sum(os.path.getsize(ne_format.xdoc_path(outdir, b))
+               for b in range(ne_format.block_count(n)))
+    print(f"document lists: {xdoc / 1e6:6.2f} MB raw in {ne_format.block_count(n):,} blocks "
+          f"({meta['docMultiRows']:,} rows publish more than one)")
     print(f"written to    : {outdir}")
 
 

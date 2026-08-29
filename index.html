@@ -32,6 +32,11 @@
   }
   h1 { margin: 0 0 4px; font-size: 21px; letter-spacing: -.01em; }
   .sub { color: var(--muted); font-size: 13.5px; }
+  /* Three short paragraphs rather than one run-on line. Bounded so the text
+     stays readable on a wide monitor, where the table wants every pixel but
+     prose does not. */
+  .sub p { margin: 0 0 4px; max-width: 82ch; }
+  .sub p:last-child { margin-bottom: 0; }
   .gap-note {
     margin-top: 12px; padding: 9px 12px; border-radius: 5px; font-size: 12.5px;
     line-height: 1.5; color: var(--text);
@@ -93,6 +98,11 @@
     padding: 10px 20px; border-bottom: 1px solid var(--border);
     background: var(--panel); height: 132px; overflow-y: auto; font-size: 13.5px;
   }
+  /* A row that lists its documents needs more room than one that does not.
+     Only those rows grow: every other row keeps the fixed 132px it has always
+     had, and fitScroller measures the panel's bottom edge, so the table below
+     resizes to match. Capped so the list can never squeeze out the table. */
+  #detail.has-docs { height: auto; max-height: 42vh; }
   #detail .who { color: var(--muted); font-size: 12px; margin-bottom: 3px; }
   #detail .who b { color: var(--text); font-variant-numeric: tabular-nums; }
   #detail .words { white-space: pre-wrap; }
@@ -103,6 +113,25 @@
     margin-bottom: 4px; font-size: 12px; color: var(--muted);
     white-space: normal;
   }
+  /* The record's other documents. Sits above the description because it says
+     what the description is one of. */
+  /* No inner scrollbar: #detail is already a fixed-height scroller, and
+     nesting a second one buries the description a reader clicked to read.
+     Long lists are truncated instead -- see showDocuments. */
+  #detail .docs { margin: 5px 0 7px; font-size: 12px; }
+  #detail .docs-head { color: var(--muted); margin-bottom: 3px; }
+  #detail .doc-row {
+    display: flex; gap: 8px; align-items: baseline;
+    padding: 1px 0; white-space: normal;
+  }
+  #detail .doc-row a { font-variant-numeric: tabular-nums; }
+  #detail .doc-size {
+    color: var(--muted); font-variant-numeric: tabular-nums;
+    min-width: 3.5em;
+  }
+  #detail .doc-row i { color: var(--muted); opacity: .85; }
+  #detail .doc-more { color: var(--muted); padding: 1px 0; }
+  #detail .docs-all { display: inline-block; margin-top: 3px; font-size: 12px; }
   #detail .company {
     margin: 2px 0 5px; font-size: 12px; color: var(--muted);
   }
@@ -167,8 +196,22 @@
     <div>
       <h1>Nebraska State Contracts &amp; Purchase Orders</h1>
       <div class="sub">
-        Scraped from the <a href="https://statecontracts.nebraska.gov/" target="_blank" rel="noopener">Nebraska State Contracts Database</a>.
-        Covers all state agencies, boards and commissions, plus the University of Nebraska and Nebraska State College systems.
+        <p>
+          Scraped from the <a href="https://statecontracts.nebraska.gov/" target="_blank" rel="noopener">Nebraska State Contracts Database</a>
+          and rebuilt as one searchable page. Covers all state agencies, boards and commissions,
+          plus the University of Nebraska and Nebraska State College systems.
+        </p>
+        <p>
+          Click any row for that document's description — the state's own words, lifted from the
+          filing and never rewritten. Not every record has one; the Description filter shows which do.
+        </p>
+        <p>
+          Document numbers link to the original PDF on the state's servers at
+          statecontracts.nebraska.gov. Some records publish several documents — amendments,
+          renewals, the signed contract — and clicking the row lists all of them. Those files
+          are served by the state, not copied here, so a link will not open while that
+          service is down.
+        </p>
       </div>
     </div>
     <div class="updated" id="updated" hidden></div>
@@ -272,6 +315,7 @@
 <pre id="report" hidden></pre>
 
 <footer>
+  Created by <a href="https://diepjustin.github.io/">Justin Diep</a>.
   Public records from the Nebraska Department of Administrative Services, published under
   <a href="https://nebraskalegislature.gov/laws/statutes.php?statute=84-602.04" target="_blank" rel="noopener">Neb. Rev. Stat. § 84-602.04</a>.
   Amounts are as recorded by the state and may include amendments.
@@ -311,7 +355,7 @@
   var dir = "", meta = null, N = 0;
   var vendorIdx, begin, end;                                       // Int32Array
   var amount;                                                      // Float64Array
-  var statusCol, entityCol, typeCol, adnIdx, viewPresent, docLen;  // Uint8Array
+  var statusCol, entityCol, typeCol, adnIdx, viewPresent, docLen, docCount;  // Uint8Array
   var docs, docOff;              // packed ASCII document numbers + their offsets
   var files = {};                // the raw file bytes, kept for ?selftest=1
   var vendors = [], vlow = [];
@@ -334,6 +378,35 @@
 
   var $ = function (id) { return document.getElementById(id); };
   var scroller = $("scroller"), tbody = $("rows");
+
+  // The table scrolls inside the viewport; the page itself does not. That was
+  // expressed as height: calc(100vh - 218px), where 218 stood for the header,
+  // the controls and the status bar added up -- true of one viewport width on
+  // one day. The controls wrap at narrower widths and the header grew when it
+  // gained the explainer, so by 22 Aug 2026 the deployed table overran the
+  // window by 122px at 1280x800 and the whole page scrolled.
+  //
+  // Measure instead of assuming. The detail panel sits above the scroller in
+  // the DOM, so opening it moves the top and this covers that too, which is
+  // what the has-detail rules were hand-computing.
+  //
+  // Not called from render(): render() runs on every scroll event, and this
+  // reads layout and then writes to it, which is a forced reflow per frame.
+  // Height only changes when the window resizes or the panel opens or shuts.
+  function fitScroller() {
+    if (scroller.hidden) return;
+    var top = scroller.getBoundingClientRect().top;
+    // The footer sits below the table. Leaving it out of the sum fills the
+    // window with rows and hides the attribution behind a page scroll.
+    var foot = document.querySelector("footer");
+    var below = foot ? foot.getBoundingClientRect().height : 0;
+    scroller.style.height =
+      Math.max(MIN_TABLE_H, window.innerHeight - top - below) + "px";
+  }
+
+  // Below this the table is not worth showing and the reader is better served
+  // by scrolling the page to reach it.
+  var MIN_TABLE_H = 220;
   var PAGE = location.origin + location.pathname;
 
   var fmtMoney = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 2 });
@@ -489,7 +562,10 @@
       .then(function (m) {
         meta = m;
         N = m.count;
-        need(m.formatVersion === 1, "payload is format v" + m.formatVersion + "; this page reads v1");
+        // v2 added docCount to cols.u8.bin. The page and the payload ship
+        // together, so this is a tripwire for a stale deploy, not a
+        // compatibility shim -- refuse rather than misread the columns.
+        need(m.formatVersion === 2, "payload is format v" + m.formatVersion + "; this page reads v2");
         // Every browser this runs in is little-endian, but a wrong guess here
         // renders as plausible-looking dollar amounts rather than as an error.
         need(m.endian === "little" && new Uint8Array(new Uint32Array([1]).buffer)[0] === 1,
@@ -521,7 +597,7 @@
     var i32b = files[COLS_I32], f64b = files[COLS_F64], u8b = files[COLS_U8];
     need(i32b.length === N * 12, COLS_I32 + " holds " + i32b.length + " bytes for " + N + " rows");
     need(f64b.length === N * 8, COLS_F64 + " holds " + f64b.length + " bytes for " + N + " rows");
-    need(u8b.length === N * 6, COLS_U8 + " holds " + u8b.length + " bytes for " + N + " rows");
+    need(u8b.length === N * 7, COLS_U8 + " holds " + u8b.length + " bytes for " + N + " rows");
 
     // Section offsets are pure arithmetic -- one item size per file means no
     // header, no offset table and no alignment padding to get wrong.
@@ -536,6 +612,11 @@
     adnIdx = u8b.subarray(N * 3, N * 4);
     viewPresent = u8b.subarray(N * 4, N * 5);
     docLen = u8b.subarray(N * 5, N * 6);
+    // How many documents the state publishes for a row. DOC_UNKNOWN means the
+    // backfill has not asked yet, and the page then says nothing at all about
+    // that row -- see ne_format.py. A partly-filled column must never read as
+    // "one document" for rows nobody has looked at.
+    docCount = u8b.subarray(N * 6, N * 7);
 
     docs = files[DOCS];
     docOff = new Int32Array(N + 1);
@@ -953,6 +1034,63 @@
     return p;
   }
 
+  // ------------------------------------------------------- document lists
+  //
+  // Which documents a record publishes, for the rows that publish more than
+  // one. Same block shape as the descriptions above, and fetched the same way
+  // -- on click, never as part of loading the page.
+
+  var DOC_UNKNOWN = 255;
+  var xdocBlocks = {}, xdocAge = [];
+
+  function getXdocBlock(b) {
+    if (xdocBlocks[b]) return xdocBlocks[b];
+    var name = ("0000" + b).slice(-5);
+    var p = fetch(BASE + dir + "xdoc/" + name + ".bin").then(ok)
+      .then(function (r) { return r.arrayBuffer(); })
+      .then(function (ab) { return new Uint8Array(ab); });
+    // Same rule as the token blocks: a rejected fetch must not stay cached as
+    // this block's answer, or one network blip makes those rows permanently
+    // documentless.
+    p["catch"](function () { delete xdocBlocks[b]; });
+    xdocBlocks[b] = p;
+    xdocAge.push(b);
+    while (xdocAge.length > BLOCK_CACHE) {
+      var old = xdocAge.shift();
+      if (old !== b) delete xdocBlocks[old];
+    }
+    return p;
+  }
+
+  // Per document: the token's raw bytes, then a u8-prefixed name and size.
+  // See ne_format.pack_documents, which is the only other place that knows it.
+  function unpackDocuments(u8, at, end) {
+    var out = [], dec = new TextDecoder(), T = meta.tokenBytes;
+    while (at < end) {
+      var token = b64(u8.subarray(at, at + T)); at += T;
+      var nameLen = u8[at++];
+      var name = dec.decode(u8.subarray(at, at + nameLen)); at += nameLen;
+      var sizeLen = u8[at++];
+      var size = dec.decode(u8.subarray(at, at + sizeLen)); at += sizeLen;
+      out.push({ token: token, name: name, size: size });
+    }
+    return out;
+  }
+
+  function documentsFor(id) {
+    var b = blockOf(id), rows = blockRows(b), i = id - b * meta.blockSize;
+    return getXdocBlock(b).then(function (u8) {
+      var header = rows * 2;
+      need(u8.length >= header, "document block " + b + " is " + u8.length +
+           " bytes; its header alone is " + header);
+      var lengths = new Uint16Array(u8.buffer, u8.byteOffset, rows);
+      var at = header;
+      for (var k = 0; k < i; k++) at += lengths[k];
+      if (!lengths[i]) return [];
+      return unpackDocuments(u8, at, at + lengths[i]);
+    });
+  }
+
   // Each block is self-describing: a u16 length per row, then the packed UTF-8.
   // Nothing resident records which rows have one, so a zero length is the
   // answer rather than something to look up first.
@@ -1094,6 +1232,17 @@
       var at = blockRows(b) * T + i * T;
       return meta.viewBase + e(b64(blk.subarray(at, at + T)));
     }
+    // No document to link to, so the row points at the state's page for the
+    // record instead.
+    return detailUrlFor(id, blk, vt);
+  }
+
+  // The state's own document-list page for a row. buildUrl builds this shape
+  // already, but only for rows with no view token; a row that publishes
+  // several documents has one and still wants the list page.
+  function detailUrlFor(id, blk, vt) {
+    var T = meta.tokenBytes, b = blockOf(id), i = id - b * meta.blockSize;
+    var e = encodeURIComponent;
     // A, D and N vary together in ways no entity-level rule captures, so each
     // row carries an index into the table of combinations that actually occur.
     var adn = meta.adn[adnIdx[id]];
@@ -1102,6 +1251,12 @@
     return meta.detailBase + "?A=" + e(adn[0]) + "&D=" + e(adn[1]) + "&DN=" + e(dn) +
            "&N=" + e(adn[2]) + "&DT=" + e(meta.DT[typeCol[id]]) +
            "&V=" + e(b64(vt.blob.subarray(vt.off[v], vt.off[v + 1])));
+  }
+
+  function sourceListUrl(id) {
+    return Promise.all([getBlock(blockOf(id)), loadVtok()]).then(function (got) {
+      return detailUrlFor(id, got[0], got[1]);
+    });
   }
 
   function sourceUrl(id) {
@@ -1137,6 +1292,7 @@
     picked = -1;
     $("detail").hidden = true;
     document.body.classList.remove("has-detail");
+    fitScroller();
     render();   // the scroller just grew back; refill the rows that gap exposed
     // Send focus back where it came from. render() has just replaced the row
     // element, so re-find it -- without this a keyboard reader is dropped at
@@ -1162,7 +1318,77 @@
   // is shorter anyway. See README.md, "Things that bit us".
   function whyBlank(id) {
     if (!viewPresent[id]) return "The state publishes no document for this record.";
+    // With the other documents listed right above, "this document" would read
+    // as a claim about all of them. It is only ever about the one the
+    // description is read from.
+    if (hasDocuments(id)) {
+      return "No description could be read from the first of these documents.";
+    }
     return "No description could be read from this document.";
+  }
+
+  // The list of everything the state publishes for one record.
+  //
+  // Until Aug 2026 this page linked to a record's first document and said
+  // nothing about the rest, because the scraper had only ever kept the first.
+  // UNL's Axon contract CW33053 publishes nine. The row's own link still goes
+  // to the primary -- it is the one the description was read from -- and this
+  // says what else is there.
+  // Does this row publish more than one document? False for a row nobody has
+  // asked yet -- DOC_UNKNOWN is not a count, and treating it as one would put
+  // a claim on screen about a row we know nothing about.
+  function hasDocuments(id) {
+    return docCount[id] > 1 && docCount[id] !== DOC_UNKNOWN;
+  }
+
+  function showDocuments(id) {
+    var wants = [documentsFor(id), viewPresent[id] ? sourceUrl(id) : Promise.resolve("")];
+    Promise.all(wants).then(function (got) {
+      var documents = got[0], primaryUrl = got[1];
+      var box = $("detail-docs");
+      if (!box || picked !== id || !documents.length) return;
+
+      // The panel is a fixed height and the description is what someone
+      // clicked to read, so a 25-document contract lists a few and says how
+      // many more there are. The state's own page, linked below, is the
+      // complete list and the authoritative one.
+      var SHOWN = 6;
+      var html = documents.slice(0, SHOWN).map(function (d) {
+        var url = meta.viewBase + encodeURIComponent(d.token);
+        // Which one the description came from. Saying so matters: the text
+        // below is one document's words, not a summary of the whole record.
+        var note = url === primaryUrl ? '<i>description read from this one</i>' : "";
+        return '<div class="doc-row"><a href="' + esc(url) + '" target="_blank" ' +
+               'rel="noopener">' + esc(d.name) + "</a>" +
+               '<span class="doc-size">' + esc(d.size) + "</span>" + note + "</div>";
+      }).join("");
+      if (documents.length > SHOWN) {
+        html += '<div class="doc-more">and ' + (documents.length - SHOWN) + " more</div>";
+      }
+
+      box.innerHTML = '<div class="docs-head">' + documents.length +
+        " documents at statecontracts.nebraska.gov</div>" + html;
+      // The panel was measured before this list existed, so it is the wrong
+      // height until we say so -- same as the description path below.
+      fitScroller();
+      render();
+
+      // The state's own page for this record, so a reader can check this list
+      // against the source rather than taking ours for it.
+      sourceListUrl(id).then(function (u) {
+        if (picked !== id || !$("detail-docs")) return;
+        $("detail-docs").insertAdjacentHTML("beforeend",
+          '<a class="docs-all" href="' + esc(u) + '" target="_blank" rel="noopener">' +
+          "See all " + documents.length + " on the state's site</a>");
+        fitScroller();
+        render();
+      }, function () { /* the list above is still useful without it */ });
+    }, function (e) {
+      var box = $("detail-docs");
+      if (box && picked === id) {
+        box.textContent = "Could not load the document list — " + e.message;
+      }
+    });
   }
 
   function showDetail(id) {
@@ -1171,15 +1397,21 @@
     var first = el.hidden;
     el.hidden = false;
     document.body.classList.add("has-detail");
-    if (first) render();   // the scroller just shrank; drop the rows now off-screen
+    if (first) { fitScroller(); render(); }   // the scroller just shrank; drop the rows now off-screen
     el.innerHTML =
       '<button type="button" id="detail-close">Close</button>' +
       '<div class="who"><b>' + esc(docStr(id)) + "</b> · " +
       esc(vendors[vendorIdx[id]]) + " · " + esc(meta.entities[entityCol[id]]) +
       " · " + esc(shortType(meta.typeGroups[t])) + "</div>" +
       companyLine(id) +
+      (hasDocuments(id)
+        ? '<div class="docs" id="detail-docs">' + docCount[id] +
+          ' documents at statecontracts.nebraska.gov</div>'
+        : "") +
       '<div class="words" id="detail-words">Loading…</div>';
     $("detail-close").addEventListener("click", closeDetail);
+    el.classList.toggle("has-docs", hasDocuments(id));
+    if (hasDocuments(id)) showDocuments(id);
 
     descFor(id).then(function (text) {
       if (picked !== id) return;   // reader moved on before this landed
@@ -1203,9 +1435,15 @@
         words.className = "words none";
         words.textContent = whyBlank(id);
       }
+      // The panel was sized while it still said "Loading…"; a 600-character
+      // description is taller than that and pushes the table down again.
+      fitScroller();
+      render();
     }, function (e) {
       if (picked !== id) return;
       $("detail-words").textContent = "Could not load the description — " + e.message;
+      fitScroller();
+      render();
     });
   }
 
@@ -1343,7 +1581,15 @@
 
   // Type Code is the state's own value; Type is the category it files it under.
   var CSV_HEAD = ["Document Number", "Type", "Type Code", "Vendor", "Amount",
-                  "Begin Date", "End Date", "Status", "Agency", "URL"];
+                  "Begin Date", "End Date", "Status", "Agency", "Documents", "URL"];
+
+  // How many documents the state publishes for a row, for the export. Blank
+  // rather than a number where the backfill has not asked yet: an export is
+  // read away from the page, with none of its context, so a guess there is
+  // worse than a gap.
+  function docCountCell(id) {
+    return docCount[id] === DOC_UNKNOWN ? "" : String(docCount[id]);
+  }
 
   function csvCell(c) {
     c = String(c);
@@ -1360,7 +1606,7 @@
       buf.push("\n" + [docStr(id), meta.typeGroups[t], meta.types[t], vendors[vendorIdx[id]],
                        amount[id], fmtDate(begin[id]), fmtDate(end[id]),
                        meta.statuses[statusCol[id]], meta.entities[entityCol[id]],
-                       link(id)].map(csvCell).join(","));
+                       docCountCell(id), link(id)].map(csvCell).join(","));
       if (buf.length === 5000) { parts.push(buf.join("")); buf = []; }
     }
     parts.push(buf.join(""));
@@ -1482,7 +1728,7 @@
 
     [[COLS_I32, 4, ["vendorIdx", "begin", "end"]],
      [COLS_F64, 8, ["amount"]],
-     [COLS_U8, 1, ["status", "entity", "type", "adnIdx", "viewPresent", "docLen"]]
+     [COLS_U8, 1, ["status", "entity", "type", "adnIdx", "viewPresent", "docLen", "docCount"]]
     ].forEach(function (spec) {
       var bytes = files[spec[0]], stride = spec[1] * N;
       spec[2].forEach(function (name, i) {
@@ -1558,6 +1804,7 @@
 
     $("load").hidden = true;
     scroller.hidden = false;
+    fitScroller();
     showUpdated();
     showGaps();
     var th = document.querySelector('thead th[data-k="2"]');
@@ -1591,7 +1838,7 @@
     });
 
     scroller.addEventListener("scroll", render, { passive: true });
-    window.addEventListener("resize", render);
+    window.addEventListener("resize", function () { fitScroller(); render(); });
     armLinks();
     armDetail();
 

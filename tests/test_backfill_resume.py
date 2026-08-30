@@ -323,3 +323,72 @@ def test_ps_failing_is_reported_as_unknown_not_as_absence(monkeypatch):
 
     monkeypatch.setattr(backfill.subprocess, "run", boom)
     assert backfill.running_elsewhere() is None
+
+
+# --- the CI merge contract --------------------------------------------------
+#
+# pages.yml concatenates the cached document log with the one from the release
+# rather than letting the release overwrite it. Clobbering destroyed the
+# document list of every record the nightly scrape had found since the release
+# was cut -- 2,118 of them within a day, growing every night, while the site
+# reported 99.7% and looked finished. The shell there cannot be unit-tested;
+# the ordering it depends on can be, and is the whole reason it works.
+
+def test_cached_first_then_release_keeps_both_kinds_of_row(tmp_path):
+    """Release wins where both know a record; nightly-only records survive.
+
+    The release is the authoritative backfill, so it goes last and wins any key
+    both hold. Records only the nightly has seen are unique keys, so they come
+    through regardless -- which is the point of merging at all."""
+    cached = tmp_path / "cached.jsonl"
+    release = tmp_path / "release.jsonl"
+    merged = tmp_path / "documents.jsonl"
+
+    write_log(cached, [
+        {"k": "shared", "doc": "D1", "entity": "E", "n": 1, "seen": "2026-08-17"},
+        {"k": "nightly-only", "doc": "D9", "entity": "E", "n": 2, "seen": "2026-08-30"},
+    ])
+    write_log(release, [
+        {"k": "shared", "doc": "D1", "entity": "E", "n": 5, "seen": "2026-08-30"},
+        {"k": "backfilled", "doc": "D3", "entity": "E", "n": 3, "seen": "2026-08-30"},
+    ])
+    merged.write_bytes(cached.read_bytes() + release.read_bytes())
+
+    store = scrape.load_documents(str(merged))
+    assert sorted(store) == ["backfilled", "nightly-only", "shared"]
+    assert store["shared"]["n"] == 5          # the release is authoritative
+    assert store["nightly-only"]["n"] == 2    # and the nightly's find survives
+
+
+def test_a_torn_cached_log_would_poison_the_merge_if_not_trimmed(tmp_path):
+    """Why pages.yml drops an unterminated last line before concatenating.
+
+    A CI run killed mid-write leaves a partial line with no newline. Glue the
+    release straight onto it and the two fuse into one unparseable line. With a
+    release of any real size -- production carries 741,652 lines -- that line
+    lands in the *middle* of the file, where load_documents halts rather than
+    reading past it. Correct, and it would fail every build until someone went
+    looking.
+
+    Worth knowing the other shape too: were the release a single line, the
+    fused line would be the file's last, and load_documents would quietly
+    truncate it -- taking a real record with it and failing nothing at all."""
+    cached = tmp_path / "cached.jsonl"
+    release = tmp_path / "release.jsonl"
+    merged = tmp_path / "documents.jsonl"
+
+    cached.write_bytes(
+        json.dumps({"k": "aaa", "doc": "D1", "entity": "E", "n": 1}).encode() + b"\n"
+        + b'{"k": "torn", "doc": "D2"')          # killed here, no newline
+    write_log(release, [{"k": "bbb", "doc": "D3", "entity": "E", "n": 1},
+                        {"k": "ccc", "doc": "D4", "entity": "E", "n": 2}])
+
+    merged.write_bytes(cached.read_bytes() + release.read_bytes())
+    with pytest.raises(SystemExit):
+        scrape.load_documents(str(merged))
+
+    # Trimmed the way the workflow trims it, the merge reads cleanly.
+    lines = cached.read_bytes().split(b"\n")
+    cached.write_bytes(b"\n".join(lines[:-1]) + b"\n")
+    merged.write_bytes(cached.read_bytes() + release.read_bytes())
+    assert sorted(scrape.load_documents(str(merged))) == ["aaa", "bbb", "ccc"]

@@ -518,6 +518,18 @@ claims nothing about any row, which is what a partly-finished backfill looks lik
 release last carried.** That is the one way this can go quietly stale: the code will be
 live and correct while the data behind it is a sitting old.
 
+The build **merges** the release copy with the cached one rather than replacing it, and
+that is load-bearing. `--daily` writes an entry for every new record it finds, and
+`data/` round-trips through the Actions cache, so an earlier `--clobber` destroyed the
+document list of every record scraped since the release was cut — 2,118 within a day of
+shipping, growing nightly, while the site reported 99.7% and looked finished. The cached
+file is concatenated first so the release wins any key both hold (it is the authoritative
+backfill) while records only the nightly has seen survive as unique keys. An unterminated
+last line in the cached copy is dropped first: fused to the release's first line it
+becomes one unparseable line in the middle of the file, which `load_documents` refuses to
+read past — and if the release were ever a single line, that fusion would instead be
+silently truncated, taking a real record with it.
+
 `index.html` carries no build identity — it reads `manifest.json` with
 `cache: 'no-store'` — so a reader holding a stale page can never pair it with a different
 build's data.

@@ -128,7 +128,12 @@ def running_elsewhere():
         if not argv:
             continue
         # argv[0] is the interpreter for a real run and a shell for a wrapper.
-        if "python" not in os.path.basename(argv[0]):
+        # Case-folded: a venv on macOS execs the framework build, whose argv[0]
+        # basename is "Python" with a capital P, and matching case-sensitively
+        # reported "no run is going" beside "last wrote 4s ago" -- the same
+        # contradiction that caught the opposite bug, read the other way round.
+        interpreter = os.path.basename(argv[0]).lower()
+        if "python" not in interpreter and interpreter != me.lower():
             continue
         if any(os.path.basename(arg) == me for arg in argv[1:]):
             found.append(int(pid))

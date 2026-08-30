@@ -288,24 +288,33 @@ def test_the_status_check_never_counts_itself_as_a_run():
     assert found is None or os.getpid() not in found
 
 
-def test_a_shell_that_merely_names_the_script_is_not_a_run(monkeypatch):
-    """How the false positive got in. Launching `python backfill_documents.py
-    --status` from a shell gives that *shell* a command line containing the
-    script name, so matching on the name alone reported a run going while the
-    same line said it had last written four hours earlier. A run is a Python
-    process, not anything that mentions the file."""
+def test_only_a_python_process_running_this_script_counts_as_a_run(monkeypatch):
+    """Both ways this has been got wrong, in one ps fixture.
+
+    Matching on the script name alone counted the *shell* that launched
+    `python backfill_documents.py --status`, and reported a run going beside
+    "last wrote 4h ago". Then requiring "python" case-sensitively missed every
+    real run on macOS, where a venv execs a framework build called "Python",
+    and reported no run beside "last wrote 4s ago". A run is a Python process
+    whose arguments include this script -- nothing that merely names it, and
+    nothing excluded for how its interpreter happens to be capitalised."""
     fake_ps = (
         "  501 /bin/sh -c cd /repo && ./venv/bin/python scripts/backfill_documents.py --status\n"
         "  502 grep --color=auto backfill_documents.py\n"
         "  503 /repo/venv/bin/python scripts/backfill_documents.py --dataset state\n"
         "  504 /usr/bin/vim scripts/backfill_documents.py\n"
+        # What a venv actually execs on macOS: the framework build, whose
+        # basename is capitalised. Matching case-sensitively missed every real
+        # run on this machine while still passing every other test here.
+        "  505 /Library/Frameworks/Python.framework/Versions/3.9/Resources/"
+        "Python.app/Contents/MacOS/Python scripts/backfill_documents.py --dataset purchase-order\n"
     )
 
     class Done:
         stdout = fake_ps
 
     monkeypatch.setattr(backfill.subprocess, "run", lambda *a, **k: Done())
-    assert backfill.running_elsewhere() == [503]
+    assert backfill.running_elsewhere() == [503, 505]
 
 
 def test_ps_failing_is_reported_as_unknown_not_as_absence(monkeypatch):

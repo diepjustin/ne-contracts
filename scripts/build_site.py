@@ -947,7 +947,19 @@ def document_positions(view_tokens):
     from scrape import load_documents  # noqa: E402
 
     row_of = {token: i for i, token in enumerate(view_tokens) if token}
-    where = {}
+
+    # Every row starts mapped by its own View URL, which is how descriptions
+    # were keyed before records could have more than one document. This is not
+    # a fallback for missing data -- documents.jsonl deliberately stores a
+    # document list only for records publishing several, so the ~95% that
+    # publish one appear nowhere below. Building the map from that file alone
+    # dropped 532,720 rows' descriptions, and a local build hid it completely:
+    # carry_descriptions_forward had them from the previous payload, so the
+    # count looked right while the join underneath answered almost nothing. CI
+    # has no previous build to carry from, and published 18,305 descriptions
+    # where the site had 543,000.
+    where = {token: (row, 0, True) for token, row in row_of.items()}
+
     for entry in load_documents(os.path.join(ROOT, "data", "documents.jsonl")).values():
         documents = entry.get("documents")
         if not documents:

@@ -315,3 +315,34 @@ def test_a_row_whose_primary_has_drifted_is_still_matched(monkeypatch, tmp_path)
          {"tok": "csv-primary", "doc": "D1", "source": "cover_sheet", "description": "OLD"}])
     assert descriptions[0] == b"OLD"
     assert documents[0] == 1          # its position in the state's list today
+
+
+def test_a_row_with_one_document_still_gets_its_description(monkeypatch, tmp_path):
+    """The case that took 532,720 descriptions off the live site.
+
+    documents.jsonl stores a document list only for records publishing more
+    than one, so the ~95% publishing a single document appear in it with no
+    list at all. A token map built from that file alone therefore knows almost
+    nothing, and every ordinary row's description stops matching.
+
+    It survived local builds because carry_descriptions_forward supplied those
+    descriptions from the previous payload, so the totals looked right while
+    the join beneath them answered for 18,305 rows out of 543,000. carry=False
+    here is what CI does on a fresh build, and it is the only way to see it."""
+    entry = {"k": "k1", "doc": "D1", "entity": "E", "n": 1}      # no document list
+    descriptions, _sources, documents = _run(
+        monkeypatch, tmp_path, ["only-doc"], [entry],
+        [{"tok": "only-doc", "doc": "D1", "source": "line_items",
+          "description": "ORDINARY ROW"}])
+    assert descriptions[0] == b"ORDINARY ROW"
+    assert documents[0] == 0
+
+
+def test_a_row_absent_from_the_documents_log_still_matches(monkeypatch, tmp_path):
+    """A record scraped after the last backfill is in no document log at all.
+    Its description must still join, on the View URL the CSV already holds."""
+    descriptions, _sources, _documents = _run(
+        monkeypatch, tmp_path, ["never-backfilled"], [],
+        [{"tok": "never-backfilled", "doc": "D9", "source": "line_items",
+          "description": "SCRAPED LAST NIGHT"}])
+    assert descriptions[0] == b"SCRAPED LAST NIGHT"

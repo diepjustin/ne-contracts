@@ -592,7 +592,7 @@ def main():
     meta["digests"][ne_format.VENDORS] = zlib.crc32(
         bytes(len(v) for v in vendor_names) + b"".join(vendor_names))
 
-    descriptions, desc_sources = load_descriptions(view_tokens)
+    descriptions, desc_sources, desc_documents = load_descriptions(view_tokens)
     meta["descCount"] = len(descriptions)
     meta["descBytes"] = sum(len(d) for d in descriptions.values())
     add_source_meta(meta, desc_sources)
@@ -611,6 +611,7 @@ def main():
     ne_format.write_token_blocks(outdir, dn_bytes, view_bytes, n)
     ne_format.write_desc_blocks(outdir, descriptions, n)
     ne_format.write_desc_sources(outdir, desc_sources, n)
+    ne_format.write_desc_documents(outdir, desc_documents, n)
     ne_format.write_xdoc_blocks(outdir, xdoc_packed, n)
     meta["bytes"][ne_format.DESC_SRC] = os.path.getsize(
         os.path.join(outdir, ne_format.DESC_SRC))
@@ -618,6 +619,10 @@ def main():
     # one of those files.
     meta["digests"][ne_format.DESC_SRC] = zlib.crc32(
         open(os.path.join(outdir, ne_format.DESC_SRC), "rb").read())
+    meta["bytes"][ne_format.DESC_DOC] = os.path.getsize(
+        os.path.join(outdir, ne_format.DESC_DOC))
+    meta["digests"][ne_format.DESC_DOC] = zlib.crc32(
+        open(os.path.join(outdir, ne_format.DESC_DOC), "rb").read())
     write_search_index(outdir, descriptions, meta)
     write_vendor_groups(outdir, vendor_names, columns, meta)
     write_selftest(outdir, sources, columns["viewPresent"], n)
@@ -685,7 +690,7 @@ def add_descriptions_to_build():
         if columns["viewPresent"][i]:
             view_tokens[i] = quote(base64.b64encode(view[i]).decode(), safe="")
 
-    descriptions, desc_sources = load_descriptions(view_tokens, carry=False)
+    descriptions, desc_sources, desc_documents = load_descriptions(view_tokens, carry=False)
     if not descriptions:
         sys.exit(f"nothing to attach — {SCOPE_JSONL} is missing or matched no rows")
 
@@ -695,6 +700,7 @@ def add_descriptions_to_build():
     # cols.u8.bin, and a source column stranded there would say every row has
     # no description while the blocks beside it hold 540,000.
     ne_format.write_desc_sources(outdir, desc_sources, n)
+    ne_format.write_desc_documents(outdir, desc_documents, n)
     meta.setdefault("bytes", {})[ne_format.DESC_SRC] = os.path.getsize(
         os.path.join(outdir, ne_format.DESC_SRC))
     meta.setdefault("digests", {})[ne_format.DESC_SRC] = zlib.crc32(
@@ -890,7 +896,7 @@ def carry_descriptions_forward(view_tokens):
 # "we did not keep it", and the page says nothing rather than guessing.
 DESC_SOURCES = ("", "line_items", "cover_sheet", "services_clause",
                 "cover_sheet_form", "purchasing_bureau", "direct_purchase",
-                "unknown")
+                "unknown", "contract_description")
 DESC_SOURCE_CODE = {name: i for i, name in enumerate(DESC_SOURCES) if name}
 
 # What the page prints above a description. Kept here rather than in index.html
@@ -904,6 +910,7 @@ DESC_SOURCE_LABELS = {
     "cover_sheet_form": "The University cover sheet's description-of-purchase field",
     "purchasing_bureau": "The State Purchasing Bureau's description of the award",
     "direct_purchase": "The state's note that this purchase produced no contract",
+    "contract_description": "The Department of Transportation's contract description and project location",
     "unknown": "",
 }
 
@@ -924,8 +931,38 @@ def add_source_meta(meta, desc_sources):
     meta["descSourceCounts"] = [counts.get(code, 0) for code in range(len(DESC_SOURCES))]
 
 
+def document_positions(view_tokens):
+    """token -> (row, position in the state's list, is this the row's primary).
+
+    Rows are identified by whichever of their documents the CSV's View URL
+    points at, not by assuming that is the state's first: documents are not
+    listed in date order, and a newly filed one can sort ahead of the one a
+    row already carries. 197 rows had already moved by Aug 2026.
+
+    Position is the state's own ordering, because that is what the page ships
+    in its xdoc blocks and therefore what "the description came from this one"
+    has to index into.
+    """
+    sys.path.insert(0, os.path.join(ROOT, "scripts"))
+    from scrape import load_documents  # noqa: E402
+
+    row_of = {token: i for i, token in enumerate(view_tokens) if token}
+    where = {}
+    for entry in load_documents(os.path.join(ROOT, "data", "documents.jsonl")).values():
+        documents = entry.get("documents")
+        if not documents:
+            continue
+        primary = next((d["token"] for d in documents if d["token"] in row_of), None)
+        if primary is None:
+            continue          # a record whose row this build does not carry
+        row = row_of[primary]
+        for position, d in enumerate(documents):
+            where[d["token"]] = (row, position, d["token"] == primary)
+    return where
+
+
 def load_descriptions(view_tokens, carry=True):
-    """(row -> description bytes, row -> source code), keyed off view tokens.
+    """(row -> description bytes, row -> source code, row -> document), keyed off tokens.
 
     scripts/extract_scope.py records the token it was fetched under, which is
     the same string the scrape found in the View URL -- an exact key, unlike
@@ -945,25 +982,47 @@ def load_descriptions(view_tokens, carry=True):
     # knowable. Recorded as such, and overwritten below by anything scope.jsonl
     # also covers -- which, on a build with a current scope.jsonl, is all of it.
     sources = {row: DESC_SOURCE_CODE["unknown"] for row in descriptions}
+    # Which of the record's documents a row's description was read from, as a
+    # position in the state's list. Carried-forward text was joined by the
+    # row's own View URL, so it came from the primary.
+    documents = dict.fromkeys(descriptions, 0)
 
     if not os.path.exists(SCOPE_JSONL):
         if not descriptions:
             print(f"note: no {SCOPE_JSONL} and nothing to carry forward — "
                   "building without descriptions")
-        return descriptions, sources
+        return descriptions, sources, documents
 
-    row_of = {token: i for i, token in enumerate(view_tokens) if token}
-    added, unmatched = 0, 0
+    # A row is described by its primary if the primary says anything at all.
+    # Only where it says nothing do the record's other documents get a turn,
+    # in the state's order. Nothing already published is ever displaced: an
+    # amendment's words are about the amendment, and swapping them in over a
+    # contract's own description would change what the page says a record is
+    # for without anyone asking for it.
+    def rank(is_primary, position):
+        return 0 if is_primary else 1 + position
+
+    where = document_positions(view_tokens)
+    best = {row: 0 for row in descriptions}
+    added = filled = unmatched = 0
     unnamed = collections.Counter()
     with open(SCOPE_JSONL, encoding="utf-8") as f:
         for line in f:
             record = json.loads(line)
-            row = row_of.get(record["tok"])
-            if row is None:
+            found = where.get(record["tok"])
+            if found is None:
                 unmatched += 1
+                continue
+            row, position, is_primary = found
+            here = rank(is_primary, position)
+            # Strictly better wins; equal rank lets scope.jsonl overlay what was
+            # carried forward, which is the same document read more recently.
+            if row in best and best[row] < here:
                 continue
             if row not in descriptions:
                 added += 1
+                if not is_primary:
+                    filled += 1
             descriptions[row] = record["description"].encode("utf-8")
             source = record.get("source") or ""
             if source and source not in DESC_SOURCE_CODE:
@@ -972,14 +1031,19 @@ def load_descriptions(view_tokens, carry=True):
                 # the block beside it, so it is named "unknown" and counted.
                 unnamed[source] += 1
             sources[row] = DESC_SOURCE_CODE.get(source, DESC_SOURCE_CODE["unknown"])
+            documents[row] = position
+            best[row] = here
 
     print(f"descriptions  : {len(descriptions):,} joined to rows"
           + (f", {added:,} new since the last build" if added else "")
           + (f", {unmatched:,} unmatched" if unmatched else ""))
+    if filled:
+        print(f"                {filled:,} of those read from a document other than "
+              "the record's first, where the first said nothing")
     for source, count in unnamed.most_common():
         print(f"    note: {count:,} rows carry source {source!r}, which this build "
               f"does not know — add it to DESC_SOURCES to label them")
-    return descriptions, sources
+    return descriptions, sources, documents
 
 
 SELFTEST_ROWS = 1000

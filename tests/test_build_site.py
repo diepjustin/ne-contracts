@@ -7,6 +7,7 @@ the wrong row shows one contract's words beside another's money. None of these
 announce themselves, which is exactly why they need tests.
 """
 
+import json
 import os
 import sys
 
@@ -222,3 +223,95 @@ def test_two_document_less_rows_in_one_group_cannot_both_be_the_bare_permalink()
     assert groups == [[0, 1, 2]]
     missing = [r for r in groups[0] if not tokens[r]]
     assert len(missing) == 2      # build_site.main() exits on exactly this
+
+
+# --- which document a description is read from ------------------------------
+#
+# Until Aug 2026 a row's description could only come from its first document,
+# because that was the only one the scraper had ever captured. Now a record
+# publishing several can be described by a later one -- but only where the
+# first says nothing. An amendment's words are about the amendment, and
+# swapping them in over a contract's own description would quietly change what
+# the page says a record is for.
+
+def _scope(tmp_path, records):
+    path = tmp_path / "scope.jsonl"
+    with open(path, "w", encoding="utf-8") as f:
+        for r in records:
+            f.write(json.dumps(r) + "\n")
+    return str(path)
+
+
+def _documents(tmp_path, entries):
+    path = tmp_path / "documents.jsonl"
+    with open(path, "w", encoding="utf-8") as f:
+        for e in entries:
+            f.write(json.dumps(e) + "\n")
+    return str(path)
+
+
+def _run(monkeypatch, tmp_path, view_tokens, docs_entries, scope_records):
+    import build_site
+    monkeypatch.setattr(build_site, "ROOT", str(tmp_path))
+    monkeypatch.setattr(build_site, "SCOPE_JSONL", _scope(tmp_path, scope_records))
+    (tmp_path / "data").mkdir(exist_ok=True)
+    os.replace(_documents(tmp_path, docs_entries),
+               str(tmp_path / "data" / "documents.jsonl"))
+    return build_site.load_descriptions(view_tokens, carry=False)
+
+
+def test_the_first_document_still_wins_when_it_says_anything(monkeypatch, tmp_path):
+    """Nothing already published is displaced by an amendment."""
+    entry = {"k": "k1", "doc": "D1", "entity": "E", "n": 2,
+             "documents": [{"name": "A", "size": "1Mb", "token": "primary"},
+                           {"name": "B", "size": "1Mb", "token": "extra"}]}
+    descriptions, _sources, documents = _run(
+        monkeypatch, tmp_path, ["primary"], [entry],
+        [{"tok": "extra", "doc": "D1", "source": "cover_sheet", "description": "AMENDMENT"},
+         {"tok": "primary", "doc": "D1", "source": "cover_sheet", "description": "CONTRACT"}])
+    assert descriptions[0] == b"CONTRACT"
+    assert documents[0] == 0
+
+
+def test_a_later_document_fills_a_blank_and_says_which(monkeypatch, tmp_path):
+    """The whole point: 22,342 rows show nothing while a document behind them
+    does. The position recorded is the state's own ordering, so the panel marks
+    the document the words actually came from."""
+    entry = {"k": "k1", "doc": "D1", "entity": "E", "n": 3,
+             "documents": [{"name": "A", "size": "1Mb", "token": "primary"},
+                           {"name": "B", "size": "1Mb", "token": "second"},
+                           {"name": "C", "size": "1Mb", "token": "third"}]}
+    descriptions, _sources, documents = _run(
+        monkeypatch, tmp_path, ["primary"], [entry],
+        [{"tok": "third", "doc": "D1", "source": "cover_sheet", "description": "FROM THIRD"}])
+    assert descriptions[0] == b"FROM THIRD"
+    assert documents[0] == 2
+
+
+def test_the_earliest_document_wins_among_several_blanks(monkeypatch, tmp_path):
+    """Deterministic, and it is the state's order rather than ours."""
+    entry = {"k": "k1", "doc": "D1", "entity": "E", "n": 3,
+             "documents": [{"name": "A", "size": "1Mb", "token": "primary"},
+                           {"name": "B", "size": "1Mb", "token": "second"},
+                           {"name": "C", "size": "1Mb", "token": "third"}]}
+    descriptions, _sources, documents = _run(
+        monkeypatch, tmp_path, ["primary"], [entry],
+        [{"tok": "third", "doc": "D1", "source": "cover_sheet", "description": "THIRD"},
+         {"tok": "second", "doc": "D1", "source": "cover_sheet", "description": "SECOND"}])
+    assert descriptions[0] == b"SECOND"
+    assert documents[0] == 1
+
+
+def test_a_row_whose_primary_has_drifted_is_still_matched(monkeypatch, tmp_path):
+    """The CSV points at a document the state no longer lists first. That row's
+    own document still identifies it, and still outranks the newer arrival --
+    it is the one its existing description was read from."""
+    entry = {"k": "k1", "doc": "D1", "entity": "E", "n": 2,
+             "documents": [{"name": "NEW", "size": "1Mb", "token": "newcomer"},
+                           {"name": "OLD", "size": "1Mb", "token": "csv-primary"}]}
+    descriptions, _sources, documents = _run(
+        monkeypatch, tmp_path, ["csv-primary"], [entry],
+        [{"tok": "newcomer", "doc": "D1", "source": "cover_sheet", "description": "NEW"},
+         {"tok": "csv-primary", "doc": "D1", "source": "cover_sheet", "description": "OLD"}])
+    assert descriptions[0] == b"OLD"
+    assert documents[0] == 1          # its position in the state's list today

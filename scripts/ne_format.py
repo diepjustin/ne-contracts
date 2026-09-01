@@ -24,6 +24,7 @@ Layout, where n = row count and V = vendor count:
     cols.u8.bin      status[n], entity[n], type[n], adnIdx[n],
                      viewPresent[n], docLen[n], docCount[n]    (1 byte each)
     descsrc.bin      descSource[n]                             (1 byte each)
+    descdoc.bin      descDocument[n]                           (1 byte each)
     docs.bin         document numbers, packed, no separators
     vendors.bin      len[V] as u8, then vendor names packed as UTF-8
     vtok.bin         units[V] as u8, then V tokens packed as raw bytes
@@ -90,6 +91,7 @@ TOK_DIR = "tok"
 DESC_DIR = "desc"
 XDOC_DIR = "xdoc"
 DESC_SRC = "descsrc.bin"
+DESC_DOC = "descdoc.bin"
 WORDS = "words.bin"
 POSTINGS = "postings.bin"
 VGROUP = "vgroup.bin"
@@ -279,6 +281,38 @@ def write_desc_sources(outdir, sources, n):
         column[row] = code
     with open(os.path.join(outdir, DESC_SRC), "wb") as f:
         f.write(column.tobytes())
+
+
+def write_desc_documents(outdir, positions, n):
+    """Which of a record's documents each description was read from.
+
+    A position in the state's own list, so it indexes the same order the xdoc
+    blocks ship. 0 for a row described by its first document and for a row with
+    no description at all -- the page asks whether there *is* one before it
+    reads this, so the two never have to be told apart here.
+
+    Its own file for the same reason as descsrc.bin: --descriptions-only writes
+    descriptions onto a built payload without touching a resident column, and a
+    column there would go stale saying every description came from the first
+    document while the blocks beside it said otherwise.
+    """
+    column = array.array("B", bytes(n))
+    for row, position in positions.items():
+        column[row] = min(position, 255)
+    with open(os.path.join(outdir, DESC_DOC), "wb") as f:
+        f.write(column.tobytes())
+
+
+def read_desc_documents(outdir, n):
+    path = os.path.join(outdir, DESC_DOC)
+    if not os.path.exists(path):
+        return None          # a payload built before this file existed
+    data = open(path, "rb").read()
+    if len(data) != n:
+        raise ValueError(f"{DESC_DOC} is {len(data)} bytes, expected {n}")
+    column = array.array("B")
+    column.frombytes(data)
+    return column
 
 
 def read_desc_sources(outdir, n):

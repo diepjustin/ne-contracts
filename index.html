@@ -346,6 +346,7 @@
   var COLS_I32 = "cols.i32.bin", COLS_F64 = "cols.f64.bin", COLS_U8 = "cols.u8.bin";
   var DOCS = "docs.bin", VENDORS = "vendors.bin", VTOK = "vtok.bin";
   var DESC_SRC = "descsrc.bin";
+  var DESC_DOC = "descdoc.bin";
   var RESIDENT = [COLS_I32, COLS_F64, COLS_U8, DOCS, VENDORS];
 
   // --- payload ------------------------------------------------------------
@@ -365,7 +366,7 @@
   var vgroup = null, groupNames = [], groupSpend = null;
   // One byte per row naming the parser its description came from; null on a
   // payload built before descsrc.bin existed.
-  var descSrc = null;
+  var descSrc = null, descDoc = null;
   var vtokLoad = null;           // promise for vtok.bin, fetched only when needed
 
   // --- view state ---------------------------------------------------------
@@ -589,7 +590,7 @@
       .then(function (got) {
         RESIDENT.forEach(function (f, i) { files[f] = got[i]; });
         decode();
-        return Promise.all([loadVendorGroups(), loadDescSources()]);
+        return Promise.all([loadVendorGroups(), loadDescSources(), loadDescDocuments()]);
       });
   }
 
@@ -683,6 +684,22 @@
         $("descfield").hidden = false;
       }, function () {
         descSrc = null;
+      });
+  }
+
+  // Which of a record's documents each description was read from. Absent on a
+  // payload built before Aug 2026, and the panel then falls back to marking
+  // the record's first document, which is what those builds always meant.
+  function loadDescDocuments() {
+    if (!hasDesc) return Promise.resolve();
+    return fetch(BASE + dir + DESC_DOC).then(ok)
+      .then(function (r) { return r.arrayBuffer(); })
+      .then(function (ab) {
+        need(ab.byteLength === N,
+             DESC_DOC + " is " + ab.byteLength + " bytes for " + N + " rows");
+        descDoc = new Uint8Array(ab);
+      }, function () {
+        descDoc = null;
       });
   }
 
@@ -1353,11 +1370,17 @@
       // many more there are. The state's own page, linked below, is the
       // complete list and the authoritative one.
       var SHOWN = 6;
-      var html = documents.slice(0, SHOWN).map(function (d) {
+      // Which document the description was read from, by its place in the
+      // state's list. Until Aug 2026 this was always the record's first,
+      // because that was the only one ever read; now a record whose first
+      // document says nothing can be described by a later one, and the marker
+      // has to follow -- a page that named the wrong source would be making a
+      // false statement about its own provenance.
+      var from = descDoc ? descDoc[id] : 0;
+      var html = documents.slice(0, SHOWN).map(function (d, i) {
         var url = meta.viewBase + encodeURIComponent(d.token);
-        // Which one the description came from. Saying so matters: the text
-        // below is one document's words, not a summary of the whole record.
-        var note = url === primaryUrl ? '<i>description read from this one</i>' : "";
+        var note = (descDoc ? i === from : url === primaryUrl)
+          ? '<i>description read from this one</i>' : "";
         return '<div class="doc-row"><a href="' + esc(url) + '" target="_blank" ' +
                'rel="noopener">' + esc(d.name) + "</a>" +
                '<span class="doc-size">' + esc(d.size) + "</span>" + note + "</div>";

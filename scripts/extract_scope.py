@@ -372,6 +372,50 @@ def from_direct_purchase(text):
 # Anchored to the start of a line. Unanchored it also matches inside running
 # contract prose ("...agreement to provide a certain number of shows..."),
 # which would publish a fragment of one clause as the contract's scope.
+# The Department of Transportation's own "Contract Description" field, off its
+# change-order and award reports. A labelled field the state filled in, not
+# prose to be interpreted -- the same kind of thing as the direct-purchase
+# notice, and lifted the same way.
+#
+# The value runs until the next column of the report, which the text extraction
+# renders as a run of spaces, or until one of the labels that follows it.
+# The fields of the Department of Transportation's change-order report, named
+# rather than guessed at. Two attempts to infer where a value ends both failed
+# on real documents and are worth recording: stopping at a run of whitespace
+# reads only the first line of a value the PDF wrapped ("I-80," for a location
+# that continues), and stopping at "any run of capitalised words then a colon"
+# fires inside the value itself, because "WEEPING WATER SPUR Contract
+# Description:" fits that shape exactly and truncated the location to "S13K,".
+#
+# Enumerating is safe here only because from_contract_description refuses to
+# run on any document that is not this report.
+DOT_REPORT_LABELS = "|".join([
+    "Special Notes", "Contract Description", "Change Order Approval Date",
+    "Letting Date", "Change Order Type", "Change Order Nbr", "Change Order Report Date",
+    "Primary Project Information", "Project Information",
+    "Primary Project Location", "Project Location",
+    "Zero Dollar Change Order", "Work Force Account ID", "Contract ID",
+    "Potential for Design Error/Omission", "Vendor", "Page",
+    "Prev Revised", "This Change", "Pct Change", "Funding Split",
+    "Suppl Description", "CO Item Description", "Revised Total",
+])
+NEXT_LABEL = rf"(?=\s+(?:{DOT_REPORT_LABELS})\s*:|$)"
+
+# A value that contains one of the form's own field names ran into a label
+# rather than stopping at it, which happens where the report prints the field
+# empty. Eleven documents in 4,080 did, and they produced "Change Order
+# Approval Date — Contract Description" as a contract's scope. Cheap to detect
+# and not worth trying to parse: a blank field is a blank description.
+RAN_INTO_A_LABEL = re.compile(DOT_REPORT_LABELS, re.IGNORECASE)
+
+# Matched against the text with its whitespace flattened, never the raw
+# extraction, so a value the PDF wrapped is still read whole.
+CONTRACT_DESCRIPTION = re.compile(
+    r"Contract Description:\s*(.{3,200}?)" + NEXT_LABEL, re.IGNORECASE)
+
+PROJECT_LOCATION = re.compile(
+    r"Primary Project Location:\s*(.{3,120}?)" + NEXT_LABEL, re.IGNORECASE)
+
 PURCHASING_BUREAU = re.compile(
     r"(?m)^[ \t]*((?:Contract|One Time Purchase|Purchase Order)\s+to\s+"
     r"(?:supply|provide|furnish)\b[^\n]*)")
@@ -589,6 +633,68 @@ def from_line_items(text):
     return university_items(flat, text) or state_items(flat)
 
 
+def from_contract_description(text):
+    """The Department of Transportation's own "Contract Description" field.
+
+    Ranked last with from_purchasing_bureau, so it only ever fills a blank and
+    nothing already described changes. The location field printed beside it is
+    joined on, because the work shorthand alone never says where.
+
+    What it returns is highway shorthand -- "GRAD CONC PAVE CULV SEED BR GDRL
+    FENCE ELEC SIGN" is grading, concrete paving, culverts, seeding, bridge,
+    guardrail, fence, electrical and signs. Terse, and jargon, and the state's
+    own words for what the contract covers, which is the standard everything
+    else here is held to. Measured over the corpus: 2,371 documents carry it,
+    median 31 characters, a tenth of them under twelve.
+
+    Those short ones are the reason for the length floor. A field reading
+    "MISC" satisfies "this row has a description" while telling a reader
+    nothing, and a blank at least says plainly that we could not describe it.
+    Four characters is not much of a bar, but it is the one that keeps the
+    emptiest of them out.
+
+    Two neighbouring labels were tried and rejected, both for the same reason
+    and it is worth recording so nobody re-tries them: "Change Order
+    Description:" appears on 1,294 documents with the field left empty, so
+    anything after it is the *next* field -- "DocuSign Envelope ID:
+    FA5BA6D3-..." became a contract's description in testing. "Scope of Work"
+    matched 113 and captured the middle of a sentence. Both would have raised
+    the parse rate and lowered the accuracy, which this project has already
+    paid for once.
+    """
+    # Confined to the report this was built and checked against, which is
+    # identified by the location field printed beside the description. Other
+    # forms use the same label for something else entirely -- a HIPAA business
+    # associate agreement fills it with the obligations it imposes, wrapped
+    # over several lines, and this parser stops at the first of them. Reading
+    # only the first line of a wrapped field is the exact bug that truncated
+    # 93% of the University purchase-order descriptions, so a form nobody has
+    # verified this against does not get parsed at all.
+    flat = " ".join(text.split())
+    where = PROJECT_LOCATION.search(flat)
+    if not where:
+        return None
+
+    match = CONTRACT_DESCRIPTION.search(flat)
+    if not match:
+        return None
+    value = " ".join(match.group(1).split()).strip(" :-")
+    if len(value) < 4 or RAN_INTO_A_LABEL.search(value):
+        return None
+
+    # Both are the state's own labelled fields off the same report, and the
+    # work field alone is close to unreadable without the place: "GRAD SEED BR
+    # GDRL BIT" tells you a road was graded, seeded, bridged, guardrailed and
+    # surfaced, but not which road. Joined with an em dash because the
+    # locations are full of hyphens themselves -- "US-275, N-64 - L28B".
+    place = " ".join(where.group(1).split()).strip(" :-")
+    if RAN_INTO_A_LABEL.search(place):
+        place = ""
+    if len(place) >= 3 and place.lower() not in value.lower():
+        value = f"{value} \u2014 {place}"
+    return value
+
+
 def describe(text):
     """(source, description, items) for one document, or None if it says nothing.
 
@@ -623,6 +729,10 @@ def describe(text):
     bureau = from_purchasing_bureau(text)
     if bureau:
         return "purchasing_bureau", bureau, []
+
+    highway = from_contract_description(text)
+    if highway:
+        return "contract_description", highway, []
 
     return None
 

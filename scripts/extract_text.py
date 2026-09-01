@@ -355,6 +355,53 @@ def extract_one(dn, tok, view_base, store_chars, delay=None):
     return tok, result
 
 
+def extra_document_targets():
+    """(view_base, [(document number, view token), ...]) for the *other* documents.
+
+    load_targets below returns one token per row -- the record's primary
+    document, which is all the scraper used to capture. Since Aug 2026
+    data/documents.jsonl holds every document each record publishes, and
+    37,596 records publish more than one: 73,690 documents nobody has ever
+    read, sitting behind 22,342 rows the site shows no description for.
+
+    Ordered so rows with no description come first. This fetch is expected to
+    be stopped, and that way stopping early has already bought the descriptions
+    that were missing rather than re-reading records that already have one.
+
+    Primaries are excluded: load_targets already covers them, and
+    doc_text.jsonl would skip them on its checkpoint regardless.
+    """
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from scrape import load_documents  # noqa: E402
+
+    with open(os.path.join(ROOT, "manifest.json"), encoding="utf-8") as f:
+        outdir = os.path.join(ROOT, json.load(f)["dir"])
+    with open(os.path.join(outdir, "meta.json"), encoding="utf-8") as f:
+        view_base = json.load(f)["viewBase"]
+
+    described = set()
+    scope = os.path.join(ROOT, "data", "scope.jsonl")
+    if os.path.exists(scope):
+        with open(scope, encoding="utf-8") as f:
+            for line in f:
+                try:
+                    described.add(json.loads(line)["tok"])
+                except (json.JSONDecodeError, KeyError):
+                    continue
+
+    blank, already = [], []
+    for entry in load_documents(os.path.join(ROOT, "data", "documents.jsonl")).values():
+        documents = entry.get("documents")
+        if not documents or len(documents) < 2:
+            continue
+        extras = [(entry["doc"], d["token"]) for d in documents[1:]]
+        (already if documents[0]["token"] in described else blank).extend(extras)
+
+    print(f"{len(blank):,} documents behind rows with no description, "
+          f"{len(already):,} behind rows that already have one")
+    return view_base, blank + already
+
+
 def load_targets(group=None, entities=None):
     """(view_base, [(document number, view token), ...]) for documents with a file.
 
@@ -462,6 +509,9 @@ def main():
                               f"nothing and only raised latency")
     parser.add_argument("--delay", type=float, default=DOWNLOAD_DELAY, metavar="SECONDS",
                          help=f"per-worker pause between fetches (default {DOWNLOAD_DELAY})")
+    parser.add_argument("--extras", action="store_true",
+                        help="read the other documents a record publishes, not its "
+                             "first -- 73,690 of them, blank rows first")
     parser.add_argument("--retry-errors", action="store_true",
                          help="also re-fetch documents whose last attempt errored; without "
                               "this they count as done and are skipped forever")
@@ -472,7 +522,10 @@ def main():
                               "from the HTML answers, which may only have been an outage")
     args = parser.parse_args()
 
-    view_base, targets = load_targets(args.group, entity_filter(args.entities))
+    if args.extras:
+        view_base, targets = extra_document_targets()
+    else:
+        view_base, targets = load_targets(args.group, entity_filter(args.entities))
 
     store = load_checkpoint()
     # A recorded error counts as done, which is right for a resumable run and

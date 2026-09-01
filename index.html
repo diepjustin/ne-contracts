@@ -69,6 +69,24 @@
   }
   input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
   #q { min-width: 260px; }
+  /* Typing to filter 101 agencies. The list floats over the table rather than
+     pushing it down, so the rows behind stay where the reader left them. */
+  .combo { position: relative; display: flex; }
+  #entity-q { min-width: 210px; width: 100%; }
+  #entity-list {
+    position: absolute; top: calc(100% + 2px); left: 0; z-index: 5;
+    /* Wide enough for the longest name rather than the input: the agencies
+       share long prefixes ("University of Nebraska ..."), so a list clipped to
+       the box shows five rows that all read the same. */
+    min-width: 100%; width: max-content; max-width: 420px;
+    margin: 0; padding: 4px 0; list-style: none; max-height: 260px; overflow-y: auto;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
+    box-shadow: 0 6px 20px rgba(0, 0, 0, .28);
+  }
+  #entity-list li { padding: 5px 9px; cursor: pointer; white-space: nowrap; }
+  #entity-list li[aria-selected="true"], #entity-list li:hover { background: var(--accent); color: #fff; }
+  #entity-list .none { color: var(--muted); cursor: default; }
+  #entity-list .none:hover { background: none; color: var(--muted); }
   .check {
     display: flex; align-items: center; gap: 5px; font-size: 13px;
     padding: 7px 0; white-space: nowrap; cursor: pointer; color: var(--text);
@@ -237,8 +255,17 @@
     <select id="status"><option value="">All</option></select>
   </div>
   <div class="field">
-    <label for="entity">Agency</label>
-    <select id="entity"><option value="">All</option></select>
+    <label for="entity-q">Agency</label>
+    <div class="combo">
+      <input id="entity-q" type="text" placeholder="All" autocomplete="off"
+             role="combobox" aria-expanded="false" aria-controls="entity-list"
+             aria-autocomplete="list">
+      <ul id="entity-list" role="listbox" aria-label="Agencies" hidden></ul>
+    </div>
+    <!-- The filter itself. Every reader of this control still asks the select
+         for its value, and its options are indices into meta.entities, so the
+         box above only has to keep this in step. -->
+    <select id="entity" hidden><option value="">All</option></select>
   </div>
   <div class="field">
     <label for="y0">Begins after</label>
@@ -1495,6 +1522,153 @@
       spellingsIn(group) + " spellings. <i>Grouped by us, not by the state.</i></div>";
   }
 
+
+  // ------------------------------------------------------------ agency combo
+  //
+  // 101 agencies is too many to scroll for, so the Agency control is a text box
+  // that filters them. The <select> behind it stays the value holder: every
+  // reader of this filter, the reset button and the permalink loader all go on
+  // asking it for a value, and its options are indices into meta.entities.
+  // Keeping it means this box is a way of setting that value, not a second
+  // source of truth to be kept in step with the first.
+
+  var COMBO_SHOWN = 40;    // enough to scroll, few enough to render on a keystroke
+  var comboOpen = false, comboActive = -1, comboMatches = [];
+
+  function comboClose() {
+    comboOpen = false;
+    comboActive = -1;
+    $("entity-list").hidden = true;
+    $("entity-q").setAttribute("aria-expanded", "false");
+    $("entity-q").removeAttribute("aria-activedescendant");
+  }
+
+  // Substring, not prefix: someone looking for the Department of Roads is far
+  // likelier to type "roads" than "department". The description index answers
+  // a different question and is deliberately prefix-only; this list is 101
+  // strings in memory, so it can afford to be generous.
+  function comboFilter(query) {
+    var q = query.trim().toLowerCase();
+    var out = [];
+    for (var i = 0; i < meta.entities.length; i++) {
+      if (!q || meta.entities[i].toLowerCase().indexOf(q) !== -1) out.push(i);
+      if (out.length >= COMBO_SHOWN) break;
+    }
+    return out;
+  }
+
+  function comboRender(query) {
+    comboMatches = comboFilter(query);
+    var list = $("entity-list"), html = "";
+    if (!query.trim()) {
+      html += '<li role="option" data-i="" id="entity-opt-all">All agencies</li>';
+    }
+    if (!comboMatches.length && query.trim()) {
+      html = '<li class="none">No agency matches that</li>';
+    } else {
+      html += comboMatches.map(function (i, k) {
+        return '<li role="option" id="entity-opt-' + k + '" data-i="' + i + '">' +
+               esc(meta.entities[i]) + "</li>";
+      }).join("");
+    }
+    list.innerHTML = html;
+    list.hidden = false;
+    comboOpen = true;
+    comboActive = -1;
+    $("entity-q").setAttribute("aria-expanded", "true");
+
+    // The Agency control sits at the end of the controls row, and the list is
+    // wider than it, so left-aligned it runs off the side of the window and
+    // clips the longest names -- which are the ones worth reading. Measure and
+    // hang it off the right edge instead when that would happen.
+    list.style.left = "0";
+    list.style.right = "auto";
+    if (list.getBoundingClientRect().right > document.documentElement.clientWidth - 8) {
+      list.style.left = "auto";
+      list.style.right = "0";
+    }
+  }
+
+  function comboItems() {
+    return $("entity-list").querySelectorAll('li[role="option"]');
+  }
+
+  function comboHighlight(next) {
+    var items = comboItems();
+    if (!items.length) return;
+    if (comboActive >= 0) items[comboActive].removeAttribute("aria-selected");
+    comboActive = (next + items.length) % items.length;
+    var el = items[comboActive];
+    el.setAttribute("aria-selected", "true");
+    $("entity-q").setAttribute("aria-activedescendant", el.id);
+    // Keep the highlighted row in view when arrowing past the visible window.
+    var box = $("entity-list");
+    if (el.offsetTop < box.scrollTop) box.scrollTop = el.offsetTop;
+    else if (el.offsetTop + el.offsetHeight > box.scrollTop + box.clientHeight) {
+      box.scrollTop = el.offsetTop + el.offsetHeight - box.clientHeight;
+    }
+  }
+
+  // The one place this box writes to the select. Assigning .value does not fire
+  // a change event, so it is dispatched -- that is what every other filter
+  // relies on to re-render, and doing it here keeps them all on one path.
+  function comboChoose(index) {
+    var select = $("entity");
+    select.value = index === "" ? "" : String(index);
+    $("entity-q").value = index === "" ? "" : meta.entities[index];
+    comboClose();
+    select.dispatchEvent(new Event("change"));
+  }
+
+  function armEntityCombo() {
+    var input = $("entity-q"), list = $("entity-list");
+
+    input.addEventListener("input", function () { comboRender(input.value); });
+    input.addEventListener("focus", function () { comboRender(input.value); });
+
+    input.addEventListener("keydown", function (ev) {
+      if (ev.key === "ArrowDown" || ev.key === "ArrowUp") {
+        ev.preventDefault();
+        if (!comboOpen) return comboRender(input.value);
+        comboHighlight(comboActive + (ev.key === "ArrowDown" ? 1 : -1));
+      } else if (ev.key === "Enter") {
+        if (!comboOpen) return;
+        ev.preventDefault();
+        var items = comboItems();
+        // Enter with nothing highlighted takes the only match, which is what a
+        // reader who typed enough to narrow it to one expects.
+        var pick = comboActive >= 0 ? items[comboActive] : (items.length === 1 ? items[0] : null);
+        if (pick) comboChoose(pick.dataset.i === "" ? "" : +pick.dataset.i);
+      } else if (ev.key === "Escape") {
+        if (comboOpen) { ev.stopPropagation(); comboClose(); }
+      }
+    });
+
+    // mousedown, not click: the input's blur would close the list first.
+    list.addEventListener("mousedown", function (ev) {
+      var li = ev.target.closest("li[role=option]");
+      if (!li) return;
+      ev.preventDefault();
+      comboChoose(li.dataset.i === "" ? "" : +li.dataset.i);
+    });
+
+    input.addEventListener("blur", function () {
+      // A half-typed agency is not a filter. Put back whatever the select
+      // actually holds, so the box never shows a narrowing that is not applied.
+      window.setTimeout(function () {
+        comboClose();
+        syncEntityInput();
+      }, 0);
+    });
+  }
+
+  // The select can be set from elsewhere -- Reset clears it, a permalink sets
+  // it -- and assigning .value fires nothing, so this is called after those.
+  function syncEntityInput() {
+    var v = $("entity").value;
+    $("entity-q").value = v === "" ? "" : meta.entities[+v];
+  }
+
   function armDetail() {
     tbody.addEventListener("click", function (ev) {
       if (!hasDesc) return;        // this build carries no descriptions
@@ -1824,6 +1998,7 @@
     }).sort());
     fill($("status"), meta.statuses);
     fill($("entity"), meta.entities);
+    armEntityCombo();
 
     $("load").hidden = true;
     scroller.hidden = false;
@@ -1854,6 +2029,7 @@
     $("reset").addEventListener("click", function () {
       ["q", "y0", "y1", "min", "max"].forEach(function (id) { $(id).value = ""; });
       ["type", "status", "entity", "desc"].forEach(function (id) { $(id).value = ""; });
+      syncEntityInput();
       $("indesc").checked = false;
       $("baddates").checked = false;
       searchDesc = false;

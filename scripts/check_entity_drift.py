@@ -31,10 +31,12 @@ SKIP_VALUES = {"", "ALL-999-000"}
 
 def fetch_entities(query_type):
     """{display_name: entity_value} as the site serves it right now."""
+    sys.path.insert(0, SCRIPTS)
+    from scrape import USER_AGENT  # noqa: E402 -- one definition, see scrape.py
     resp = requests.get(
         ENTITIES_URL,
         params={"queryType": query_type},
-        headers={"User-Agent": "Mozilla/5.0 (compatible; research scraper)"},
+        headers={"User-Agent": USER_AGENT},
         timeout=30,
     )
     resp.raise_for_status()

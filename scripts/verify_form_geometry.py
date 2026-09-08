@@ -22,8 +22,11 @@ document from the state's server, so keep samples small and infrequent.
 
 where candidates.json is [[view_token, claimed_description], ...].
 """
-import io, json, sys, time, random
+import io, json, os, sys, time, random
 import requests, fitz
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from scrape import USER_AGENT  # noqa: E402 -- one definition, see scrape.py
 
 BASE = "https://statecontracts.nebraska.gov/Search/ViewDocument?D="
 
@@ -57,7 +60,8 @@ if __name__ == "__main__":
     agree = differ = missing = failed = 0
     for tok, claimed in sample:
         try:
-            r = requests.get(BASE + tok, timeout=60)
+            r = requests.get(BASE + tok, timeout=60,
+                             headers={"User-Agent": USER_AGENT})
             if not r.content.startswith(b"%PDF-"):
                 failed += 1; continue
             geo = description_by_geometry(r.content)

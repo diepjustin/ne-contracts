@@ -18,6 +18,20 @@ BASE_URL = "https://statecontracts.nebraska.gov"
 SEARCH_URL = f"{BASE_URL}/Search"
 RESULTS_URL = f"{BASE_URL}/Search/SearchResults"
 
+# Who is asking. Every outbound request in this repo sends this string, and it
+# is defined here because scrape.py is the module the others already import
+# from -- the same reason document_service_healthy() is imported rather than
+# copied. There is one to keep current.
+#
+# It used to read "Mozilla/5.0 (compatible; research scraper)", which is
+# anonymous and, in the Mozilla part, not true. A full run is 20+ hours against
+# a state government server; when that traffic gets noticed, an administrator
+# has two options -- find the operator or block the client -- and the first one
+# should not require guesswork. The URL is a public page saying what this is,
+# who runs it and where the code is, which is enough to be reached through
+# without putting a personal address in anyone's logs.
+USER_AGENT = "ne-contracts/1.0 (+https://diepjustin.github.io/ne-contracts/)"
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # The site splits entities into two categories that behave differently enough
@@ -97,7 +111,7 @@ def build_session():
     """Session with a connection pool sized for our workers and retries on transient failures."""
     session = requests.Session()
     session.headers.update({
-        "User-Agent": "Mozilla/5.0 (compatible; research scraper)",
+        "User-Agent": USER_AGENT,
         "Referer": SEARCH_URL,
     })
     retry = Retry(

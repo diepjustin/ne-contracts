@@ -424,6 +424,23 @@ Each combo reports its median detail-fetch time and flags a sustained climb past
 The healthy baseline is ~0.95s; a run drifting well above that is asking for more than
 the site wants to give.
 
+**Every request says who is asking.** `scrape.USER_AGENT` is
+`ne-contracts/1.0 (+https://diepjustin.github.io/ne-contracts/)`, sent by the scraper, the
+document backfill, `extract_text.py`, `check_entity_drift.py` and
+`verify_form_geometry.py` — one definition, imported rather than copied, for the same
+reason the canary is. It used to read `Mozilla/5.0 (compatible; research scraper)`, which
+is anonymous and, in the Mozilla part, untrue, and `verify_form_geometry.py` sent no
+agent at all, so it went out as `python-requests`. A full run is 20+ hours against a state
+government server; an administrator who notices that traffic has two options, find the
+operator or block the client, and the first should not take detective work. The URL is a
+public page saying what this is and where the code is — enough to be reached through
+without putting a personal address in anyone's logs.
+
+`tests/test_user_agent.py` fails the build on a hard-coded `User-Agent` anywhere in
+`scripts/`, and on any module that makes requests without reaching for the constant. That
+second one is the point: the failure worth guarding against is a *new* fetch site, which
+no existing test would ever call.
+
 ### The document backfill
 
 `scripts/backfill_documents.py` re-asks every record we already hold what it publishes.

@@ -104,8 +104,10 @@ CHUNK_SIZE = 40
 
 
 def build_session():
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from scrape import USER_AGENT  # noqa: E402 -- one definition, see scrape.py
     session = requests.Session()
-    session.headers.update({"User-Agent": "Mozilla/5.0 (compatible; research scraper)"})
+    session.headers.update({"User-Agent": USER_AGENT})
     retry = Retry(
         total=5, connect=5, read=5, backoff_factor=1.5,
         status_forcelist=(429, 500, 502, 503, 504),

@@ -981,6 +981,7 @@
     view = out.subarray(0, count);
     render();
     summarize(total);
+    writeState();
   }
 
   // Whole dollars: a sum over hundreds of thousands of rows is not a figure
@@ -2197,6 +2198,168 @@
     });
   }
 
+  // ------------------------------------------------- filter state in the URL
+  //
+  // Every filter and the sort are written into the query string as they are
+  // applied, so the address bar is always a link to what is on screen: a
+  // reporter can send an editor "Roads, contracts over $1M since 2024" as a
+  // URL rather than as a description of what to click. Values are the state's
+  // own names -- an agency, a status, a type category -- never this build's
+  // indices, which move on every rebuild; the same reasoning as permalink().
+  //
+  // replaceState rather than pushState: a keystroke is not a navigation, and
+  // a Back button that undid the search one character at a time would be
+  // worse than none. Only non-default values are written, so an unfiltered
+  // table has the bare address. ?doc= permalinks are a separate namespace:
+  // openPermalink() reads them first, and this never writes them.
+
+  // Column name per sort key, so a link says sort=amount rather than sort=2.
+  var SORT_NAMES = ["doc", "vendor", "amount", "begins", "ends", "status", "agency", "type"];
+  var DEFAULT_SORT = 2, DEFAULT_DIR = -1;
+
+  // The controls as one plain object. Names rather than indices; "" for unset.
+  function currentState() {
+    var si = $("status").value, ei = $("entity").value, dv = $("desc").value;
+    return {
+      q: $("q").value.trim(),
+      indesc: $("indesc").checked,
+      type: $("type").value,
+      status: si === "" ? "" : meta.statuses[+si],
+      agency: ei === "" ? "" : meta.entities[+ei],
+      from: $("y0").value,
+      through: $("y1").value,
+      min: $("min").value,
+      max: $("max").value,
+      desc: dv === "1" ? "has" : dv === "0" ? "none" : "",
+      baddates: $("baddates").checked,
+      sort: sortKey,
+      dir: sortDir
+    };
+  }
+
+  // A state object as a query string. Pure, so it can be checked from outside
+  // against stateFrom(): what a link says and what the page shows must agree.
+  function queryFor(s) {
+    var p = new URLSearchParams();
+    if (s.q) p.set("q", s.q);
+    if (s.indesc) p.set("indesc", "1");
+    if (s.type) p.set("type", s.type);
+    if (s.status) p.set("status", s.status);
+    if (s.agency) p.set("agency", s.agency);
+    if (s.from) p.set("from", s.from);
+    if (s.through) p.set("through", s.through);
+    if (s.min) p.set("min", s.min);
+    if (s.max) p.set("max", s.max);
+    if (s.desc) p.set("desc", s.desc);
+    if (s.baddates) p.set("baddates", "1");
+    if (s.sort !== DEFAULT_SORT || s.dir !== DEFAULT_DIR) {
+      p.set("sort", SORT_NAMES[s.sort]);
+      p.set("dir", s.dir > 0 ? "asc" : "desc");
+    }
+    return p.toString();
+  }
+
+  // The reverse: a state object from a query string, plus the values it named
+  // that this build cannot honour. A link to an agency the state has since
+  // renamed must not quietly show every agency instead -- the total under it
+  // would then be a claim about the wrong thing -- so those come back for the
+  // page to say out loud rather than being dropped.
+  function stateFrom(params) {
+    var s = { q: params.get("q") || "", indesc: params.get("indesc") === "1",
+              type: "", status: "", agency: "",
+              from: params.get("from") || "", through: params.get("through") || "",
+              min: params.get("min") || "", max: params.get("max") || "",
+              desc: "", baddates: params.get("baddates") === "1",
+              sort: DEFAULT_SORT, dir: DEFAULT_DIR };
+    var ignored = [];
+    // Not `ok`: that is the module-level response checker. Not `dir` below
+    // either: that is the payload directory. no-shadow caught both.
+    function take(name, value, known) {
+      if (value === null || value === "") return;
+      if (known) s[name] = value; else ignored.push(name + " “" + value + "”");
+    }
+    var type = params.get("type");
+    take("type", type, meta.typeGroups.indexOf(type) >= 0);
+    var status = params.get("status");
+    take("status", status, meta.statuses.indexOf(status) >= 0);
+    var agency = params.get("agency");
+    take("agency", agency, meta.entities.indexOf(agency) >= 0);
+    var desc = params.get("desc");
+    take("desc", desc, desc === "has" || desc === "none");
+    var sort = params.get("sort"), way = params.get("dir");
+    if (sort !== null || way !== null) {
+      var k = SORT_NAMES.indexOf(sort);
+      if (k >= 0 && (way === "asc" || way === "desc")) {
+        s.sort = k;
+        s.dir = way === "asc" ? 1 : -1;
+      } else {
+        ignored.push("sort “" + sort + " " + way + "”");
+      }
+    }
+    return { state: s, ignored: ignored };
+  }
+
+  // Put a state onto the controls. Does not apply(): the caller decides,
+  // because searching descriptions needs the index fetched first.
+  function showState(s) {
+    $("q").value = s.q;
+    $("indesc").checked = s.indesc;
+    searchDesc = s.indesc;
+    $("type").value = s.type;
+    $("status").value = s.status ? String(meta.statuses.indexOf(s.status)) : "";
+    $("entity").value = s.agency ? String(meta.entities.indexOf(s.agency)) : "";
+    syncEntityInput();
+    $("y0").value = s.from;
+    $("y1").value = s.through;
+    $("min").value = s.min;
+    $("max").value = s.max;
+    // Offered only once descsrc.bin has loaded, and apply() reads it through
+    // descSrc, so setting it on a build without one is inert rather than wrong.
+    $("desc").value = s.desc === "has" ? "1" : s.desc === "none" ? "0" : "";
+    $("baddates").checked = s.baddates;
+    sortKey = s.sort;
+    sortDir = s.dir;
+    showSortIndicator();
+  }
+
+  function writeState() {
+    // A page opened straight from disk cannot rewrite its address; the filter
+    // still applied, only the link did not.
+    if (location.protocol === "file:") return;
+    var q = queryFor(currentState());
+    // Not a filter, and it must survive the report re-filtering the table.
+    if (new URLSearchParams(location.search).get("selftest") === "1") {
+      q += (q ? "&" : "") + "selftest=1";
+    }
+    history.replaceState(null, "", PAGE + (q ? "?" + q : "") + location.hash);
+  }
+
+  function showSortIndicator() {
+    document.querySelectorAll("thead .ind").forEach(function (s) { s.textContent = ""; });
+    var sorted = document.querySelector('thead th[data-k="' + sortKey + '"]');
+    if (sorted) sorted.querySelector(".ind").textContent = sortDir > 0 ? "↑" : "↓";
+  }
+
+  // Turning description search on means fetching the index first, or the
+  // first tick silently finds nothing. Shared by the checkbox and by a link
+  // that arrives with indesc=1.
+  // Returns a promise for the first apply() with the answer, because under
+  // ?selftest=1 the report reads the rendered table and must not run before
+  // there is one.
+  function setSearchDesc(on) {
+    searchDesc = on;
+    $("indesc").checked = on;
+    if (!on) { apply(); return Promise.resolve(); }
+    return loadIndex().then(apply, function (e) {
+      $("indesc").checked = searchDesc = false;
+      // Re-filter without it, so the table is not left stale -- or, on a
+      // page that arrived by link, never drawn at all.
+      apply();
+      $("count").insertAdjacentText("beforeend",
+        " · Could not load the description index — " + e.message);
+    });
+  }
+
   // -------------------------------------------------------------------- run
 
   var timer;
@@ -2215,8 +2378,7 @@
     fitScroller();
     showUpdated();
     showGaps();
-    var sorted = document.querySelector('thead th[data-k="2"]');
-    if (sorted) sorted.querySelector(".ind").textContent = "↓";
+    showSortIndicator();
 
     ["q", "y0", "y1", "min", "max"].forEach(function (id) {
       $(id).addEventListener("input", debounced);
@@ -2224,16 +2386,7 @@
     ["type", "status", "entity", "baddates", "desc"].forEach(function (id) {
       $(id).addEventListener("change", apply);
     });
-    $("indesc").addEventListener("change", function () {
-      searchDesc = $("indesc").checked;
-      if (!searchDesc) { apply(); return; }
-      // Nothing to search until the index is here, so wait for it before
-      // re-filtering -- otherwise the first tick silently finds nothing.
-      loadIndex().then(apply, function (e) {
-        $("indesc").checked = searchDesc = false;
-        $("count").textContent = "Could not load the description index — " + e.message;
-      });
-    });
+    $("indesc").addEventListener("change", function () { setSearchDesc($("indesc").checked); });
     $("csv").addEventListener("click", exportPermalinks);
     $("csv-src").addEventListener("click", exportWithSources);
     $("reset").addEventListener("click", function () {
@@ -2255,16 +2408,40 @@
       th.addEventListener("click", function () {
         var k = +th.dataset.k;
         if (k === sortKey) sortDir = -sortDir; else { sortKey = k; sortDir = 1; }
-        document.querySelectorAll("thead .ind").forEach(function (s) { s.textContent = ""; });
-        th.querySelector(".ind").textContent = sortDir > 0 ? "↑" : "↓";
+        showSortIndicator();
         apply();
         scroller.scrollTop = 0;
       });
     });
 
-    if (openPermalink(new URLSearchParams(location.search))) return;
-    apply();
+    var landed = new URLSearchParams(location.search);
+    if (openPermalink(landed)) return;
+    if (landed.has("doc")) {
+      // A permalink that named no single row falls through to the table with
+      // the document number in the search box, as it always has. Its agency
+      // and type are the permalink's namespace, not filters: read as filters,
+      // "type=CN" is a code the Type select does not offer, and the document
+      // number would be lost from the box in favour of a q= that is not there.
+      apply();
+      requestAnimationFrame(render);
+      return Promise.resolve();
+    }
+
+    // Whatever the link asked for goes onto the controls before the first
+    // apply(), and anything it asked for that this build does not have is
+    // said rather than dropped: a link to a renamed agency showing every
+    // agency's rows would put the wrong total under the right heading.
+    var read = stateFrom(landed);
+    showState(read.state);
+    if (read.ignored.length) {
+      var note = document.createElement("span");
+      note.id = "url-note";
+      note.textContent = "Not applied from the link: " + read.ignored.join(", ") + ".";
+      $("status-bar").appendChild(note);
+    }
+    var drawn = read.state.indesc ? setSearchDesc(true) : (apply(), Promise.resolve());
     requestAnimationFrame(render); // re-measure once layout has settled
+    return drawn;
   }
 
   // Everything here is a pure function of its arguments and the loaded payload,
@@ -2289,7 +2466,9 @@
       yearFloor: yearFloor,
       yearCeil: yearCeil,
       amountBound: amountBound,
-      crc32: crc32
+      crc32: crc32,
+      queryFor: queryFor,
+      stateFrom: stateFrom
     };
   }
 
@@ -2299,8 +2478,10 @@
     // can say anything about it; the report is appended below the table.
     var report = new URLSearchParams(location.search).get("selftest") === "1";
     if (report) exposeForTests();
-    start();
-    if (report) return selftest();
+    // A link arriving with indesc=1 draws its first table only once the
+    // description index has landed, so the report waits for that draw.
+    var drawn = start();
+    if (report) return Promise.resolve(drawn).then(selftest);
   })["catch"](function (e) {
     $("load-text").textContent = "Could not load the data — " + e.message;
     $("bar-track").hidden = true;

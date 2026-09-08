@@ -532,6 +532,29 @@ sort takes 56–199 ms and is cached after, and peak heap is **~90 MB** (against
 for the old payload at 40% of the size). Sorting happens once per column rather than once
 per keystroke: the page caches an ordering and filtering walks it.
 
+### Filters in the URL
+
+Every filter and the sort are written into the query string as they are applied, so the
+address bar is always a link to what is on screen, and a reporter can send an editor
+"Roads, contracts over $1 M since 2024" as a URL rather than as instructions:
+
+```
+?agency=Roads%2C+Department+of&type=Contract&from=2024&min=1000000
+```
+
+Values are the state's own names — an agency, a status, a type category — never this
+build's indices, which move on every rebuild; the same reasoning as the `?doc=`
+permalinks, which are a separate namespace, read first and never written here. Only
+non-default values are written, so an unfiltered table has the bare address, and the
+page uses `replaceState` rather than `pushState`: a keystroke is not a navigation.
+
+A link naming something this build does not have — an agency the state has renamed,
+say — is not quietly dropped, because the table underneath would then be a claim about
+the wrong thing. The value is left unapplied and the status bar says which one.
+
+`queryFor` and `stateFrom` are the two directions. Both are pure and both are published
+under `?selftest=1`.
+
 ### What `?selftest=1` checks
 
 Three things, in this order:
@@ -576,7 +599,7 @@ no rendered table to read otherwise — and prints the report below the table.
 
 `?selftest=1` also publishes the page's pure functions on `window.neContracts`:
 `fmtDate`, `shortType`, `csvCell`, `csvParts`, `docStr`, `docCountCell`, `comparator`,
-`permalink`, `yearFloor`, `yearCeil`, `amountBound` and `crc32`. Every one of them is a
+`permalink`, `yearFloor`, `yearCeil`, `amountBound`, `crc32`, `queryFor` and `stateFrom`. Every one of them is a
 function of its arguments and the loaded payload, and every one was unreachable from
 outside the IIFE, which is most of why this page has never had a unit test.
 

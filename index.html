@@ -268,11 +268,11 @@
     <select id="entity" hidden><option value="">All</option></select>
   </div>
   <div class="field">
-    <label for="y0">Begins after</label>
+    <label for="y0">Begins from</label>
     <input id="y0" class="yr" type="number" placeholder="1977" inputmode="numeric">
   </div>
   <div class="field">
-    <label for="y1">Begins before</label>
+    <label for="y1">Begins through</label>
     <input id="y1" class="yr" type="number" placeholder="2030" inputmode="numeric">
   </div>
   <div class="field">
@@ -345,7 +345,8 @@
   Created by <a href="https://diepjustin.github.io/">Justin Diep</a>.
   Public records from the Nebraska Department of Administrative Services, published under
   <a href="https://nebraskalegislature.gov/laws/statutes.php?statute=84-602.04" target="_blank" rel="noopener">Neb. Rev. Stat. § 84-602.04</a>.
-  Amounts are as recorded by the state and may include amendments.
+  Amounts are as the state recorded them when first collected; later amendments may not be
+  reflected. <a href="https://github.com/diepjustin/diepjustin.github.io/blob/main/ne-contracts/README.md#caveats-worth-knowing-before-you-quote-it" target="_blank" rel="noopener">What is in this data, and what is not</a>.
 </footer>
 
 <script>
@@ -945,7 +946,7 @@
     var d0 = yearFloor($("y0").value), d1 = yearCeil($("y1").value);
     var hasMn = !isNaN(mn), hasMx = !isNaN(mx);
 
-    var order = orderFor(sortKey), out = viewBuf, count = 0;
+    var order = orderFor(sortKey), out = viewBuf, count = 0, total = 0;
     var p = sortDir > 0 ? 0 : N - 1, stop = sortDir > 0 ? N : -1;
     for (; p !== stop; p += sortDir) {
       var j = order[p];
@@ -962,16 +963,26 @@
       if (q && !vhit[vendorIdx[j]] && !(dq && docHas(j, dq)) &&
           !(dhit && dhit.has(j))) continue;
       out[count++] = j;
+      total += amount[j];
     }
 
     view = out.subarray(0, count);
     render();
-    summarize();
+    summarize(total);
   }
 
-  function summarize() {
+  // Whole dollars: a sum over hundreds of thousands of rows is not a figure
+  // anyone quotes to the cent, and the cents make it harder to read.
+  var fmtTotal = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 });
+
+  // The count, and the sum of the recorded amounts for those rows. "Recorded"
+  // is doing work: the largest values are not-to-exceed ceilings on multi-year
+  // programs, and the footer links to the caveats that say so. Summed in the
+  // filter loop, so it costs nothing a keystroke was not already paying.
+  function summarize(total) {
     $("count").innerHTML =
-      "<b>" + view.length.toLocaleString() + "</b> of " + N.toLocaleString() + " records";
+      "<b>" + view.length.toLocaleString() + "</b> of " + N.toLocaleString() + " records" +
+      (view.length ? " · <b>" + fmtTotal.format(total) + "</b> in recorded amounts" : "");
   }
 
   // Only the visible slice is in the DOM; spacer rows hold the scrollbar height.
@@ -1516,7 +1527,7 @@
         // Where the words came from, before the words themselves. A list of
         // part numbers and a scope of work look identical in a bare paragraph,
         // and a reader who does not know which one they are reading cannot
-        // judge either -- "Itemised on the purchase order" is the difference
+        // judge either -- "Itemised in the document's line-item table" is the difference
         // between odd-looking prose and a list of what was bought.
         var from = descLabel(id);
         panel.textContent = "";

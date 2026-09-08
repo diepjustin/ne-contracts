@@ -904,7 +904,9 @@ DESC_SOURCE_CODE = {name: i for i, name in enumerate(DESC_SOURCES) if name}
 # meta. A description reads very differently once you know it is a list of what
 # was bought rather than a statement of what the contract is for.
 DESC_SOURCE_LABELS = {
-    "line_items": "Itemised on the purchase order",
+    # Not "on the purchase order": the same line-item table sits on state agency
+    # contracts, and the label was contradicting the Type column beside it.
+    "line_items": "Itemised in the document's line-item table",
     "cover_sheet": "Summary written on the University's contract cover sheet",
     "services_clause": "The contract's own scope-of-services clause",
     "cover_sheet_form": "The University cover sheet's description-of-purchase field",

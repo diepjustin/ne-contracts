@@ -68,7 +68,9 @@ The scraper reproduces the state's records faithfully, including their errors.
   (EBSCO, UNL) at $4,000,000,000. Some are plausibly real not-to-exceed ceilings on
   multi-year statewide programs rather than errors — the state's FAQ says service
   contracts are valued at the estimated cost of the whole contract including renewals.
-  Treat the top of the amount column as ceilings, not money spent.
+  Treat the top of the amount column as ceilings, not money spent. The status bar's
+  total is the sum of the recorded amounts for the rows shown, and inherits every
+  caveat in this list.
 - **Vendor names are fragmented, and the site only partly repairs it.** The state
   records one firm many ways: 26 spellings of Hausmann Construction total $1.40 B where
   the largest single spelling shows $903 M. About 9,000 vendor strings sit in a cluster

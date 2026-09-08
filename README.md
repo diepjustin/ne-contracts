@@ -553,6 +553,27 @@ in the hover text fails with 147 differing cells, naming each row and column. No
 `?selftest=1` now starts the page normally before reporting — it has to, since there is
 no rendered table to read otherwise — and prints the report below the table.
 
+### The `neContracts` namespace
+
+`?selftest=1` also publishes the page's pure functions on `window.neContracts`:
+`fmtDate`, `shortType`, `csvCell`, `csvParts`, `docStr`, `docCountCell`, `comparator`,
+`permalink`, `yearFloor`, `yearCeil`, `amountBound` and `crc32`. Every one of them is a
+function of its arguments and the loaded payload, and every one was unreachable from
+outside the IIFE, which is most of why this page has never had a unit test.
+
+**Only under `?selftest=1`.** A page a reader loads is unchanged and the object is not
+there at all. It is an outlet, not an interface: nothing in `index.html` may come to read
+it, or the test hook becomes load-bearing and the thing it was meant to observe starts
+depending on being observed.
+
+`yearFloor`, `yearCeil` and `amountBound` are new names for arithmetic that was inline in
+`apply()`, not new behaviour. A year box becomes the smallest or largest `yyyymmdd` in
+that year, or 0 for "no bound" — which is why a row with no date is never excluded by
+one. An amount box goes through `parseFloat`, so **`50,000` in the min box reads as
+50** and `$50000` reads as no bound at all. That is how the box has always behaved; it is
+written down here rather than fixed, because fixing it is a change to what the page does
+and belongs in its own commit.
+
 ### Publishing
 
 `.github/workflows/pages.yml` builds the payload in CI and deploys it as a **Pages

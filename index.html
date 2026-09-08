@@ -856,12 +856,38 @@
     return String.fromCharCode.apply(null, docs.subarray(docOff[id], docOff[id + 1]));
   }
 
+  // The two filter boxes that hold numbers rather than text, read out as the
+  // bounds the row loop compares against. Named rather than inline in apply()
+  // so they can be exercised on their own: everything else about a filter is
+  // visible in the record count, but "what did it make of what I typed" is not.
+
+  // A year box against the yyyymmdd integers in the date columns. 0 means no
+  // bound, which is why a row with no date is never excluded by one.
+  function yearFloor(text) {
+    var y = parseInt(text, 10);
+    return isNaN(y) ? 0 : y * 10000;
+  }
+
+  function yearCeil(text) {
+    var y = parseInt(text, 10);
+    return isNaN(y) ? 0 : y * 10000 + 9999;
+  }
+
+  // An amount box. NaN means no bound; the caller tests for it rather than
+  // using a sentinel, because 0 is a real amount in this data.
+  //
+  // parseFloat, which stops at the first character it cannot use: "50,000"
+  // reads as 50 and "$50000" as NaN. That is how this box has always behaved
+  // and changing it is a separate decision, not a rename.
+  function amountBound(text) {
+    return parseFloat(text);
+  }
+
   function apply() {
     var q = $("q").value.trim().toLowerCase();
     term = q;
     var ti = $("type").value, si = $("status").value, ei = $("entity").value;
-    var y0 = parseInt($("y0").value, 10), y1 = parseInt($("y1").value, 10);
-    var mn = parseFloat($("min").value), mx = parseFloat($("max").value);
+    var mn = amountBound($("min").value), mx = amountBound($("max").value);
     var i;
 
     // Vendors are deduped, so match the 59.9k vendor names once rather than
@@ -904,8 +930,7 @@
     var descWant = descSrc ? $("desc").value : "";
 
     var sIdx = si === "" ? -1 : +si, eIdx = ei === "" ? -1 : +ei;
-    var d0 = isNaN(y0) ? 0 : y0 * 10000;
-    var d1 = isNaN(y1) ? 0 : y1 * 10000 + 9999;
+    var d0 = yearFloor($("y0").value), d1 = yearCeil($("y1").value);
     var hasMn = !isNaN(mn), hasMx = !isNaN(mx);
 
     var order = orderFor(sortKey), out = viewBuf, count = 0;
@@ -2207,11 +2232,38 @@
     requestAnimationFrame(render); // re-measure once layout has settled
   }
 
+  // Everything here is a pure function of its arguments and the loaded payload,
+  // and every one of them is unreachable from outside this IIFE -- which is
+  // most of why the page has never had a unit test. Under ?selftest=1 they are
+  // published on one namespace so a headless browser can call them with known
+  // inputs and check the answers.
+  //
+  // Only under ?selftest=1. A page a reader loads is unchanged, and nothing on
+  // it ever reads this object: it is an outlet, not an interface, and no code
+  // in this file may come to depend on it.
+  function exposeForTests() {
+    window.neContracts = {
+      fmtDate: fmtDate,
+      shortType: shortType,
+      csvCell: csvCell,
+      csvParts: csvParts,
+      docStr: docStr,
+      docCountCell: docCountCell,
+      comparator: comparator,
+      permalink: permalink,
+      yearFloor: yearFloor,
+      yearCeil: yearCeil,
+      amountBound: amountBound,
+      crc32: crc32
+    };
+  }
+
   load().then(function () {
     // start() runs either way. The selftest now reads the rendered table back
     // out of the DOM, so the page has to actually be running before the report
     // can say anything about it; the report is appended below the table.
     var report = new URLSearchParams(location.search).get("selftest") === "1";
+    if (report) exposeForTests();
     start();
     if (report) return selftest();
   })["catch"](function (e) {

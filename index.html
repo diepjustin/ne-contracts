@@ -217,7 +217,9 @@
         <p>
           Scraped from the <a href="https://statecontracts.nebraska.gov/" target="_blank" rel="noopener">Nebraska State Contracts Database</a>
           and rebuilt as one searchable page. Covers all state agencies, boards and commissions,
-          plus the University of Nebraska and Nebraska State College systems.
+          plus the University of Nebraska and Nebraska State College systems. The state's database
+          holds only documents that were still active on 1 January 2014, so earlier years are
+          sparse for that reason rather than because less was spent.
         </p>
         <p>
           Click any row for that document's description — the state's own words, lifted from the
@@ -269,7 +271,12 @@
   </div>
   <div class="field">
     <label for="y0">Begins from</label>
-    <input id="y0" class="yr" type="number" placeholder="1977" inputmode="numeric">
+    <!-- 2014, not the earliest year in the data. A record beginning in 1977 does
+         exist, but the state's database only ever loaded documents still active
+         on 1 Jan 2014, so a filter starting earlier returns a handful of
+         survivors and reads as though the state barely spent: 2013 holds 5,135
+         rows against 2014's 46,701. The placeholder should not invite that. -->
+    <input id="y0" class="yr" type="number" placeholder="2014" inputmode="numeric">
   </div>
   <div class="field">
     <label for="y1">Begins through</label>
@@ -311,7 +318,12 @@
 
 
 <div class="status" id="status-bar">
-  <span id="count">Loading data…</span>
+  <!-- A live region, because the count and total are the page's answer to every
+       filter and nothing else reports it. On #count rather than the whole bar:
+       the export status beside it ticks once per fetched block, and announcing
+       that would bury the answer under progress. aria-atomic, because the whole
+       sentence is rewritten each time and half of it read alone says nothing. -->
+  <span id="count" role="status" aria-atomic="true">Loading data…</span>
   <span id="exp" hidden><span id="exp-text"></span><button id="exp-cancel" type="button">Cancel</button></span>
 </div>
 

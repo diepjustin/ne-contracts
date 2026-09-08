@@ -876,11 +876,23 @@
   // An amount box. NaN means no bound; the caller tests for it rather than
   // using a sentinel, because 0 is a real amount in this data.
   //
-  // parseFloat, which stops at the first character it cannot use: "50,000"
-  // reads as 50 and "$50000" as NaN. That is how this box has always behaved
-  // and changing it is a separate decision, not a rename.
+  // A currency sign, thousands separators and spaces are removed before
+  // parsing, and what is left must be the whole number rather than the start
+  // of one. This was a bare parseFloat, which stops at the first character it
+  // cannot use: "50,000" read as 50 and "50k" as 50 -- a filter three orders
+  // of magnitude off, showing a plausible record count with nothing on the
+  // page saying so.
+  //
+  // That never reached a reader in Chrome, which discards those characters as
+  // they are typed into <input type="number"> and hands over "50000" either
+  // way. It is fixed anyway for two reasons: the answer should not depend on
+  // one browser's input sanitising, and a value this cannot read in full is
+  // now "no bound" -- a filter visibly not applied -- rather than a truncated
+  // prefix that looks like it was.
   function amountBound(text) {
-    return parseFloat(text);
+    var clean = String(text).replace(/[$,\s]/g, "");
+    if (!/^-?(\d+\.?\d*|\.\d+)$/.test(clean)) return NaN;
+    return parseFloat(clean);
   }
 
   function apply() {

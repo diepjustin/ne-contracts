@@ -583,13 +583,29 @@ there at all. It is an outlet, not an interface: nothing in `index.html` may com
 it, or the test hook becomes load-bearing and the thing it was meant to observe starts
 depending on being observed.
 
-`yearFloor`, `yearCeil` and `amountBound` are new names for arithmetic that was inline in
-`apply()`, not new behaviour. A year box becomes the smallest or largest `yyyymmdd` in
-that year, or 0 for "no bound" — which is why a row with no date is never excluded by
-one. An amount box goes through `parseFloat`, so **`50,000` in the min box reads as
-50** and `$50000` reads as no bound at all. That is how the box has always behaved; it is
-written down here rather than fixed, because fixing it is a change to what the page does
-and belongs in its own commit.
+`yearFloor`, `yearCeil` and `amountBound` are names for arithmetic that was inline in
+`apply()`. A year box becomes the smallest or largest `yyyymmdd` in that year, or 0 for
+"no bound" — which is why a row with no date is never excluded by one.
+
+`amountBound` was a bare `parseFloat`, which stops at the first character it cannot use:
+`50,000` read as 50 and `50k` as 50 — a filter three orders of magnitude off, showing a
+plausible record count with nothing on the page saying so. **That never reached a reader.**
+Min and Max are `<input type="number">` and Chrome discards a comma, a `$` and a `k` as
+they are typed, handing over `50000` either way; typing `50,000` into the Min box filters
+correctly and always has. It now strips currency signs, separators and spaces itself and
+requires what is left to be the whole number, for two reasons: the answer should not
+depend on one browser's input sanitising, and a value it cannot read in full is now "no
+bound" — a filter visibly not applied — rather than a truncated prefix that looks like it
+was.
+
+Two things this does **not** cover, both unmeasured here:
+
+- **`validity.badInput`.** Where a browser accepts unparseable text into a number input
+  it reports `value` as `""`, so the box reads `50,000` while no bound is applied and
+  nothing says which. Chrome never gets there; whether Firefox or Safari do has not been
+  checked on this page.
+- **The year boxes.** `yearFloor` and `yearCeil` use `parseInt` and have exactly the same
+  truncating-prefix shape, unfixed.
 
 ### Publishing
 

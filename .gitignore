@@ -71,3 +71,7 @@ __pycache__/
 # Build locally with scripts/build_site.py to preview; the result stays local.
 d/
 manifest.json
+
+# The inline script cut out of index.html for eslint, by scripts/lint_page.py.
+# Regenerated on every lint run and never read by anything else.
+.lint/

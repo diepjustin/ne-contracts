@@ -280,11 +280,40 @@ python3 scripts/extract_scope.py            # doc_text.jsonl -> data/scope.jsonl
 python3 scripts/build_site.py               # data/*.csv -> d/<buildId>/  (~3 min, ~1.7 GB peak)
 python3 scripts/serve_site.py               # preview at http://127.0.0.1:8765
 python3 -m pytest tests/ -q
+python3 scripts/lint_page.py                # eslint over the script in index.html
 ```
 
 `extract_text.py` refuses to start while the state is not serving documents, for the
 reason under "Things that bit us". `--status` still answers, because it makes no network
 calls.
+
+### Linting the page
+
+`index.html` is one self-contained file with the script inline, so there is no `.js` for
+a linter to open. `scripts/lint_page.py` cuts the `<script>` body out into `.lint/`,
+blank-padded so line *n* of the extract is line *n* of `index.html`, and runs a pinned
+eslint over it through `npx` — no `package.json`, no lockfile, and nothing a reader ever
+downloads. `eslint.config.mjs` holds the rules. It runs in `pages.yml` beside pytest and
+needs Node; without Node it says so and exits 2 rather than passing quietly.
+
+**`no-shadow` is the rule this exists for.** A local `var end` inside `render()` shadowed
+the module-level `end` column and blanked every End cell on the live site for months,
+while every test and the crc32 selftest passed — the payload was correct and the page was
+wrong (see "Things that bit us"). Seven problems were live when it was first switched on,
+all of them that shape or next to it:
+
+| | |
+|---|---|
+| `unpackDocuments(u8, at, end)` | the parameter shadowed the same `end` column the original bug did. Renamed `until`. |
+| `var start` in `render()` | shadowed the module-level `start()`. Renamed `startRow`. |
+| `var words` in `showDetail()` | shadowed the description search index. Renamed `panel`. |
+| `term` in `firstAtOrAfter` / `rowsMatching` | shadowed the module-level query string. Renamed `prefix`. |
+| `var was` twice in `closeDetail()` | a real double declaration. The second query is the working one — `render()` has replaced the row element by then, so clearing the class on the first, now detached, node does nothing. Renamed `live`. |
+| `th` in the sort-header loop | shadowed the `th` holding the default-sort column. Renamed `sorted`. |
+
+`no-undef` needs the page's browser globals declared, and they are written out in the
+config rather than pulled from the `globals` package: one dependency fewer, and the list
+is then an explicit statement of what the page assumes a browser gives it.
 
 Every scrape checkpoints per page and resumes; interrupting is safe. A full run is 20+
 hours against a government server — **don't re-scrape casually.**
@@ -796,6 +825,13 @@ always correct, the crc32 selftest on `end` passed the entire time because it ch
 payload rather than the page, and the CSV export sits outside that function — so exported
 files carried end dates while the table never did. Renamed to `stop`. Both of these were
 found by Justin reading the live site, not by any check in this repo.
+
+Two things now stand where nothing did. `no-shadow`, via `scripts/lint_page.py`, refuses
+the declaration itself, and found six more of that shape still live — including a
+parameter named `end` in `unpackDocuments`. And `?selftest=1` now reads the rendered
+table back out of the DOM and compares it against what the CSV export builds for the same
+rows, so a correct payload rendered wrongly fails a check instead of shipping. See
+"Linting the page" and "What `?selftest=1` checks".
 
 **The page explained a blank description by guessing, and was wrong a quarter of the
 time.** It told readers a missing description was "most likely a scanned image rather

@@ -1899,6 +1899,137 @@
     });
   }
 
+  // ------------------------------------------------- the rendered table
+
+  // What the CSV export says about the rows the table is currently showing.
+  //
+  // This exists because the selftest below could not see the worst bug this
+  // page has had. Every End cell was blank for months, and the crc32 digests
+  // passed the whole time: the payload was right, `render()` was wrong, and
+  // nothing compared the two. The CSV export reads the same columns through a
+  // different function, so a disagreement between the table and the export is
+  // one of them being wrong -- which is the check that was missing.
+  //
+  // Field order follows CSV_HEAD.
+  function csvFields(ids) {
+    var text = csvParts(ids, permalink).join(""), rows = [], row = [], cell = "";
+    var quoted = false, i = 0;
+    while (i < text.length) {
+      var c = text.charAt(i);
+      if (quoted) {
+        if (c !== '"') { cell += c; i++; continue; }
+        if (text.charAt(i + 1) === '"') { cell += '"'; i += 2; continue; }
+        quoted = false; i++; continue;
+      }
+      if (c === '"') { quoted = true; i++; continue; }
+      if (c === ",") { row.push(cell); cell = ""; i++; continue; }
+      if (c === "\n") { row.push(cell); rows.push(row); row = []; cell = ""; i++; continue; }
+      cell += c; i++;
+    }
+    row.push(cell);
+    rows.push(row);
+    return rows.slice(1);          // drop the header line
+  }
+
+  // A rendered cell against the exported value for the same row. Most columns
+  // are the same string in both places; two are not, and both are compared by
+  // undoing the display rather than by re-running the code that produced it --
+  // re-running it would agree with itself no matter what it read.
+  var RENDERED = [
+    { td: 0, col: 0, name: "Document #" },
+    { td: 1, col: 1, name: "Type", show: function (v) { return shortType(v); } },
+    { td: 2, col: 3, name: "Vendor" },
+    { td: 3, col: 4, name: "Amount", money: true },
+    { td: 4, col: 5, name: "Begins" },
+    { td: 5, col: 6, name: "Ends" },
+    { td: 6, col: 7, name: "Status" },
+    { td: 7, col: 8, name: "Agency" }
+  ];
+
+  // Rows are sampled from several scroll positions, not one screenful. Past
+  // MAX_H the scroller stops being a 1:1 map of the list and scroll position is
+  // scaled onto it, so a check that only ever reads the top of the table never
+  // touches the arithmetic most likely to be wrong.
+  function sampleRendered(want) {
+    var STOPS = 8, held = [], seen = {}, was = scroller.scrollTop;
+    var span = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
+    for (var s = 0; s < STOPS && held.length < want; s++) {
+      scroller.scrollTop = STOPS > 1 ? Math.round(span * s / (STOPS - 1)) : 0;
+      render();
+      var trs = tbody.querySelectorAll("tr[data-row]");
+      for (var i = 0; i < trs.length && held.length < want; i++) {
+        var id = +trs[i].dataset.row;
+        if (seen[id]) continue;
+        seen[id] = true;
+        // The cell text is copied out now: the next render() replaces every
+        // one of these elements, and a detached node reads back whatever it
+        // held when it was dropped.
+        var tds = trs[i].children, cells = [];
+        for (var c = 0; c < tds.length; c++) cells.push(tds[c].textContent);
+        var link = trs[i].querySelector("a[data-row]");
+        held.push({
+          id: id,
+          cells: cells,
+          type: tds[1] ? tds[1].getAttribute("title") : null,
+          href: link ? link.getAttribute("href") : null
+        });
+      }
+    }
+    scroller.scrollTop = was;
+    render();
+    return held;
+  }
+
+  // Every rendered cell of `want` sampled rows against the export. Returns the
+  // rows it managed to sample and a list of disagreements, each naming the row
+  // and the column, because "the table is wrong" is not a finding anyone can
+  // act on.
+  function checkRendered(want) {
+    var held = sampleRendered(want), bad = [];
+    if (!held.length) return { sampled: 0, problems: bad };
+
+    var ids = held.map(function (r) { return r.id; });
+    var csv = csvFields(ids);
+    for (var i = 0; i < held.length; i++) {
+      var row = held[i], fields = csv[i];
+      if (!fields || fields[0] !== row.cells[0]) {
+        bad.push("row " + row.id + ": the export produced no matching line");
+        continue;
+      }
+      for (var k = 0; k < RENDERED.length; k++) {
+        var spec = RENDERED[k];
+        var shown = row.cells[spec.td], want_ = fields[spec.col];
+        if (spec.money) {
+          // The table formats as currency and the export writes the number, so
+          // this reads the digits back out of the cell. Cents rather than an
+          // exact match: the formatter is capped at two fraction digits.
+          var got = Number(shown.replace(/[^0-9.\-]/g, ""));
+          if (Math.abs(got - Number(want_)) < 0.005) continue;
+          bad.push("row " + row.id + " " + spec.name + ": table \"" + shown +
+                   "\" reads as " + got + ", export has " + want_);
+          continue;
+        }
+        if (spec.show) want_ = spec.show(want_);
+        if (shown === want_) continue;
+        bad.push("row " + row.id + " " + spec.name + ": table \"" + shown +
+                 "\", export \"" + want_ + "\"");
+      }
+      // The type code is not a column of its own in the table; it is the hover
+      // text on the type cell, and it is what a reader quotes.
+      if (row.type !== fields[2]) {
+        bad.push("row " + row.id + " Type code: cell title \"" + row.type +
+                 "\", export \"" + fields[2] + "\"");
+      }
+      // The link under the document number is the row's permalink, which is
+      // also the export's URL column.
+      if (row.href !== fields[10]) {
+        bad.push("row " + row.id + " permalink: table \"" + row.href +
+                 "\", export \"" + fields[10] + "\"");
+      }
+    }
+    return { sampled: held.length, problems: bad };
+  }
+
   // --------------------------------------------------------------- selftest
 
   function crc32(u8) {
@@ -1959,6 +2090,16 @@
 
     say(docOff[N] === docs.length, "document numbers span " + docOff[N] + " bytes of " + DOCS);
     say(vendors.length === meta.vendorCount, vendors.length + " vendor names decoded");
+
+    // Everything above this line checks the payload. This checks the page.
+    var dom = checkRendered(50);
+    say(dom.sampled > 0 && !dom.problems.length,
+        dom.sampled + " rendered rows match the CSV export cell for cell" +
+        (dom.sampled ? (dom.problems.length ? " — " + dom.problems.length + " cell(s) differ" : "")
+                     : " — no rows were rendered to check"));
+    dom.problems.slice(0, 10).forEach(function (w) { lines.push("      " + w); });
+    if (dom.problems.length > 10) lines.push("      … and " + (dom.problems.length - 10) + " more");
+    $("report").textContent = lines.join("\n");
 
     return fetch(BASE + dir + "selftest.json").then(asJson).then(function (fx) {
       // Grouped by block so the block cache is not thrashed 1,000 times.
@@ -2067,8 +2208,12 @@
   }
 
   load().then(function () {
-    if (new URLSearchParams(location.search).get("selftest") === "1") return selftest();
+    // start() runs either way. The selftest now reads the rendered table back
+    // out of the DOM, so the page has to actually be running before the report
+    // can say anything about it; the report is appended below the table.
+    var report = new URLSearchParams(location.search).get("selftest") === "1";
     start();
+    if (report) return selftest();
   })["catch"](function (e) {
     $("load-text").textContent = "Could not load the data — " + e.message;
     $("bar-track").hidden = true;

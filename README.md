@@ -513,10 +513,45 @@ sort takes 56–199 ms and is cached after, and peak heap is **~90 MB** (against
 for the old payload at 40% of the size). Sorting happens once per column rather than once
 per keystroke: the page caches an ordering and filtering walks it.
 
-Loading `/?selftest=1` checks every column against a CRC recorded at build time and
-rebuilds 1,000 sampled URLs against addresses taken from the source CSVs. **Run it
-against the deployed site, not a local server** — only a real deployment exercises gzip
-in transit, and CDN behaviour produced the one design-changing surprise here.
+### What `?selftest=1` checks
+
+Three things, in this order:
+
+1. **Every column against a CRC recorded at build time.** Digests are per column so a
+   failure names what broke.
+2. **The rendered table against the CSV export**, cell for cell, over 50 rows sampled
+   from eight scroll positions.
+3. **1,000 sampled URLs** rebuilt from the payload and compared against addresses taken
+   from the source CSVs, not from the payload.
+
+**Run it against the deployed site, not a local server** — only a real deployment
+exercises gzip in transit, and CDN behaviour produced the one design-changing surprise
+here.
+
+The second one is newer than the other two and exists because they could not see the
+worst bug this page has had. Every End cell was blank for months while the digests
+passed the entire time: the payload was correct, `render()` was wrong, and nothing
+compared the two. The CSV export reads the same columns through a different function, so
+a disagreement between the table and the export is one of them being wrong. Each
+disagreement names the row and the column.
+
+Two columns are not the same string in both places, and both are compared by undoing the
+display rather than by re-running the code that produced it — re-running it would agree
+with itself no matter what it read. The amount is read back out of the formatted cell as
+a number (to the cent, since the formatter is capped at two fraction digits), and the
+type code is taken from the type cell's hover text, which is where a reader finds it.
+The permalink under the document number is checked against the export's URL column.
+
+Rows are sampled from eight scroll positions rather than one screenful, because past
+`MAX_H` the scroller stops being a 1:1 map of the list and scroll position is scaled onto
+it — a check that only ever read the top of the table would never touch the arithmetic
+most likely to be wrong.
+
+It was verified the way this file asks for: by putting the bug back. A copy of the page
+with `end` re-shadowed in `render()`, the amount off by a dollar and the wrong type code
+in the hover text fails with 147 differing cells, naming each row and column. Note that
+`?selftest=1` now starts the page normally before reporting — it has to, since there is
+no rendered table to read otherwise — and prints the report below the table.
 
 ### Publishing
 

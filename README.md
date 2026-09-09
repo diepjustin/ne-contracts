@@ -704,15 +704,41 @@ every clone, so it remains a separate decision.
 
 ### Nightly automation
 
-`ne-contracts-daily.yml` scrapes all three datasets with `--daily` every night at 10pm
-Central. GitHub Actions cron has no DST awareness, so two entries fire daily and the gate
-compares `github.event.schedule` against the entry implied by the current offset, letting
-exactly one through. It gates on *which entry fired*, never on the wall clock: GitHub's
-scheduler routinely runs 30–90 minutes late, and an earlier hour-equals-22 check silently
-skipped entire nights, reporting success while scraping nothing. There is no weekday
-arithmetic left in the gate: it rolled the weekday back for a run that landed before noon
-Central, purely so a delayed Sunday-night scrape still counted as Sunday and reached the
-publish leg. Nothing cares what day it is now.
+`ne-contracts-daily.yml` scrapes all three datasets with `--daily` every night, on a cron
+set for 10pm Central — though see the slippage below for when it actually runs. GitHub
+Actions cron has no DST awareness, so two entries fire daily and the gate compares
+`github.event.schedule` against the entry implied by the current offset, letting exactly
+one through. It gates on *which entry fired*, never on the wall clock, because an earlier
+hour-equals-22 check silently skipped entire nights, reporting success while scraping
+nothing. There is no weekday arithmetic left in the gate either: it rolled the weekday
+back for a run that landed before noon Central, purely so a delayed Sunday-night scrape
+still counted as Sunday and reached the publish leg. Nothing cares what day it is now.
+
+**The scheduler is hours late, not minutes.** This said "30–90 minutes" until 9 Sep 2026,
+which was wrong. Measured across all 28 nights from 13 Aug to 9 Sep, the live cron entry
+was **never once on time**: 33 minutes late at best, three hours at the median, and 11.8
+hours on 28 Aug. It is also not random. Through 26 Aug it ran about 40 minutes late every
+night; from 27 Aug it moved, and every night since 2 Sep has landed between 4h20m and
+4h50m late. So the scrape labelled 10pm Central has in practice been starting around
+2:30am, and the publish it now triggers lands around 3am.
+
+Nothing downstream depends on the hour — that is exactly what gating on the cron entry
+buys, and it is why the 4-hour regime went unnoticed for a fortnight while every run
+reported success. What it does cost is the reader: the site's "last updated" stamp trails
+the label by hours, and last night's contracts are not on the site until the small hours.
+The cause is not established. The obvious suspect — other scheduled workflows in this repo
+competing for the scheduler — does not fit: `unl-events-nightly.yml` arrived 4 Sep and
+`husker-markets-collect.yml` 8 Sep, both well after the 27 Aug change. The numbers above
+are one month of one repo, so re-measure rather than trusting them — the dispatch time of
+every scheduled run is one call:
+
+```bash
+gh api "/repos/diepjustin/diepjustin.github.io/actions/workflows/ne-contracts-daily.yml/runs?event=schedule&per_page=100" \
+  --jq '.workflow_runs[] | "\(.created_at)"' | sort
+```
+
+Two runs land per night, one per cron entry; the earlier of each pair is the one that
+proceeds while Central is on CDT, and its slot is 03:00 UTC.
 
 **Runners are ephemeral and `data/*.csv` is gitignored**, so `data/` round-trips through
 `actions/cache`: restored under a `ne-contracts-data-` prefix, saved under a fresh

@@ -641,7 +641,7 @@ preview a change, and the result stays on your machine.
 
 | trigger | what happens |
 |---|---|
-| push to `main` | restores the last payload from the Actions cache and deploys it. No rebuild, so a portfolio edit does not need the CSVs. |
+| push to `main` | restores the last payload from the Actions cache and deploys it. No rebuild, so a portfolio edit does not need the CSVs. (True only from 9 Sep 2026 — see "The payload cache never once hit".) |
 | every night | `ne-contracts-daily.yml` dispatches `pages.yml` **after** `check_daily_diff.py` passes, so it rebuilds from fresh data. |
 
 The dispatch is deliberately not a `workflow_run` trigger, and staying that way is the
@@ -1128,6 +1128,35 @@ a different thing wearing a description's clothes). **Do not spend a week here.*
 
 **19% of state agency documents do not exist** — the state's own viewer has no file. No
 method reaches those rows, ever.
+
+**The payload cache never once hit.** `pages.yml` keys the built payload on the code and
+checkpoints that decide what it contains, so an ordinary push can redeploy the last build
+instead of spending three minutes rebuilding it. It never did. From the day it was written
+until 9 Sep 2026 every single push logged `rebuilding: no payload to fall back on`.
+
+The key was `hashFiles('ne-contracts/scripts/**', 'ne-contracts/data/*_scrape_progress.json')`,
+and it returned a different digest on every run. Seven consecutive runs, all checking out a
+byte-identical `scripts` tree (`a5330ff`) and identical progress blobs, produced seven
+different digests — so the restore looked for a key no save had ever written. Within a
+single run restore and save agreed, which is why nothing ever looked wrong: the failure is
+only visible by comparing runs, and a rebuild is silent and green.
+
+What hashFiles was actually seeing was never identified. It is not `__pycache__` under
+`scripts/` — pytest writes none there — and it is not the data cache overwriting the
+progress files, because restore and save agree within a run. The fix does not depend on
+knowing: the key is now `ne-payload-<git tree of scripts>-<git tree of data>`, computed by
+`git rev-parse HEAD:<path>` in its own step. A tree id is a property of the commit, not of
+whatever is lying in the workspace beside it, so it cannot drift the way the digest did.
+
+The semantics that matter are unchanged, and they are the reason this is keyed at all
+rather than reused blindly: the key must move when the builder does, or a push carrying a
+`build_site.py` fix redeploys the stale payload and reports success. That is the 17 Aug
+coverage-note bug two entries down.
+
+Cost while it was broken: every push to this repo — including portfolio-only edits — did a
+full payload build and needed the CSV cache it was designed not to need, and banked another
+60 MB entry. 38 of those had accumulated by 9 Sep, 2.23 GB, sharing the 10 GB budget with
+the `ne-contracts-data-` caches that stand for twenty hours of scraping.
 
 **~450 MB of superseded payloads remain in git history.** Publishing no longer adds to
 it, but reclaiming what is there needs a force-push that invalidates every clone.

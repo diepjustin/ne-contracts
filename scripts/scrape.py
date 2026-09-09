@@ -906,10 +906,11 @@ DAILY_DIFF_REPORT = "data/daily_diff_report.json"
 
 
 def append_daily_diff_report(dataset, entity_report, stamp):
-    """Append one dataset-run's per-entity counts to the week's accumulating report.
+    """Append one dataset-run's per-entity counts to the accumulating report.
 
-    Consumed by scripts/check_daily_diff.py on the weekly publish day, then
-    cleared. See that script for how the totals here get used as a guard rail.
+    Consumed by scripts/check_daily_diff.py on the nightly publish leg, then
+    cleared -- so in the ordinary case this file holds one evening's three
+    entries. See that script for how the totals here get used as a guard rail.
     """
     entries = []
     if os.path.exists(DAILY_DIFF_REPORT):
@@ -917,7 +918,7 @@ def append_daily_diff_report(dataset, entity_report, stamp):
             with open(DAILY_DIFF_REPORT, encoding="utf-8") as f:
                 entries = json.load(f)
         except (OSError, ValueError):
-            entries = []  # unreadable or corrupt: start this week's report fresh
+            entries = []  # unreadable or corrupt: start the report fresh
 
     totals = {k: sum(e[k] for e in entity_report.values())
               for k in ("previously_active", "still_active", "newly_active", "flipped_to_expired")}

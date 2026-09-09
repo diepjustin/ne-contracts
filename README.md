@@ -367,7 +367,7 @@ extraction Release alongside `doc_text.jsonl`.
 Nothing on the site reads it yet. Publishing an "amended" flag and the history in the
 detail panel is the next step, and wants a few weeks of accumulation first.
 
-`scripts/check_daily_diff.py` fails the week if any entity had more than half its
+`scripts/check_daily_diff.py` fails the night if any entity had more than half its
 previously-Active records flip to Expired in a day, skipped below 5 records where the
 percentage is noise. That is implausible as real attrition but exactly what a
 renamed or retired entity looks like — which `check_entity_drift.py`, run first, is
@@ -642,11 +642,30 @@ preview a change, and the result stays on your machine.
 | trigger | what happens |
 |---|---|
 | push to `main` | restores the last payload from the Actions cache and deploys it. No rebuild, so a portfolio edit does not need the CSVs. |
-| nightly, on publish day | `ne-contracts-daily.yml` dispatches `pages.yml` **after** `check_daily_diff.py` passes, so it rebuilds from fresh data. |
+| every night | `ne-contracts-daily.yml` dispatches `pages.yml` **after** `check_daily_diff.py` passes, so it rebuilds from fresh data. |
 
-The dispatch is deliberately not a `workflow_run` trigger. That fires on every successful
-nightly, and the guard rail only runs on the publish day — the site would have deployed
-unguarded data six days out of seven.
+The dispatch is deliberately not a `workflow_run` trigger, and staying that way is the
+point of the nightly change rather than an accident of it. `workflow_run` fires on any
+successful completion and cannot see what the run decided: it would deploy after a night
+the DST gate correctly skipped, and after a `dry_run`, neither of which produced anything
+to publish. The dispatch sits after the guard rail in the same job, so a scrape the guard
+rail rejects still never reaches the site.
+
+**Every night is a publish night as of Sep 2026.** It was Sunday only before that, which
+left the site up to six days behind a source the state updates daily, and left the guard
+rail unrun on the other six nights. What that costs, so it is on the record rather than
+discovered later:
+
+- A rebuild runs nightly whether or not the scrape found anything, and every build gets a
+  new `buildId`, so a returning reader re-fetches the columns they already had. Gating the
+  dispatch on "the diff report shows something changed" would avoid both, and is not done:
+  a silent stop is this project's characteristic failure, and a site that rebuilds
+  unconditionally cannot go quietly stale.
+- `check_entity_drift.py` now asks the state for its entity lists nightly rather than
+  weekly — two requests, but a drift it finds blocks publishing every night until the
+  committed lists are updated.
+- Seven 60 MB payload cache entries a week instead of one, which is why `pages.yml` prunes
+  them to the newest three.
 
 Descriptions are built in CI from `scope.jsonl.gz`, downloaded from the newest
 `extraction-data-*` release. `carry_descriptions_forward()` remains as a fallback but
@@ -690,9 +709,10 @@ Central. GitHub Actions cron has no DST awareness, so two entries fire daily and
 compares `github.event.schedule` against the entry implied by the current offset, letting
 exactly one through. It gates on *which entry fired*, never on the wall clock: GitHub's
 scheduler routinely runs 30–90 minutes late, and an earlier hour-equals-22 check silently
-skipped entire nights, reporting success while scraping nothing. For the same reason the
-weekday is rolled back when a run lands before noon Central, so a delayed Sunday-night
-run still reaches the publish leg.
+skipped entire nights, reporting success while scraping nothing. There is no weekday
+arithmetic left in the gate: it rolled the weekday back for a run that landed before noon
+Central, purely so a delayed Sunday-night scrape still counted as Sunday and reached the
+publish leg. Nothing cares what day it is now.
 
 **Runners are ephemeral and `data/*.csv` is gitignored**, so `data/` round-trips through
 `actions/cache`: restored under a `ne-contracts-data-` prefix, saved under a fresh
@@ -756,11 +776,13 @@ and every active contract expired at once.
 
 **Put the refusal where the write is.** A check that runs before publishing cannot
 protect data that the scrape has already written and cached. `check_daily_diff.py` was
-built for exactly the mass-expiry case and never fired, because it guards the weekly
-publish leg rather than the daily write. Keep the two
-apart in the value itself — `""` for "read it, there is nothing" and `None` for "could
-not find out" — and hold back anything unknown rather than writing it. The CSV is a
-record of what the state published, so a value in it must be something we actually saw.
+built for exactly the mass-expiry case and never fired, because it guards the publish leg
+rather than the daily write. Publishing nightly shortens that gap from a week to a day and
+does not close it: the CSV is already written and cached by the time the guard rail runs.
+Keep the two apart in the value itself — `""` for "read it, there is nothing" and `None`
+for "could not find out" — and hold back anything unknown rather than writing it. The
+CSV is a record of what the state published, so a value in it must be something we
+actually saw.
 
 Every script that writes needs its own refusal, not one somewhere upstream.
 `document_service_healthy()` guarded `scrape.py` from Aug 2026 and not
@@ -911,10 +933,11 @@ succeeded. Nothing in the data could show it had happened, and nothing could und
 `--daily` only ever flips Active to Expired, so there was no path back to the truth.
 
 **A guard rail for exactly this existed and did not fire.** `check_daily_diff.py` fails
-the week when an entity loses more than half its active records in a day. It runs
-`if: publish == 'true'` — the weekly publish leg. 17 Aug was a Monday. And even on a
-Sunday it would have been too late: it gates *publishing*, while the damage is done by
-the scrape, which has already rewritten the CSV and saved it to the Actions cache. A
+when an entity loses more than half its active records in a day. It runs
+`if: publish == 'true'`, which in Aug 2026 meant the Sunday-only publish leg; 17 Aug was a
+Monday, so it did not run for six days. And even on a Sunday it would have been too
+late: it gates *publishing*, while the damage is done by the scrape, which has already
+rewritten the CSV and saved it to the Actions cache. A
 check that runs before publishing cannot protect data that is already written.
 
 So the refusal now lives in the scrape, where the write happens. An entity that returns
@@ -926,7 +949,10 @@ the database would be its own bug, so both cases have tests.
 **It compounded quietly.** Once every record read Expired, the next night's scrape had no
 memory of them: `known_active` was empty, so all 44,063 active contracts looked new and
 were written again as fresh rows. The only reason that never reached readers is that
-publishing is gated to Sundays, so no build shipped in between. Repaired by deleting the
+publishing was gated to Sundays at the time, so no build shipped in between. **That
+margin is gone** — publishing is nightly as of Sep 2026, and the same outage today would
+be on the site the same evening. It is the refusals inside `scrape.py`, added after this,
+that stop it now; the weekly gate was luck, not a defence. Repaired by deleting the
 two poisoned Actions caches and rebuilding from the pre-outage one; the restored counts
 came back at exactly 44,063 active and 695,542 expired, which is the local count less the
 128 duplicate rows the build drops — that reconciliation is what proved the older cache
@@ -970,9 +996,9 @@ recorded "no document" as a fact for every new contract and published a site wit
 silently missing links. No step would have failed.
 
 Nothing was actually damaged, but only by luck: the state's *search* was down at the same
-time, so the nightly found no records to write, and the weekly publish gate meant no
-build shipped. A partial outage — search up, documents down — would have poisoned the
-data on any publish day.
+time, so the nightly found no records to write, and publishing was weekly then, so no
+build shipped either. A partial outage — search up, documents down — would have poisoned
+the data on any publish day, and every night is a publish night now.
 
 `get_view_url()` now answers three ways: a URL, `""` for a page read cleanly that offers
 nothing (a real fact), and `None` for could-not-tell. A `None` record is held back rather

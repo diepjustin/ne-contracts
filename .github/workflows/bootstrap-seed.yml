@@ -1,0 +1,43 @@
+name: One-off bootstrap seed (delete after use)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  seed:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Download and unpack the bootstrap data
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p data
+          gh release download data-bootstrap-temp --pattern '*.gz' --dir /tmp/bootstrap --clobber
+          for f in /tmp/bootstrap/*.gz; do
+            gunzip -c "$f" > "data/$(basename "$f" .gz)"
+          done
+          ls -la data
+          du -sh data
+
+      - name: Verify the CSVs are present
+        run: |
+          if ! ls data/*.csv >/dev/null 2>&1; then
+            echo "::error::no CSVs after unpacking -- refusing to seed"
+            exit 1
+          fi
+
+      - name: Save the cache under this ref
+        uses: actions/cache/save@v5
+        with:
+          path: data
+          key: ne-contracts-data-seed-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Report where the cache landed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh cache list --key ne-contracts-data- --json key,ref,sizeInBytes,createdAt

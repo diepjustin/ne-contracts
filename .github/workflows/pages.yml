@@ -1,0 +1,298 @@
+name: Publish to Pages
+
+# Why this exists: GitHub Pages used to publish straight from main, so the
+# ~50 MB payload build_site.py produces had to be *committed* to be served.
+# Retiring old build directories kept the working tree small but nothing ever
+# left history, and .git reached 546 MB. Building here and deploying the
+# result as an artifact means git holds source only.
+#
+# Split out of diepjustin.github.io on 10 Sep 2026. This used to be the
+# ne-contracts-specific half of that repo's pages.yml, which also built and
+# deployed the portfolio homepage and every other data project in one
+# artifact. Now this repo has nothing else to stage.
+
+on:
+  push:
+    branches: [main]
+  # The nightly scrape triggers this itself, every night, and only after its
+  # guard rail has passed. Still deliberately not a workflow_run trigger, even
+  # now that the scrape publishes nightly: that fires on any successful
+  # completion and cannot see what the run decided. It would deploy after a
+  # night the DST gate correctly skipped, and after a dry run, neither of which
+  # produced anything to publish. The dispatch sits after check_daily_diff.py
+  # in the same job, so only a scrape that passed the guard rail reaches it.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+  actions: write     # for the `gh cache delete` prune below
+
+# Never two deploys at once, and never cancel one half-done: an interrupted
+# deployment leaves the site on its previous artifact, which is fine, but a
+# cancelled *build* wastes the 3 minutes it takes to make a payload.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Tests
+        run: python3 -m pytest tests/ -q
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+
+      # index.html is one self-contained file with no build step, so there is
+      # no .js for eslint to read; lint_page.py cuts the inline script out into
+      # .lint/, blank-padded so a reported line number is the line number in
+      # index.html, and runs a pinned eslint through npx. No package.json, no
+      # lockfile, no node_modules in the repo.
+      #
+      # It runs beside the tests because the tests cannot see this class of
+      # bug: a local `var end` shadowing the module-level end-date column
+      # blanked every End cell on the live site for months while the crc32
+      # selftest passed, because the payload was correct and the page was not.
+      - name: Lint the page
+        run: python3 scripts/lint_page.py
+
+      # Key the payload on what git says the inputs are, never on hashFiles
+      # over the workspace. hashFiles returned a different digest on every
+      # single run: seven consecutive runs to 9 Sep 2026 checked out a
+      # byte-identical scripts tree (a5330ff) and identical progress blobs,
+      # and produced seven different digests. Restore therefore never matched
+      # a save, and *every* push rebuilt the payload it was supposed to be
+      # reusing -- three minutes and a 60 MB cache entry each time, while the
+      # README claimed a push needed no rebuild and no CSVs. Whatever
+      # hashFiles was seeing in the workspace was never identified; a tree id
+      # cannot have the same problem, because it comes from the commit rather
+      # than from whatever is lying on disk beside it.
+      #
+      # Semantics are otherwise unchanged and still load-bearing: the key must
+      # move when the builder does, or a push carrying a build_site.py fix
+      # redeploys the stale payload and reports success. That is the 17 Aug
+      # coverage-note bug, which deployed green while the site went on telling
+      # readers all 101 entities were still being collected.
+      - name: Key the payload cache on the commit
+        id: key
+        run: |
+          scripts=$(git rev-parse HEAD:scripts) || {
+            echo "::error::no scripts tree on HEAD -- is this a full checkout?"
+            exit 1; }
+          data=$(git rev-parse HEAD:data) || {
+            echo "::error::data has no tracked files; the key needs"
+            echo "::error::the committed scrape checkpoints"
+            exit 1; }
+          echo "payload=ne-payload-$scripts-$data" >> "$GITHUB_OUTPUT"
+          echo "payload key: ne-payload-$scripts-$data"
+
+      # Best effort. On an ordinary push this restores the payload the last
+      # build made, so no rebuild is needed and no CSVs are required. If it
+      # misses, the build below makes one.
+      - name: Restore the last built payload
+        id: payload
+        uses: actions/cache/restore@v5
+        with:
+          path: |
+            d
+            manifest.json
+          key: ${{ steps.key.outputs.payload }}-${{ github.run_id }}
+          restore-keys: |
+            ${{ steps.key.outputs.payload }}-
+
+      # Rebuild when the data has just changed, or when there is no payload to
+      # fall back on.
+      - name: Decide whether to rebuild
+        id: decide
+        env:
+          EVENT: ${{ github.event_name }}
+          RESTORED: ${{ steps.payload.outputs.cache-matched-key }}
+        run: |
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            echo "build=true" >> "$GITHUB_OUTPUT"
+            echo "rebuilding: dispatched, so the data has changed"
+          elif [ -z "$RESTORED" ] || [ ! -f manifest.json ]; then
+            echo "build=true" >> "$GITHUB_OUTPUT"
+            echo "rebuilding: no payload to fall back on"
+          else
+            echo "build=false" >> "$GITHUB_OUTPUT"
+            echo "reusing the restored payload"
+          fi
+
+      - name: Restore data/ cache
+        if: steps.decide.outputs.build == 'true'
+        uses: actions/cache/restore@v5
+        with:
+          path: data
+          key: ne-contracts-data-${{ github.run_id }}   # never pre-exists; forces the fallback below
+          restore-keys: |
+            ne-contracts-data-
+          fail-on-cache-miss: true
+
+      # Descriptions come from a 19-hour document download that will never live
+      # in CI. scope.jsonl is its distilled output and small enough to fetch, so
+      # the build makes them properly instead of carrying the previous build's
+      # forward -- which it can no longer do anyway, now that the previous build
+      # is not in the repository.
+      # Descriptions, and which documents each record publishes. Both are the
+      # distilled output of long downloads against the state's servers -- 19
+      # hours and ~23 hours -- so neither will ever be produced in CI, and both
+      # are small enough to fetch once they exist.
+      - name: Fetch descriptions and document lists from the extraction release
+        if: steps.decide.outputs.build == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag=$(gh release list --limit 20 --json tagName \
+                  --jq '[.[] | select(.tagName | startswith("extraction-data-"))] | sort_by(.tagName) | last | .tagName')
+          if [ -z "$tag" ]; then
+            echo "::warning::no extraction-data release found — building without descriptions"
+            exit 0
+          fi
+          echo "using release $tag"
+          gh release download "$tag" --pattern 'scope.jsonl.gz' --dir data --clobber
+          gunzip -f data/scope.jsonl.gz
+          wc -l < data/scope.jsonl
+
+          # Absent on releases made before Aug 2026. Missing it is not a build
+          # failure: build_site.py then marks every row's document count
+          # unknown and the page claims nothing, which is the honest outcome
+          # and exactly what a partly-finished backfill looks like anyway.
+          #
+          # Merged with the cached copy rather than replacing it. `--daily`
+          # writes an entry for every new record it finds, and data/ round-trips
+          # through the Actions cache, so clobbering here quietly destroyed the
+          # document list of every record scraped since the release was cut --
+          # 2,118 of them within a day of shipping, growing nightly, while the
+          # site went on reporting 99.7% and looking finished.
+          #
+          # Order matters: the cached file goes first so the release wins on any
+          # key both hold, since load_documents folds last-entry-wins and the
+          # release is the authoritative backfill. Records only the nightly has
+          # seen are unique keys and survive either way.
+          cached=data/documents.jsonl
+          keep=""
+          if [ -f "$cached" ]; then
+            mv "$cached" data/documents.cached.jsonl
+            keep=data/documents.cached.jsonl
+            # A CI run killed mid-write leaves a partial last line. Glued to the
+            # release's first line it becomes a broken line in the middle of the
+            # file, which load_documents refuses to read past -- correctly, but
+            # it would fail every build from then on.
+            if [ -s "$keep" ] && [ -n "$(tail -c1 "$keep")" ]; then
+              echo "cached document log ends mid-write; dropping its last line"
+              sed -i '$d' "$keep"
+            fi
+          fi
+
+          if gh release download "$tag" --pattern 'documents.jsonl.gz' \
+               --dir data --clobber 2>/dev/null; then
+            gunzip -f data/documents.jsonl.gz
+            if [ -n "$keep" ]; then
+              cat "$keep" "$cached" > data/documents.merged.jsonl
+              mv data/documents.merged.jsonl "$cached"
+              rm -f "$keep"
+            fi
+            echo "document lists: $(wc -l < "$cached") records after merge"
+          else
+            # No asset on this release: keep whatever the nightly accumulated
+            # rather than throwing it away for nothing.
+            [ -n "$keep" ] && mv "$keep" "$cached"
+            echo "::warning::release $tag carries no documents.jsonl.gz — \
+              building from the cached log alone"
+          fi
+
+      - name: Build the payload
+        if: steps.decide.outputs.build == 'true'
+        run: python3 scripts/build_site.py
+
+      # Only one build directory is ever published now, because there is no
+      # git history to keep a superseded one alive for cached readers. The
+      # deployed artifact is atomic: readers get the new index.html and the new
+      # payload together.
+      - name: Keep only the build just made
+        if: steps.decide.outputs.build == 'true'
+        run: |
+          keep=$(python3 -c "import json;print(json.load(open('manifest.json'))['dir'].split('/')[-1])")
+          echo "keeping d/$keep"
+          for b in $(ls -1 d); do
+            [ "$b" = "$keep" ] || { rm -rf "d/$b"; echo "dropped d/$b"; }
+          done
+
+      - name: Save the payload for the next run
+        if: steps.decide.outputs.build == 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: |
+            d
+            manifest.json
+          key: ${{ steps.key.outputs.payload }}-${{ github.run_id }}
+
+      # Each build banks a 60 MB entry, and the nightly dispatch builds
+      # unconditionally, so they arrive nightly whether or not the key moved.
+      # GitHub evicts them after seven untouched days, so they were
+      # self-limiting while publishing was weekly; nightly publishing means
+      # seven live at once on top of whatever pushes add, and they share the
+      # repo's 10 GB cache budget with the ne-contracts-data- entries that
+      # stand for twenty hours of scraping. Pruned only after this run has
+      # banked its own, so a run that saved nothing can never age out the
+      # payload a portfolio push would fall back on.
+      - name: Delete old payload cache entries (keep newest 3)
+        if: steps.decide.outputs.build == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh cache list --key ne-payload- --json id,createdAt --limit 100 \
+            | jq -r 'sort_by(.createdAt) | reverse | .[3:] | .[].id' \
+            | xargs -r -n1 gh cache delete
+
+      # Stage what actually gets published. Copying rather than uploading the
+      # checkout directly is deliberate: data/ holds hundreds of MB of scraped
+      # CSVs and the extraction JSONL, none of which belongs on the site, and
+      # an exclude list is easier to audit than remembering to clean.
+      - name: Stage the site
+        run: |
+          mkdir -p _site
+          rsync -a ./ _site/ \
+            --exclude '.git' \
+            --exclude '.github' \
+            --exclude '_site' \
+            --exclude 'data' \
+            --exclude 'venv' \
+            --exclude '**/__pycache__' \
+            --exclude '.pytest_cache'
+          echo "staged $(du -sh _site | cut -f1)"
+          test -f _site/index.html
+          test -f _site/manifest.json
+          # The payload the manifest names must actually be there, or the site
+          # deploys with a page that cannot load its data.
+          dir=$(python3 -c "import json;print(json.load(open('_site/manifest.json'))['dir'])")
+          test -d "_site/$dir" || { echo "manifest names $dir but it is not staged"; exit 1; }
+          echo "payload $dir present"
+
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v5

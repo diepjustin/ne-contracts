@@ -1,0 +1,205 @@
+name: NE Contracts daily scrape
+
+on:
+  schedule:
+    # Both fire every day; the gate step below lets through only the entry
+    # matching the current UTC offset, so exactly one does anything on any
+    # given day. Two entries exist because GitHub Actions cron is UTC-only
+    # with no DST awareness.
+    - cron: '0 3 * * *'   # 10pm Central during CDT (UTC-5, 03:00 UTC next day)
+    - cron: '0 4 * * *'   # 10pm Central during CST (UTC-6, 04:00 UTC next day)
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Scrape and run the publish checks, but do not deploy.'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read     # this job no longer commits: pages.yml builds and deploys
+  actions: write     # for `gh cache delete` cleanup
+
+concurrency:
+  group: ne-contracts-daily
+  cancel-in-progress: false   # never cancel a run that might be mid-write to data/
+
+jobs:
+  daily:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Pick the DST-correct cron entry
+        id: gate
+        env:
+          SCHEDULE: ${{ github.event.schedule }}
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+        run: |
+          # Gate on *which* cron entry fired, never on the wall clock. An
+          # hour-equals-22 check silently no-ops the whole night when the run
+          # slips -- Aug 13 and Aug 14 2026 both had every entry land outside
+          # hour 22, so no scrape ran at all and both runs still reported
+          # success. And it slips a long way: across the 28 nights to 9 Sep
+          # 2026 this entry was never once on time, median three hours late,
+          # worst 11.8 hours, and every night since 2 Sep between 4h20m and
+          # 4h50m. See "Nightly automation" in README.md.
+          #
+          # Exactly one entry matches the current UTC offset, which keeps this
+          # DST-correct without ever double-running.
+          offset=$(TZ=America/Chicago date +%z)
+          case "$offset" in
+            -0500) want='0 3 * * *' ;;   # CDT: 03:00 UTC == 22:00 Central
+            -0600) want='0 4 * * *' ;;   # CST: 04:00 UTC == 22:00 Central
+            *)     want='' ;;
+          esac
+
+          if [ "${{ github.event_name }}" = 'workflow_dispatch' ]; then
+            proceed=true
+          elif [ -n "$want" ] && [ "$SCHEDULE" = "$want" ]; then
+            proceed=true
+          else
+            proceed=false
+            echo "Central offset is $offset, so today's real run is cron '$want'; this run came from '$SCHEDULE'. Skipping."
+          fi
+
+          # Every night that scrapes also publishes. This used to be Sunday
+          # only, which left the site up to six days behind a source the state
+          # updates daily, and left the guard rail below unrun on the other six
+          # nights. There is no weekday arithmetic left here on purpose: the
+          # rolled-back weekday existed only so a scrape that slipped past
+          # midnight still counted as Sunday, and nothing now cares what day
+          # it is.
+          publish=$proceed
+
+          # dry_run exercises the publish leg without publishing: the checks
+          # run, the deploy is not dispatched.
+          deploy=$publish
+          if [ "$DRY_RUN" = 'true' ]; then
+            deploy=false
+            echo "dry_run: running the checks, but not dispatching a deploy."
+          fi
+
+          echo "proceed=$proceed" >> "$GITHUB_OUTPUT"
+          echo "publish=$publish" >> "$GITHUB_OUTPUT"
+          echo "deploy=$deploy" >> "$GITHUB_OUTPUT"
+          echo "Central offset $offset -> proceed=$proceed publish=$publish deploy=$deploy"
+
+      - uses: actions/setup-python@v6
+        if: steps.gate.outputs.proceed == 'true'
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        if: steps.gate.outputs.proceed == 'true'
+        run: pip install -r requirements.txt
+
+      # Before the scrape, not beside the build: these are pure-function tests
+      # over the format and the parsers, they need no network and no data/, and
+      # a broken parser should stop the run before it spends an hour fetching.
+      - name: Tests
+        if: steps.gate.outputs.proceed == 'true'
+        run: python3 -m pytest tests/ -q
+
+      - name: Restore data/ cache
+        if: steps.gate.outputs.proceed == 'true'
+        uses: actions/cache/restore@v5
+        with:
+          path: data
+          key: ne-contracts-data-${{ github.run_id }}     # never pre-exists -- forces the restore-keys fallback below
+          restore-keys: |
+            ne-contracts-data-
+          # Fail here, loudly, rather than three steps later inside scrape.py.
+          # A miss means the baseline is gone, which is a 20+ hour re-scrape to
+          # recover from -- it should never be mistaken for a scraper bug.
+          fail-on-cache-miss: true
+
+      - name: Log restored data/ sizes
+        if: steps.gate.outputs.proceed == 'true'
+        run: ls -la data/*.csv 2>&1 || echo "no CSVs restored -- scrape.py --daily will refuse to run and fail this job"
+
+      - name: Daily scrape -- contract
+        if: steps.gate.outputs.proceed == 'true'
+        run: python3 scripts/scrape.py contract --daily
+
+      - name: Daily scrape -- purchase-order
+        if: steps.gate.outputs.proceed == 'true'
+        run: python3 scripts/scrape.py purchase-order --daily
+
+      - name: Daily scrape -- state
+        if: steps.gate.outputs.proceed == 'true'
+        run: python3 scripts/scrape.py state --daily
+
+      # --- Publish leg: every night the scrape ran ---
+      #
+      # This runs *before* the cache save on purpose. check_daily_diff.py clears
+      # data/daily_diff_report.json on both its exit paths, and that clear only
+      # survives if the save happens afterwards. With the save first, the report
+      # accumulated forever and one bad day would have blocked every future
+      # publish permanently.
+
+      - name: Check entity list drift
+        if: steps.gate.outputs.publish == 'true'
+        run: python3 scripts/check_entity_drift.py
+
+      # No build here any more. pages.yml rebuilds the payload and deploys it
+      # as a Pages artifact, so nothing this job produces needs committing --
+      # which is the whole point: every published build used to add ~50 MB to
+      # git history permanently.
+      #
+      # This step still gates publishing, though: it fails the job, and the
+      # dispatch below sits after it. A scrape this rejects therefore never
+      # reaches the site.
+      - name: Guard rail on tonight's diff
+        if: steps.gate.outputs.publish == 'true'
+        run: python3 scripts/check_daily_diff.py
+
+      # Publishing is a separate workflow now, and this is the only thing that
+      # asks it to run on a data change -- once a night now, at the end of the
+      # scrape that produced it. It sits after the guard rail on
+      # purpose: check_daily_diff.py fails the job, so a scrape it rejects
+      # never reaches this step and never reaches the site. dry_run stops here
+      # too, since it sets deploy=false.
+      - name: Deploy the rebuilt site
+        if: steps.gate.outputs.deploy == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh workflow run pages.yml --ref main
+          echo "dispatched pages.yml — it rebuilds the payload and deploys it"
+
+      # Saving still runs on failure -- a scrape that died halfway has real
+      # progress worth keeping, and --daily resumes from it. But it must never
+      # save a data/ with no CSVs in it: restore takes the *newest* prefix
+      # match, so one empty cache shadows the good one on every run afterwards
+      # and the failure becomes self-perpetuating. That is exactly what took
+      # the nightly job down in Aug 2026.
+      - name: Check data/ is worth caching
+        id: cachecheck
+        if: always() && steps.gate.outputs.proceed == 'true'
+        run: |
+          if ls data/*.csv >/dev/null 2>&1; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+            du -sh data
+          else
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::data holds no CSVs -- skipping the cache save so the existing good cache stays the newest match."
+          fi
+
+      - name: Save data/ cache
+        if: always() && steps.cachecheck.outputs.ok == 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: data
+          key: ne-contracts-data-${{ github.run_id }}-${{ github.run_attempt }}
+
+      # Only prune once this run has banked a good cache of its own, so a run
+      # that saved nothing can never age out the baseline it failed to replace.
+      - name: Delete old data/ cache entries (keep newest 3)
+        if: always() && steps.cachecheck.outputs.ok == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh cache list --key ne-contracts-data- --json id,createdAt --limit 100 \
+            | jq -r 'sort_by(.createdAt) | reverse | .[3:] | .[].id' \
+            | xargs -r -n1 gh cache delete

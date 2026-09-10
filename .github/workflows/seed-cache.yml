@@ -1,0 +1,65 @@
+name: NE Contracts seed cache
+
+# Seeds the `ne-contracts-data-` cache on whatever ref this runs from.
+#
+# Run this from main. A cache is only visible to the ref that saved it or to
+# the default branch, so a seed cache is useful exactly when it was saved by a
+# run on main -- seeding from a short-lived branch produces a cache the nightly
+# scrape can never restore, which is how the Aug 2026 outage happened.
+#
+# Point it at a run that uploaded an `ne-contracts-data-rescue` artifact (see
+# `rescue-cache.yml`), or leave the input blank to seed from CSVs committed to
+# the ref being run from.
+
+on:
+  workflow_dispatch:
+    inputs:
+      artifact_run_id:
+        description: 'Run ID whose ne-contracts-data-rescue artifact holds data/. Blank = use data/ as checked out.'
+        type: string
+        required: false
+
+permissions:
+  contents: read
+  actions: read   # to download an artifact from another run
+
+jobs:
+  seed:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Download data/ from the rescue run
+        if: inputs.artifact_run_id != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_RUN_ID: ${{ inputs.artifact_run_id }}
+        run: |
+          rm -rf data
+          mkdir -p data
+          gh run download "$ARTIFACT_RUN_ID" \
+            --name ne-contracts-data-rescue \
+            --dir data
+
+      - name: Verify data/ carries the CSVs before seeding
+        run: |
+          ls -la data/
+          # Seeding an empty data/ is worse than not seeding: prefix-restore
+          # takes the newest match, so it would shadow a good cache rather than
+          # simply be absent.
+          if ! ls data/*.csv >/dev/null 2>&1; then
+            echo "::error::no CSVs in data -- refusing to seed an empty cache"
+            exit 1
+          fi
+          du -sh data
+
+      - name: Save the cache under this ref
+        uses: actions/cache/save@v5
+        with:
+          path: data
+          key: ne-contracts-data-seed-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Report where the cache landed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh cache list --key ne-contracts-data- --json key,ref,sizeInBytes,createdAt

@@ -1,0 +1,71 @@
+name: NE Contracts rescue cache
+
+# One-off recovery tool, and it only works from this branch.
+#
+# GitHub scopes every Actions cache to the ref that saved it, and shares it
+# only with that same ref or the default branch. The original seed cache was
+# saved by a workflow_dispatch on `bootstrap-data-cache`, so `main` can never
+# restore it -- which is why the nightly scrape started failing with "refusing
+# --daily: data/nu_contracts.csv does not exist".
+#
+# Cache scope matches on the ref *name*, so re-creating this branch is enough
+# to see that cache again. This workflow restores it and re-publishes data/ as
+# an ordinary artifact, which -- unlike a cache -- any ref can download. The
+# companion `seed-cache.yml` on main then turns that artifact back into a
+# cache saved under refs/heads/main, where the nightly run can reach it.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rescue:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # Two ways in: recovering an orphaned cache (restore below), or a
+      # bootstrap branch that carries the CSVs in the checkout itself. Both end
+      # at the same artifact, and neither requires committing 346 MB to main --
+      # a revert would not remove those objects from history.
+      - name: Did the checkout already supply the CSVs?
+        id: have
+        run: |
+          if ls data/*.csv >/dev/null 2>&1; then
+            echo "csvs=true" >> "$GITHUB_OUTPUT"
+            echo "Checkout carries the CSVs -- bootstrap mode, skipping the cache restore."
+          else
+            echo "csvs=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Restore the branch-scoped data/ cache
+        if: steps.have.outputs.csvs != 'true'
+        uses: actions/cache/restore@v5
+        with:
+          path: data
+          key: ne-contracts-data-rescue-${{ github.run_id }}   # never pre-exists -- forces the restore-keys fallback
+          restore-keys: |
+            ne-contracts-data-
+          fail-on-cache-miss: true
+
+      - name: Verify the restore actually carried the CSVs
+        run: |
+          ls -la data/
+          # Prefix-restore takes the newest match, so an empty cache saved by a
+          # failed run would satisfy the step above while carrying nothing. The
+          # CSVs are the only thing worth rescuing, so require them explicitly.
+          if ! ls data/*.csv >/dev/null 2>&1; then
+            echo "::error::restored cache contains no CSVs -- wrong cache matched, nothing to rescue"
+            exit 1
+          fi
+          du -sh data
+
+      - name: Publish data/ as a cross-ref artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: ne-contracts-data-rescue
+          path: data
+          retention-days: 7
+          include-hidden-files: true

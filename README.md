@@ -280,7 +280,7 @@ python3 scripts/extract_text.py --retry-non-pdf   # re-ask the 32,227 non-PDF an
 python3 scripts/extract_scope.py            # doc_text.jsonl -> data/scope.jsonl (~1 min)
 
 python3 scripts/build_site.py               # data/*.csv -> d/<buildId>/  (~3 min, ~1.7 GB peak)
-python3 scripts/serve_site.py               # preview at http://127.0.0.1:8765
+python3 ../serve.py                         # preview at http://127.0.0.1:8765/ne-contracts/
 python3 -m pytest tests/ -q
 python3 scripts/lint_page.py                # eslint over the script in index.html
 ```
@@ -1097,6 +1097,14 @@ grouping silently absent. `meta.json` is now written last and re-read to confirm
 ---
 
 ## Open work
+
+**The full-text document search prototype is retired** (Aug 2026). It built a SQLite
+index over `data/doc_text.jsonl` and served it in chunks. The chunked index is no
+longer published (GitHub Pages ranges against the compressed representation; see the
+note at the top of `scripts/ne_format.py`). `scripts/build_search_index.py`,
+`scripts/chunk_search_db.py` and the unreferenced `scripts/run_state_scrape_cycles.sh`
+were removed on 8 Sep 2026 and live in git history; `prototype-search/` stays
+gitignored because the 503 MB local copy is still on disk.
 
 **~3,021 unreviewed vendor clusters**, holding most of the $11.02 B above.
 `scripts/suggest_vendor_groups.py` proposes candidates ranked by spend and **decides

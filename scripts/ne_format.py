@@ -14,7 +14,8 @@ serves a range against the *compressed* representation when the client
 advertises gzip, which browsers always do and `fetch()` cannot override. Ask
 for bytes 100-115 and you get bytes 100-115 of a gzip stream, plus a
 Content-Range denominator that is the compressed length. See
-scripts/chunk_search_db.py, which hit the same wall.
+scripts/chunk_search_db.py in this repository's history (retired with the search
+prototype in Aug 2026), which hit the same wall.
 
 Layout, where n = row count and V = vendor count:
 

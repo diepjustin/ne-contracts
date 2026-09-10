@@ -19,7 +19,6 @@ import sys
 SCRIPTS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts")
 sys.path.insert(0, SCRIPTS)
 
-import scrape  # noqa: E402
 
 
 def decide(known, seen):

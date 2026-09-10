@@ -22,7 +22,7 @@ document from the state's server, so keep samples small and infrequent.
 
 where candidates.json is [[view_token, claimed_description], ...].
 """
-import io, json, os, sys, time, random
+import json, os, sys, time, random
 import requests, fitz
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -65,7 +65,7 @@ if __name__ == "__main__":
             if not r.content.startswith(b"%PDF-"):
                 failed += 1; continue
             geo = description_by_geometry(r.content)
-        except Exception as e:
+        except Exception:
             failed += 1; continue
         if geo is None:
             missing += 1; continue

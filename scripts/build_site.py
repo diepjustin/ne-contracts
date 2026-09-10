@@ -582,7 +582,7 @@ def main():
     vendor_names = [v.encode("utf-8") for v in payload["vendors"]]
     for v in vendor_names:
         if len(v) > 255:
-            sys.exit(f"vendor name exceeds 255 bytes — the length column is a u8; widen it")
+            sys.exit("vendor name exceeds 255 bytes — the length column is a u8; widen it")
 
     # Document numbers and vendor names are not columns, so the per-column
     # digests above leave the two largest resident files unchecked in the

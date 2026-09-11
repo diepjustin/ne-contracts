@@ -26,17 +26,17 @@ import os
 import subprocess
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-REPO = os.path.dirname(ROOT)
+REPO = ROOT
 
 # Extensions whose contents are legitimately binary. Everything else tracked
-# under ne-contracts/ is text and must stay greppable.
+# in this repo is text and must stay greppable.
 BINARY = {".bin", ".gz", ".zip", ".pdf", ".png", ".jpg", ".jpeg", ".webp",
           ".JPG", ".ico", ".woff", ".woff2", ".csv"}
 
 
 def tracked_text_files():
     out = subprocess.check_output(
-        ["git", "-C", REPO, "ls-files", "--", "ne-contracts"]).decode()
+        ["git", "-C", REPO, "ls-files"]).decode()
     for name in out.splitlines():
         if os.path.splitext(name)[1] not in BINARY:
             path = os.path.join(REPO, name)

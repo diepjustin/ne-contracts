@@ -232,6 +232,21 @@ jobs:
             [ "$b" = "$keep" ] || { rm -rf "d/$b"; echo "dropped d/$b"; }
           done
 
+      # ../ne-connect/'s per-entity itemized-detail view fetches these
+      # shards directly (see that repo's docs/SCHEMA.md "Cross-fetch"
+      # section) -- a separate, independent script from build_site.py's own
+      # search payload above, deliberately never committed for the same
+      # reason that payload isn't: sharded by vendor name's first letter
+      # because one vendor alone (Amazon Capital Services) made a combined
+      # export ~190 MB, past GitHub's 100 MB per-file push limit. Placed
+      # after the cleanup step above (a "rows" entry under d/ would
+      # otherwise be swept away as an unrecognized build dir) and before the
+      # cache save below, so it rides along in the same d/ cache entry and
+      # survives on a day this job reuses the restored payload untouched.
+      - name: Export vendor rows for ne-connect
+        if: steps.decide.outputs.build == 'true'
+        run: python3 scripts/export_vendor_rows.py
+
       - name: Save the payload for the next run
         if: steps.decide.outputs.build == 'true'
         uses: actions/cache/save@v5

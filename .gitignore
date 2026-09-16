@@ -51,6 +51,11 @@ data/scope.jsonl
 data/scope*.jsonl
 data/*.new.jsonl
 
+# scripts/ocr_pilot.py's checkpoint -- a small experiment, not a data source
+# anything else reads, and shouldn't be committed any more than the files
+# above are.
+data/ocr_pilot.jsonl
+
 # prototype-search/ was retired in Aug 2026 (see README.md, "Open work") -- the
 # chunked index is no longer published. search.sqlite stays ignored because the
 # local copy is still on disk and regenerable from data/doc_text.jsonl, and it
@@ -67,3 +72,7 @@ manifest.json
 # The inline script cut out of index.html for eslint, by scripts/lint_page.py.
 # Regenerated on every lint run and never read by anything else.
 .lint/
+ocr_full_run.log
+
+# macOS Finder metadata.
+.DS_Store

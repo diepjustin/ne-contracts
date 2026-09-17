@@ -7,30 +7,43 @@
 <meta name="description" content="Searchable database of Nebraska state agency and university contracts and purchase orders from the Nebraska State Contracts Database.">
 <style>
   :root {
-    --bg: #ffffff; --panel: #f6f7f9; --border: #d9dde3; --text: #14181d;
+    --canvas: #f2f2ef; --bg: #ffffff; --panel: #f5f6f8; --border: #e1e4ea; --text: #14181d;
     --muted: #626b76; --accent: #d00000; --accent-soft: #fdecec;
-    --row-alt: #fafbfc; --shadow: 0 1px 3px rgba(0,0,0,.08);
+    --row-alt: #fafbfc; --shadow: 0 1px 2px rgba(20,24,29,.05), 0 8px 24px rgba(20,24,29,.07);
+    --active: #0a7d3f; --active-bg: #0a7d3f14; --active-border: #0a7d3f4d;
+    --radius: 10px;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    --serif: ui-serif, Georgia, Cambria, "Times New Roman", Times, serif;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
   }
   @media (prefers-color-scheme: dark) {
     :root {
-      --bg: #14171a; --panel: #1c2025; --border: #2c323a; --text: #e6e9ed;
+      --canvas: #0b0c0e; --bg: #16191c; --panel: #1c2025; --border: #2c323a; --text: #e6e9ed;
       --muted: #949dab; --accent: #ff6b6b; --accent-soft: #2a1c1d;
-      --row-alt: #181c20; --shadow: 0 1px 3px rgba(0,0,0,.4);
+      --row-alt: #181c20; --shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.38);
+      --active: #3ecf82; --active-bg: #123420; --active-border: #235c39;
     }
   }
   * { box-sizing: border-box; }
+  /* .field and a few other rules below set display: flex/grid, which -- being
+     an author rule -- beats the browser's own [hidden]{display:none} even
+     though that looks like it should win. Restated explicitly so "hidden"
+     always means hidden. */
+  [hidden] { display: none !important; }
   body {
-    margin: 0; background: var(--bg); color: var(--text);
-    font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    margin: 0; background: var(--canvas); color: var(--text);
+    font: 15px/1.5 var(--sans);
   }
   header {
-    padding: 22px 20px 16px; border-bottom: 1px solid var(--border);
+    margin: 18px 20px 0; padding: 26px 26px 22px;
+    background: var(--bg); border: 1px solid var(--border);
+    border-radius: var(--radius); box-shadow: var(--shadow);
   }
   .head-row {
     display: flex; align-items: flex-start; justify-content: space-between;
     gap: 10px 24px; flex-wrap: wrap;
   }
-  h1 { margin: 0 0 4px; font-size: 21px; letter-spacing: -.01em; }
+  h1 { margin: 0 0 8px; font: 600 26px/1.25 var(--serif); letter-spacing: -.01em; }
   .sub { color: var(--muted); font-size: 13.5px; }
   /* Three short paragraphs rather than one run-on line. Bounded so the text
      stays readable on a wide monitor, where the table wants every pixel but
@@ -38,7 +51,7 @@
   .sub p { margin: 0 0 4px; max-width: 82ch; }
   .sub p:last-child { margin-bottom: 0; }
   .gap-note {
-    margin-top: 12px; padding: 9px 12px; border-radius: 5px; font-size: 12.5px;
+    margin-top: 14px; padding: 9px 12px; border-radius: 6px; font-size: 12.5px;
     line-height: 1.5; color: var(--text);
     background: var(--accent-soft); border: 1px solid var(--accent);
   }
@@ -47,6 +60,7 @@
   .updated {
     color: var(--muted); font-size: 11px; text-transform: uppercase;
     letter-spacing: .06em; font-weight: 600; text-align: right; flex-shrink: 0;
+    font-family: var(--mono);
   }
   .updated b {
     display: block; margin-top: 3px; color: var(--text); font-size: 13px;
@@ -57,15 +71,17 @@
   }
 
   .controls {
-    display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end;
-    padding: 14px 20px; background: var(--panel); border-bottom: 1px solid var(--border);
-    position: sticky; top: 0; z-index: 5;
+    display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end;
+    margin: 12px 20px 16px; padding: 16px 18px;
+    background: var(--bg); border: 1px solid var(--border);
+    border-radius: var(--radius); box-shadow: var(--shadow);
+    position: sticky; top: 12px; z-index: 5;
   }
-  .field { display: flex; flex-direction: column; gap: 4px; }
-  .field label { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); font-weight: 600; }
+  .field { display: flex; flex-direction: column; gap: 5px; }
+  .field label { font-size: 10.5px; text-transform: uppercase; letter-spacing: .07em; color: var(--muted); font-weight: 700; }
   input, select, button {
-    font: inherit; padding: 7px 9px; border: 1px solid var(--border);
-    border-radius: 6px; background: var(--bg); color: var(--text);
+    font: inherit; padding: 7px 10px; border: 1px solid var(--border);
+    border-radius: 7px; background: var(--bg); color: var(--text);
   }
   input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
   #q { min-width: 260px; }
@@ -74,14 +90,14 @@
   .combo { position: relative; display: flex; }
   #entity-q { min-width: 210px; width: 100%; }
   #entity-list {
-    position: absolute; top: calc(100% + 2px); left: 0; z-index: 5;
+    position: absolute; top: calc(100% + 4px); left: 0; z-index: 5;
     /* Wide enough for the longest name rather than the input: the agencies
        share long prefixes ("University of Nebraska ..."), so a list clipped to
        the box shows five rows that all read the same. */
     min-width: 100%; width: max-content; max-width: 420px;
     margin: 0; padding: 4px 0; list-style: none; max-height: 260px; overflow-y: auto;
-    background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
-    box-shadow: 0 6px 20px rgba(0, 0, 0, .28);
+    background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+    box-shadow: var(--shadow);
   }
   #entity-list li { padding: 5px 9px; cursor: pointer; white-space: nowrap; }
   #entity-list li[aria-selected="true"], #entity-list li:hover { background: var(--accent); color: #fff; }
@@ -97,23 +113,24 @@
   .yr  { width: 78px; }
   button {
     cursor: pointer; font-weight: 600; background: var(--bg);
+    transition: border-color .12s, color .12s;
   }
   button:hover { border-color: var(--accent); color: var(--accent); }
   #reset { color: var(--muted); font-weight: 500; }
 
   .status {
-    padding: 9px 20px; font-size: 13.5px; color: var(--muted);
+    padding: 10px 24px; font-size: 13px; color: var(--muted);
     border-bottom: 1px solid var(--border); display: flex; gap: 14px; flex-wrap: wrap;
-    align-items: center;
+    align-items: center; background: var(--bg); font-family: var(--mono);
   }
-  .status b { color: var(--text); }
-  #exp button { padding: 1px 8px; font-size: 12px; font-weight: 500; margin-left: 8px; }
+  .status b { color: var(--text); font-weight: 600; }
+  #exp button { padding: 1px 8px; font-size: 12px; font-weight: 500; margin-left: 8px; font-family: var(--sans); }
 
   /* Fixed height on purpose. The table below is virtualised on the assumption
      that every row is exactly ROW_H tall, so the description cannot expand a
      row without breaking the scroll arithmetic -- it lives out here instead. */
   #detail {
-    padding: 10px 20px; border-bottom: 1px solid var(--border);
+    padding: 12px 24px; border-bottom: 1px solid var(--border);
     background: var(--panel); height: 132px; overflow-y: auto; font-size: 13.5px;
   }
   /* A row that lists its documents needs more room than one that does not.
@@ -121,7 +138,7 @@
      had, and fitScroller measures the panel's bottom edge, so the table below
      resizes to match. Capped so the list can never squeeze out the table. */
   #detail.has-docs { height: auto; max-height: 42vh; }
-  #detail .who { color: var(--muted); font-size: 12px; margin-bottom: 3px; }
+  #detail .who { color: var(--muted); font-size: 12px; margin-bottom: 3px; font-family: var(--mono); }
   #detail .who b { color: var(--text); font-variant-numeric: tabular-nums; }
   #detail .words { white-space: pre-wrap; }
   #detail .none { color: var(--muted); font-style: italic; }
@@ -142,7 +159,7 @@
     display: flex; gap: 8px; align-items: baseline;
     padding: 1px 0; white-space: normal;
   }
-  #detail .doc-row a { font-variant-numeric: tabular-nums; }
+  #detail .doc-row a { font-variant-numeric: tabular-nums; font-family: var(--mono); }
   #detail .doc-size {
     color: var(--muted); font-variant-numeric: tabular-nums;
     min-width: 3.5em;
@@ -160,50 +177,56 @@
   body.has-descriptions tbody tr[data-row] { cursor: pointer; }
   tbody tr.picked { background: var(--accent-soft); }
 
-  #scroller { overflow: auto; height: calc(100vh - 218px); }
+  #scroller { overflow: auto; height: calc(100vh - 218px); background: var(--bg); }
   /* The scroller's height is hand-computed against everything above it, so the
      detail strip has to be subtracted too or the page overflows by its height. */
   body.has-detail #scroller { height: calc(100vh - 218px - 132px); }
   table { border-collapse: collapse; width: 100%; font-size: 13.5px; }
   thead th {
     position: sticky; top: 0; background: var(--panel); z-index: 2;
-    text-align: left; padding: 9px 10px; font-size: 11px; text-transform: uppercase;
-    letter-spacing: .05em; color: var(--muted); border-bottom: 1px solid var(--border);
+    text-align: left; padding: 10px 10px; font-size: 10.5px; text-transform: uppercase;
+    letter-spacing: .06em; font-weight: 700; color: var(--muted); border-bottom: 1px solid var(--border);
     cursor: pointer; white-space: nowrap; user-select: none;
   }
   thead th:hover { color: var(--accent); }
-  thead th .ind { opacity: .45; font-weight: 400; }
+  thead th .ind { opacity: .5; font-weight: 400; }
   td { padding: 7px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
   tbody tr:nth-child(even) { background: var(--row-alt); }
-  .amt { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
-  .dt  { white-space: nowrap; font-variant-numeric: tabular-nums; color: var(--muted); }
+  tbody tr:hover { background: var(--panel); }
+  .amt { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; font-family: var(--mono); }
+  .dt  { white-space: nowrap; font-variant-numeric: tabular-nums; color: var(--muted); font-family: var(--mono); }
   .vendor { min-width: 200px; }
-  .doc a { color: var(--accent); text-decoration: none; font-variant-numeric: tabular-nums; }
+  .doc a { color: var(--accent); text-decoration: none; font-variant-numeric: tabular-nums; font-family: var(--mono); font-weight: 600; }
   .doc a:hover { text-decoration: underline; }
   .pill {
-    display: inline-block; padding: 1px 7px; border-radius: 20px;
-    font-size: 11px; font-weight: 600; border: 1px solid var(--border); white-space: nowrap;
+    display: inline-block; padding: 1px 8px; border-radius: 20px;
+    font: 600 10.5px/1.5 var(--mono); letter-spacing: .03em; text-transform: uppercase;
+    border: 1px solid var(--border); white-space: nowrap;
   }
-  .pill.active { color: #0a7d3f; border-color: #0a7d3f55; background: #0a7d3f14; }
+  .pill.active { color: var(--active); border-color: var(--active-border); background: var(--active-bg); }
   .pill.expired { color: var(--muted); }
   mark { background: var(--accent-soft); color: inherit; padding: 0 1px; border-radius: 2px; }
   .empty { padding: 50px 20px; text-align: center; color: var(--muted); }
-  #load { padding: 50px 20px; text-align: center; color: var(--muted); }
+  #load { padding: 50px 20px; text-align: center; color: var(--muted); background: var(--bg); }
   .bar {
     width: 320px; max-width: 70%; height: 6px; margin: 14px auto 0;
     background: var(--border); border-radius: 3px; overflow: hidden;
   }
   .bar i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .12s linear; }
   #report {
-    margin: 0; padding: 18px 20px; font: 12.5px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
-    white-space: pre-wrap; overflow-x: auto;
+    margin: 0; padding: 18px 20px; font: 12.5px/1.6 var(--mono);
+    white-space: pre-wrap; overflow-x: auto; background: var(--bg);
   }
-  footer { padding: 14px 20px; font-size: 12.5px; color: var(--muted); border-top: 1px solid var(--border); }
+  footer {
+    padding: 16px 24px; font-size: 12.5px; color: var(--muted);
+    border-top: 1px solid var(--border); background: var(--bg);
+  }
   footer a { color: inherit; }
   @media (max-width: 720px) {
     .hide-sm { display: none; }
     #scroller { height: calc(100vh - 300px); }
     body.has-detail #scroller { height: calc(100vh - 300px - 132px); }
+    header, .controls { margin-left: 0; margin-right: 0; border-radius: 0; }
   }
 </style>
 </head>

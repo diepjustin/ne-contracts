@@ -16,7 +16,8 @@ on:
         default: false
 
 permissions:
-  contents: read     # this job no longer commits: pages.yml builds and deploys
+  contents: write    # for `gh release create` below -- release creation needs
+                      # write even though this job no longer commits to the tree
   actions: write     # for `gh cache delete` cleanup
 
 concurrency:
@@ -203,3 +204,46 @@ jobs:
           gh cache list --key ne-contracts-data- --json id,createdAt --limit 100 \
             | jq -r 'sort_by(.createdAt) | reverse | .[3:] | .[].id' \
             | xargs -r -n1 gh cache delete
+
+      # ne-connect (the hub) has no way to read this repo's gitignored data/
+      # directly -- GitHub Actions caches are strictly repo-scoped, so a cache
+      # saved here can never be restored by a workflow running in ne-connect.
+      # A release is the one thing that crosses that boundary (ne-lobbying's
+      # own monthly backup already does this, PLAN.md 0.5) -- ne-connect-
+      # nightly.yml downloads the latest ne-contracts-hub-data-* release.
+      # Warn rather than fail: a missed release here should never take down a
+      # scrape that already succeeded at its real job. Gated on cachecheck
+      # (runs after it, not before) since that's the same "data/ actually has
+      # something in it" signal the cache save already uses.
+      - name: Publish a data release for ne-connect
+        if: always() && steps.cachecheck.outputs.ok == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p release
+          for f in data/nu_contracts.csv data/nu_purchase_orders.csv data/state_agencies.csv data/scrape_meta.json; do
+            if [ -f "$f" ]; then
+              gzip -c "$f" > "release/$(basename "$f").gz"
+            else
+              echo "::warning::$f missing -- skipping it in tonight's hub-data release"
+            fi
+          done
+          if ls release/*.gz >/dev/null 2>&1; then
+            tag="ne-contracts-hub-data-$(TZ=America/Chicago date +%Y-%m-%d)"
+            gh release create "$tag" release/*.gz \
+              --repo diepjustin/ne-contracts \
+              --title "Contracts hub data — $(TZ=America/Chicago date +%Y-%m-%d)" \
+              --notes "Automated data export for ne-connect-nightly.yml. See ne-connect's PLAN.md." \
+              || echo "::warning::gh release create failed -- ne-connect will build from its previous release tonight"
+          else
+            echo "::warning::nothing to release -- skipping"
+          fi
+
+      - name: Delete old hub-data releases (keep newest 3)
+        if: always() && steps.cachecheck.outputs.ok == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release list --repo diepjustin/ne-contracts --json tagName,createdAt --limit 100 \
+            | jq -r '[.[] | select(.tagName | startswith("ne-contracts-hub-data-"))] | sort_by(.createdAt) | reverse | .[3:] | .[].tagName' \
+            | xargs -r -n1 -I{} gh release delete {} --repo diepjustin/ne-contracts --yes

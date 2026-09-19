@@ -230,6 +230,12 @@ jobs:
           done
           if ls release/*.gz >/dev/null 2>&1; then
             tag="ne-contracts-hub-data-$(TZ=America/Chicago date +%Y-%m-%d)"
+            # Same-day re-run would otherwise hit "a release with the same
+            # tag name already exists" and silently keep serving the first
+            # run's stale data -- confirmed happening for real in ne-fec's
+            # identical pattern on 2026-09-19 -- delete any existing
+            # same-day release first so a re-run actually replaces it.
+            gh release delete "$tag" --repo diepjustin/ne-contracts --yes 2>/dev/null || true
             gh release create "$tag" release/*.gz \
               --repo diepjustin/ne-contracts \
               --title "Contracts hub data — $(TZ=America/Chicago date +%Y-%m-%d)" \

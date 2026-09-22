@@ -9,9 +9,10 @@
   :root {
     --canvas: #f2f2ef; --bg: #ffffff; --panel: #f5f6f8; --border: #e1e4ea; --text: #14181d;
     --muted: #626b76; --accent: #d00000; --accent-soft: #fdecec;
-    --row-alt: #fafbfc; --shadow: 0 1px 2px rgba(20,24,29,.05), 0 8px 24px rgba(20,24,29,.07);
+    --row-alt: #fafbfc; --shadow: 0 1px 2px rgba(20,24,29,.06), 0 6px 14px rgba(20,24,29,.08);
     --active: #0a7d3f; --active-bg: #0a7d3f14; --active-border: #0a7d3f4d;
     --radius: 10px;
+    --scroll-thumb: #c9cdd4; --scroll-track: transparent;
     --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
     --serif: ui-serif, Georgia, Cambria, "Times New Roman", Times, serif;
     --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
@@ -20,8 +21,9 @@
     :root {
       --canvas: #0b0c0e; --bg: #16191c; --panel: #1c2025; --border: #2c323a; --text: #e6e9ed;
       --muted: #949dab; --accent: #ff6b6b; --accent-soft: #2a1c1d;
-      --row-alt: #181c20; --shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.38);
+      --row-alt: #181c20; --shadow: 0 1px 2px rgba(0,0,0,.5), 0 6px 14px rgba(0,0,0,.42);
       --active: #3ecf82; --active-bg: #123420; --active-border: #235c39;
+      --scroll-thumb: #3a4048; --scroll-track: transparent;
     }
   }
   * { box-sizing: border-box; }
@@ -30,12 +32,21 @@
      though that looks like it should win. Restated explicitly so "hidden"
      always means hidden. */
   [hidden] { display: none !important; }
+  /* Themed rather than left to the browser default -- the same reasoning as
+     tabular-nums on the amount column: the parts of the page nobody
+     hand-drew still carry the design. */
+  ::selection { background: var(--accent); color: #fff; }
+  * { scrollbar-color: var(--scroll-thumb) var(--scroll-track); scrollbar-width: thin; }
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-track { background: var(--scroll-track); }
+  ::-webkit-scrollbar-thumb { background: var(--scroll-thumb); border-radius: 6px; border: 2px solid var(--bg); }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
   body {
     margin: 0; background: var(--canvas); color: var(--text);
     font: 15px/1.5 var(--sans);
   }
   header {
-    margin: 18px 20px 0; padding: 26px 26px 22px;
+    margin: 18px 20px 0; padding: 22px 26px;
     background: var(--bg); border: 1px solid var(--border);
     border-radius: var(--radius); box-shadow: var(--shadow);
   }
@@ -50,6 +61,24 @@
      prose does not. */
   .sub p { margin: 0 0 4px; max-width: 82ch; }
   .sub p:last-child { margin-bottom: 0; }
+  /* The lede stays visible; the rest of the explainer is one click away so a
+     returning reader -- who has already read it -- lands straight on the
+     controls instead of scrolling past three paragraphs every time. */
+  .sub details { margin-top: 2px; }
+  .sub details[open] summary { margin-bottom: 8px; }
+  .sub details p { max-width: 82ch; }
+  .sub summary {
+    cursor: pointer; color: var(--muted); font-size: 12.5px; font-weight: 600;
+    list-style: none; display: inline-flex; align-items: center; gap: 5px;
+  }
+  .sub summary::-webkit-details-marker { display: none; }
+  .sub summary::before {
+    content: ""; width: 6px; height: 6px; flex-shrink: 0;
+    border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor;
+    transform: rotate(-45deg); transition: transform .15s;
+  }
+  .sub details[open] summary::before { transform: rotate(45deg); }
+  .sub summary:hover { color: var(--accent); }
   .gap-note {
     margin-top: 14px; padding: 9px 12px; border-radius: 6px; font-size: 12.5px;
     line-height: 1.5; color: var(--text);
@@ -71,14 +100,29 @@
   }
 
   .controls {
-    display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end;
-    margin: 12px 20px 16px; padding: 16px 18px;
+    display: flex; flex-wrap: wrap; gap: 16px 0; align-items: flex-end;
+    margin: 12px 20px 16px; padding: 14px 18px;
     background: var(--bg); border: 1px solid var(--border);
     border-radius: var(--radius); box-shadow: var(--shadow);
     position: sticky; top: 12px; z-index: 5;
   }
+  /* Thirteen controls in one flat row wrapped as a wall, one at a time, on
+     anything narrower than a wide desktop. Grouped by what they do, a group
+     wraps as a unit and a divider marks where one kind of control ends and
+     the next begins -- functional, not decorative, so it survives the
+     "colored border" rule below by not being colored. */
+  .control-group {
+    display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end;
+    padding: 0 18px; border-left: 1px solid var(--border);
+  }
+  .control-group:first-child { padding-left: 0; border-left: none; }
+  .control-group.actions { margin-left: auto; }
+  @media (max-width: 900px) {
+    .control-group { padding-left: 0; border-left: none; padding-right: 0; }
+    .control-group.actions { margin-left: 0; }
+  }
   .field { display: flex; flex-direction: column; gap: 5px; }
-  .field label { font-size: 10.5px; text-transform: uppercase; letter-spacing: .07em; color: var(--muted); font-weight: 700; }
+  .field label { font-size: 11px; text-transform: uppercase; letter-spacing: .07em; color: var(--muted); font-weight: 700; }
   input, select, button {
     font: inherit; padding: 7px 10px; border: 1px solid var(--border);
     border-radius: 7px; background: var(--bg); color: var(--text);
@@ -113,9 +157,14 @@
   .yr  { width: 78px; }
   button {
     cursor: pointer; font-weight: 600; background: var(--bg);
-    transition: border-color .12s, color .12s;
+    transition: border-color .12s, color .12s, background-color .12s, transform .08s;
   }
   button:hover { border-color: var(--accent); color: var(--accent); }
+  button:active { transform: translateY(1px); }
+  /* Export CSV is the action most readers want; it carries the accent at
+     rest instead of only on hover, the way the other buttons do. */
+  .btn-primary { border-color: var(--accent); color: var(--accent); }
+  .btn-primary:hover { background: var(--accent-soft); }
   #reset { color: var(--muted); font-weight: 500; }
 
   .status {
@@ -184,7 +233,7 @@
   table { border-collapse: collapse; width: 100%; font-size: 13.5px; }
   thead th {
     position: sticky; top: 0; background: var(--panel); z-index: 2;
-    text-align: left; padding: 10px 10px; font-size: 10.5px; text-transform: uppercase;
+    text-align: left; padding: 10px 10px; font-size: 11px; text-transform: uppercase;
     letter-spacing: .06em; font-weight: 700; color: var(--muted); border-bottom: 1px solid var(--border);
     cursor: pointer; white-space: nowrap; user-select: none;
   }
@@ -193,6 +242,10 @@
   td { padding: 7px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
   tbody tr:nth-child(even) { background: var(--row-alt); }
   tbody tr:hover { background: var(--panel); }
+  /* Rows become keyboard-operable (tabindex + role=button) only once there is
+     something to expand into -- see the has-descriptions/has-ai-summaries
+     guard in render(). An inset ring so it never nudges row height. */
+  tbody tr[tabindex]:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
   .amt { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; font-family: var(--mono); }
   .dt  { white-space: nowrap; font-variant-numeric: tabular-nums; color: var(--muted); font-family: var(--mono); }
   .vendor { min-width: 200px; }
@@ -200,7 +253,7 @@
   .doc a:hover { text-decoration: underline; }
   .pill {
     display: inline-block; padding: 1px 8px; border-radius: 20px;
-    font: 600 10.5px/1.5 var(--mono); letter-spacing: .03em; text-transform: uppercase;
+    font: 600 11px/1.5 var(--mono); letter-spacing: .03em; text-transform: uppercase;
     border: 1px solid var(--border); white-space: nowrap;
   }
   .pill.active { color: var(--active); border-color: var(--active-border); background: var(--active-bg); }
@@ -244,17 +297,20 @@
           holds only documents that were still active on 1 January 2014, so earlier years are
           sparse for that reason rather than because less was spent.
         </p>
-        <p>
-          Click any row for that document's description — the state's own words, lifted from the
-          filing and never rewritten. Not every record has one; the Description filter shows which do.
-        </p>
-        <p>
-          Document numbers link to the original PDF on the state's servers at
-          statecontracts.nebraska.gov. Some records publish several documents — amendments,
-          renewals, the signed contract — and clicking the row lists all of them. Those files
-          are served by the state, not copied here, so a link will not open while that
-          service is down.
-        </p>
+        <details>
+          <summary>How this page works</summary>
+          <p>
+            Click any row for that document's description — the state's own words, lifted from the
+            filing and never rewritten. Not every record has one; the Description filter shows which do.
+          </p>
+          <p>
+            Document numbers link to the original PDF on the state's servers at
+            statecontracts.nebraska.gov. Some records publish several documents — amendments,
+            renewals, the signed contract — and clicking the row lists all of them. Those files
+            are served by the state, not copied here, so a link will not open while that
+            service is down.
+          </p>
+        </details>
       </div>
     </div>
     <div class="updated" id="updated" hidden></div>
@@ -263,79 +319,89 @@
 </header>
 
 <div class="controls">
-  <div class="field">
-    <label for="q">Search vendor or document #</label>
-    <input id="q" type="search" placeholder="e.g. amazon, fisher scientific, 4800185035" autocomplete="off">
-  </div>
-  <div class="field">
-    <label for="indesc">Also search</label>
-    <label class="check"><input type="checkbox" id="indesc"> descriptions</label>
-  </div>
-  <div class="field">
-    <label for="type">Type</label>
-    <select id="type"><option value="">All</option></select>
-  </div>
-  <div class="field">
-    <label for="status">Status</label>
-    <select id="status"><option value="">All</option></select>
-  </div>
-  <div class="field">
-    <label for="entity-q">Agency</label>
-    <div class="combo">
-      <input id="entity-q" type="text" placeholder="All" autocomplete="off"
-             role="combobox" aria-expanded="false" aria-controls="entity-list"
-             aria-autocomplete="list">
-      <ul id="entity-list" role="listbox" aria-label="Agencies" hidden></ul>
+  <div class="control-group">
+    <div class="field">
+      <label for="q">Search vendor or document #</label>
+      <input id="q" type="search" placeholder="e.g. amazon, fisher scientific, 4800185035" autocomplete="off">
     </div>
-    <!-- The filter itself. Every reader of this control still asks the select
-         for its value, and its options are indices into meta.entities, so the
-         box above only has to keep this in step. -->
-    <select id="entity" hidden><option value="">All</option></select>
+    <div class="field">
+      <label for="indesc">Also search</label>
+      <label class="check"><input type="checkbox" id="indesc"> descriptions</label>
+    </div>
   </div>
-  <div class="field">
-    <label for="y0">Begins from</label>
-    <!-- 2014, not the earliest year in the data. A record beginning in 1977 does
-         exist, but the state's database only ever loaded documents still active
-         on 1 Jan 2014, so a filter starting earlier returns a handful of
-         survivors and reads as though the state barely spent: 2013 holds 5,135
-         rows against 2014's 46,701. The placeholder should not invite that. -->
-    <input id="y0" class="yr" type="number" placeholder="2014" inputmode="numeric">
+  <div class="control-group">
+    <div class="field">
+      <label for="type">Type</label>
+      <select id="type"><option value="">All</option></select>
+    </div>
+    <div class="field">
+      <label for="status">Status</label>
+      <select id="status"><option value="">All</option></select>
+    </div>
+    <div class="field">
+      <label for="entity-q">Agency</label>
+      <div class="combo">
+        <input id="entity-q" type="text" placeholder="All" autocomplete="off"
+               role="combobox" aria-expanded="false" aria-controls="entity-list"
+               aria-autocomplete="list">
+        <ul id="entity-list" role="listbox" aria-label="Agencies" hidden></ul>
+      </div>
+      <!-- The filter itself. Every reader of this control still asks the select
+           for its value, and its options are indices into meta.entities, so the
+           box above only has to keep this in step. -->
+      <select id="entity" hidden><option value="">All</option></select>
+    </div>
   </div>
-  <div class="field">
-    <label for="y1">Begins through</label>
-    <input id="y1" class="yr" type="number" placeholder="2030" inputmode="numeric">
+  <div class="control-group">
+    <div class="field">
+      <label for="y0">Begins from</label>
+      <!-- 2014, not the earliest year in the data. A record beginning in 1977 does
+           exist, but the state's database only ever loaded documents still active
+           on 1 Jan 2014, so a filter starting earlier returns a handful of
+           survivors and reads as though the state barely spent: 2013 holds 5,135
+           rows against 2014's 46,701. The placeholder should not invite that. -->
+      <input id="y0" class="yr" type="number" placeholder="2014" inputmode="numeric">
+    </div>
+    <div class="field">
+      <label for="y1">Begins through</label>
+      <input id="y1" class="yr" type="number" placeholder="2030" inputmode="numeric">
+    </div>
+    <div class="field">
+      <label for="min">Min $</label>
+      <input id="min" class="num" type="number" placeholder="0" inputmode="numeric">
+    </div>
+    <div class="field">
+      <label for="max">Max $</label>
+      <input id="max" class="num" type="number" placeholder="any" inputmode="numeric">
+    </div>
   </div>
-  <div class="field">
-    <label for="min">Min $</label>
-    <input id="min" class="num" type="number" placeholder="0" inputmode="numeric">
+  <div class="control-group">
+    <div class="field" id="descfield" hidden>
+      <label for="desc">Description</label>
+      <select id="desc">
+        <option value="">All records</option>
+        <option value="1">Has one</option>
+        <option value="0">Has none</option>
+      </select>
+    </div>
+    <div class="field">
+      <label for="baddates">Data quality</label>
+      <label class="check"><input type="checkbox" id="baddates"> ends before it begins</label>
+    </div>
   </div>
-  <div class="field">
-    <label for="max">Max $</label>
-    <input id="max" class="num" type="number" placeholder="any" inputmode="numeric">
-  </div>
-  <div class="field">
-    <label>&nbsp;</label>
-    <button id="csv" title="Every filtered row, with a shareable link back to this page">Export CSV</button>
-  </div>
-  <div class="field">
-    <label>&nbsp;</label>
-    <button id="csv-src" title="Same, but with each document's own address on the state's site — needs an extra download">Export + source links</button>
-  </div>
-  <div class="field" id="descfield" hidden>
-    <label for="desc">Description</label>
-    <select id="desc">
-      <option value="">All records</option>
-      <option value="1">Has one</option>
-      <option value="0">Has none</option>
-    </select>
-  </div>
-  <div class="field">
-    <label for="baddates">Data quality</label>
-    <label class="check"><input type="checkbox" id="baddates"> ends before it begins</label>
-  </div>
-  <div class="field">
-    <label>&nbsp;</label>
-    <button id="reset">Reset</button>
+  <div class="control-group actions">
+    <div class="field">
+      <label>&nbsp;</label>
+      <button id="csv" class="btn-primary" title="Every filtered row, with a shareable link back to this page">Export CSV</button>
+    </div>
+    <div class="field">
+      <label>&nbsp;</label>
+      <button id="csv-src" title="Same, but with each document's own address on the state's site — needs an extra download">Export + source links</button>
+    </div>
+    <div class="field">
+      <label>&nbsp;</label>
+      <button id="reset">Reset</button>
+    </div>
   </div>
 </div>
 

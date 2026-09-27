@@ -76,3 +76,16 @@ ocr_full_run.log
 
 # macOS Finder metadata.
 .DS_Store
+logs/
+data/ai_summaries.jsonl
+data/ai_summaries.jsonl.bak-*
+ocr_full_page_recapture.log
+data/ocr_pilot.jsonl.bak-before-full-page-recapture
+
+# Local-machine artifacts from running the OCR/AI-summary pipeline by hand:
+# background-job PIDs, ad-hoc logs, the venv, and this machine's own preview
+# launch config. None of these are inputs anything else reads.
+*.pid
+ai_summary_test2.log
+venv/
+.claude/

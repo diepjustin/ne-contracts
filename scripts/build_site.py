@@ -55,6 +55,7 @@ DATA = {
 }
 SCRAPE_META = os.path.join(ROOT, "data", "scrape_meta.json")
 SCOPE_JSONL = os.path.join(ROOT, "data", "scope.jsonl")
+AI_SUMMARIES_JSONL = os.path.join(ROOT, "data", "ai_summaries.jsonl")
 OUT_DIR = ROOT
 OUT_JSON = os.path.join(OUT_DIR, "data.json")
 
@@ -304,10 +305,17 @@ def main():
     parser.add_argument("--descriptions-only", action="store_true",
                         help="attach description blocks to the build manifest.json points at, "
                              "without rebuilding it (needs data/scope.jsonl, not the CSVs)")
+    parser.add_argument("--ai-summaries-only", action="store_true",
+                        help="attach AI-summary blocks to the build manifest.json points at, "
+                             "without rebuilding it (needs data/ai_summaries.jsonl)")
     args = parser.parse_args()
 
     if args.descriptions_only:
         add_descriptions_to_build()
+        return
+
+    if args.ai_summaries_only:
+        attach_ai_summaries_to_build()
         return
 
     for path in DATA.values():
@@ -597,6 +605,11 @@ def main():
     meta["descBytes"] = sum(len(d) for d in descriptions.values())
     add_source_meta(meta, desc_sources)
 
+    ai_summaries, ai_sources = load_ai_summaries(view_tokens)
+    meta["aiCount"] = len(ai_summaries)
+    meta["aiBytes"] = sum(len(s) for s in ai_summaries.values())
+    add_ai_meta(meta, ai_sources)
+
     # How much of the corpus has actually been asked what it publishes. The
     # page needs this to describe its own coverage honestly while the backfill
     # is only part-way through, and the README quotes it.
@@ -623,6 +636,12 @@ def main():
         os.path.join(outdir, ne_format.DESC_DOC))
     meta["digests"][ne_format.DESC_DOC] = zlib.crc32(
         open(os.path.join(outdir, ne_format.DESC_DOC), "rb").read())
+    ne_format.write_ai_blocks(outdir, ai_summaries, n)
+    ne_format.write_ai_sources(outdir, ai_sources, n)
+    meta["bytes"][ne_format.AI_SRC] = os.path.getsize(
+        os.path.join(outdir, ne_format.AI_SRC))
+    meta["digests"][ne_format.AI_SRC] = zlib.crc32(
+        open(os.path.join(outdir, ne_format.AI_SRC), "rb").read())
     write_search_index(outdir, descriptions, meta)
     write_vendor_groups(outdir, vendor_names, columns, meta)
     write_selftest(outdir, sources, columns["viewPresent"], n)
@@ -631,7 +650,8 @@ def main():
     # A key added after write_payload and lost before the file was written is
     # invisible: the page just behaves as though the feature is not there.
     on_disk = json.load(open(os.path.join(outdir, ne_format.META), encoding="utf-8"))
-    for key in ("wordCount", "vendorGroups", "descCount", "descSources", "bytes", "digests"):
+    for key in ("wordCount", "vendorGroups", "descCount", "descSources",
+                "aiCount", "aiModels", "bytes", "digests"):
         if key not in on_disk:
             sys.exit(f"meta.json is missing {key!r} — it was added after the file was written")
     with open(os.path.join(OUT_DIR, "manifest.json"), "w", encoding="utf-8") as f:
@@ -639,6 +659,7 @@ def main():
 
     verify_payload(outdir, columns, docs, vendor_names, vtok_bytes,
                    dn_tokens, view_tokens, sources, descriptions)
+    verify_ai_summaries(outdir, ai_summaries, n)
 
     resident = sum(os.path.getsize(os.path.join(outdir, p)) for p in
                    (ne_format.META, ne_format.COLS_I32, ne_format.COLS_F64,
@@ -656,6 +677,10 @@ def main():
           f"(fetched on click)")
     print(f"descriptions  : {desc / 1e6:6.2f} MB raw in {ne_format.block_count(n):,} blocks "
           f"({meta['descCount']:,} rows have one)")
+    ai = sum(os.path.getsize(ne_format.ai_path(outdir, b))
+             for b in range(ne_format.block_count(n)))
+    print(f"AI summaries  : {ai / 1e6:6.2f} MB raw in {ne_format.block_count(n):,} blocks "
+          f"({meta['aiCount']:,} rows have one)")
     xdoc = sum(os.path.getsize(ne_format.xdoc_path(outdir, b))
                for b in range(ne_format.block_count(n)))
     print(f"document lists: {xdoc / 1e6:6.2f} MB raw in {ne_format.block_count(n):,} blocks "
@@ -721,6 +746,55 @@ def add_descriptions_to_build():
           f"({meta['descCount']:,} of {n:,} rows)")
     print("resident files untouched — a page that has not been taught about "
           "descriptions reads this build exactly as before")
+
+
+def attach_ai_summaries_to_build():
+    """Write AI-summary blocks into the build manifest.json already points at.
+
+    Mirrors add_descriptions_to_build exactly, including the reason it
+    exists: AI summaries are purely additive -- new files, two new meta keys,
+    not one byte of any resident file -- so they attach to a payload that is
+    already built, verified and live. The join key is the same reconstructed
+    view token, for the same reason: it is the only identifier
+    data/ai_summaries.jsonl and this payload both agree on.
+    """
+    with open(os.path.join(OUT_DIR, "manifest.json"), encoding="utf-8") as f:
+        outdir = os.path.join(OUT_DIR, json.load(f)["dir"])
+    print(f"attaching AI summaries to {outdir}")
+
+    columns, docs, vendors, _vtok, meta = ne_format.read_payload(outdir)
+    n = meta["count"]
+    _dn, view = ne_format.read_token_blocks(outdir, n)
+
+    view_tokens = ["" for _ in range(n)]
+    for i in range(n):
+        if columns["viewPresent"][i]:
+            view_tokens[i] = quote(base64.b64encode(view[i]).decode(), safe="")
+
+    summaries, ai_sources = load_ai_summaries(view_tokens)
+    if not summaries:
+        sys.exit(f"nothing to attach — {AI_SUMMARIES_JSONL} is missing or matched no rows")
+
+    ne_format.write_ai_blocks(outdir, summaries, n)
+    ne_format.write_ai_sources(outdir, ai_sources, n)
+    meta.setdefault("bytes", {})[ne_format.AI_SRC] = os.path.getsize(
+        os.path.join(outdir, ne_format.AI_SRC))
+    meta.setdefault("digests", {})[ne_format.AI_SRC] = zlib.crc32(
+        open(os.path.join(outdir, ne_format.AI_SRC), "rb").read())
+    verify_ai_summaries(outdir, summaries, n)
+
+    meta["aiCount"] = len(summaries)
+    meta["aiBytes"] = sum(len(s) for s in summaries.values())
+    add_ai_meta(meta, ai_sources)
+    with open(os.path.join(outdir, ne_format.META), "w", encoding="utf-8") as f:
+        json.dump(meta, f, separators=(",", ":"), sort_keys=True)
+
+    size = sum(os.path.getsize(ne_format.ai_path(outdir, b))
+               for b in range(ne_format.block_count(n)))
+    print(f"AI summaries  : {size / 1e6:6.2f} MB raw in {ne_format.block_count(n):,} blocks "
+          f"({meta['aiCount']:,} of {n:,} rows)")
+    print("resident files untouched — a page that has not been taught about "
+          "AI summaries reads this build exactly as before")
 
 
 # What counts as a word. Runs of letters and digits, lowercased -- so
@@ -933,6 +1007,31 @@ def add_source_meta(meta, desc_sources):
     meta["descSourceCounts"] = [counts.get(code, 0) for code in range(len(DESC_SOURCES))]
 
 
+# Which local model produced a row's AI summary, as stored in aisrc.bin. Same
+# append-only, position-is-meaning rule as DESC_SOURCES -- this is the on-disk
+# encoding, not a label to be renumbered for tidiness.
+#
+# Unlike DESC_SOURCES this is not "which parser found the state's own words":
+# every row here is the model's guess, never verified against the source
+# document, which is the whole reason it ships under a disclosure rather than
+# folded into descriptions. See scripts/generate_ai_summaries.py.
+AI_MODELS = ("", "llama3.1:8b-instruct-q4_K_M")
+AI_MODEL_CODE = {name: i for i, name in enumerate(AI_MODELS) if name}
+
+
+def add_ai_meta(meta, ai_sources):
+    """The model dictionary and per-model counts the page renders from.
+
+    Mirrors add_source_meta exactly, for the same reason: the page indexes
+    into meta rather than switching on a name, so a new model needs no page
+    change, and an older payload read by a newer page still labels correctly.
+    """
+    meta["aiModels"] = list(AI_MODELS)
+    counts = collections.Counter(ai_sources.values())
+    counts[0] = meta["count"] - sum(n for code, n in counts.items() if code)
+    meta["aiModelCounts"] = [counts.get(code, 0) for code in range(len(AI_MODELS))]
+
+
 def document_positions(view_tokens):
     """token -> (row, position in the state's list, is this the row's primary).
 
@@ -1060,6 +1159,52 @@ def load_descriptions(view_tokens, carry=True):
     return descriptions, sources, documents
 
 
+def load_ai_summaries(view_tokens):
+    """(row -> summary bytes, row -> model code), keyed off tokens.
+
+    Simpler than load_descriptions on purpose: scripts/generate_ai_summaries.py
+    only ever summarizes a record's primary document (the one
+    scripts/ocr_pilot.py OCR'd), so there is no other-document fallback and no
+    rank to compute -- a token either is a row's own view token or it isn't.
+    No carry-forward either: unlike descriptions, which the weekly CI rebuild
+    has no way to regenerate (see carry_descriptions_forward), AI summaries
+    are meant to be fetched fresh from a release asset on every build, the
+    same way scope.jsonl already is. A local iterative build simply has fewer
+    summaries until data/ai_summaries.jsonl is refreshed.
+
+    Records where the model returned "unclear" (unclear=true, no summary
+    text) are skipped entirely: publishing nothing is what whyBlank()-style
+    honesty already means elsewhere in this codebase, and a row this build
+    knows nothing useful about should read exactly like one nobody has
+    attempted yet.
+    """
+    row_of = {token: i for i, token in enumerate(view_tokens) if token}
+    summaries, sources = {}, {}
+    if not os.path.exists(AI_SUMMARIES_JSONL):
+        print(f"note: no {AI_SUMMARIES_JSONL} — building without AI summaries")
+        return summaries, sources
+
+    matched = unmatched = skipped = 0
+    with open(AI_SUMMARIES_JSONL, encoding="utf-8") as f:
+        for line in f:
+            record = json.loads(line)
+            if record.get("unclear") or not record.get("summary"):
+                skipped += 1
+                continue
+            row = row_of.get(record["tok"])
+            if row is None:
+                unmatched += 1
+                continue
+            summaries[row] = record["summary"].encode("utf-8")
+            sources[row] = AI_MODEL_CODE.get(record.get("model") or "", 0)
+            matched += 1
+
+    print(f"AI summaries  : {matched:,} joined to rows"
+          + (f", {unmatched:,} unmatched" if unmatched else "")
+          + (f", {skipped:,} skipped (unclear or empty)" if skipped else ""))
+    return summaries, sources
+
+
 SELFTEST_ROWS = 1000
 
 
@@ -1155,6 +1300,37 @@ def verify_descriptions(outdir, descriptions, n):
                      f"  source {codes[row]}")
 
     print(f"descriptions round-trip verified: {present:,} rows across "
+          f"{ne_format.block_count(n):,} blocks, sources agree on every row")
+
+
+def verify_ai_summaries(outdir, summaries, n):
+    """Decode the AI-summary blocks and prove they carry the same text.
+
+    Identical rule and identical shape to verify_descriptions: read every
+    byte back from disk, and check text and source-byte never disagree. The
+    stakes are different, not lower -- a mismatch here would show one row's
+    AI-generated claim on another row's page, which is worse than the same
+    bug in a verbatim description, not better.
+    """
+    decoded = ne_format.read_ai_blocks(outdir, n)
+    for row in range(n):
+        want = summaries.get(row, b"")
+        if decoded[row] != want:
+            sys.exit(f"row {row}: AI summary round trip failed\n"
+                     f"  wrote {want[:80]!r}\n  read  {decoded[row][:80]!r}")
+    present = sum(1 for d in decoded if d)
+
+    codes = ne_format.read_ai_sources(outdir, n)
+    if codes is None:
+        sys.exit(f"{ne_format.AI_SRC} was not written — the page would report "
+                 "that no row has an AI summary")
+    for row in range(n):
+        if bool(decoded[row]) != bool(codes[row]):
+            sys.exit(f"row {row}: AI summary text and source disagree\n"
+                     f"  text   {decoded[row][:60]!r}\n"
+                     f"  source {codes[row]}")
+
+    print(f"AI summaries round-trip verified: {present:,} rows across "
           f"{ne_format.block_count(n):,} blocks, sources agree on every row")
 
 

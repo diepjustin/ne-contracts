@@ -11,6 +11,10 @@
     --muted: #626b76; --accent: #d00000; --accent-soft: #fdecec;
     --row-alt: #fafbfc; --shadow: 0 1px 2px rgba(20,24,29,.06), 0 6px 14px rgba(20,24,29,.08);
     --active: #0a7d3f; --active-bg: #0a7d3f14; --active-border: #0a7d3f4d;
+    /* Deliberately not --accent: that color already means "the state's/site's
+       own emphasis" (links, focus rings, status pills), and an AI-generated
+       summary is a different kind of claim that must never blend into it. */
+    --ai-accent: #6d28d9; --ai-accent-soft: #f3ecfd;
     --radius: 10px;
     --scroll-thumb: #c9cdd4; --scroll-track: transparent;
     --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
@@ -23,6 +27,7 @@
       --muted: #949dab; --accent: #ff6b6b; --accent-soft: #2a1c1d;
       --row-alt: #181c20; --shadow: 0 1px 2px rgba(0,0,0,.5), 0 6px 14px rgba(0,0,0,.42);
       --active: #3ecf82; --active-bg: #123420; --active-border: #235c39;
+      --ai-accent: #c4b5fd; --ai-accent-soft: #241c33;
       --scroll-thumb: #3a4048; --scroll-track: transparent;
     }
   }
@@ -197,6 +202,24 @@
     margin-bottom: 4px; font-size: 12px; color: var(--muted);
     white-space: normal;
   }
+  /* A different kind of text than .words, and it must never be mistaken for
+     it: this is a local model's guess, not the state's own words, so it gets
+     its own border/background rather than reusing .gap-note's --accent or
+     .descfrom's muted styling, either of which would read as "the same kind
+     of thing, slightly restyled." */
+  #detail .ai-summary {
+    margin-top: 8px; padding: 8px 10px; border-radius: 7px;
+    background: var(--ai-accent-soft); border: 1px solid var(--ai-accent);
+    white-space: pre-wrap; font-size: 13px;
+  }
+  #detail .ai-summary .aitag {
+    margin-bottom: 5px; font-size: 12px; font-weight: 600; color: var(--ai-accent);
+    white-space: normal;
+  }
+  #detail .ai-summary .ainote {
+    margin-bottom: 5px; font-size: 11.5px; color: var(--muted);
+    white-space: normal; font-style: italic;
+  }
   /* The record's other documents. Sits above the description because it says
      what the description is one of. */
   /* No inner scrollbar: #detail is already a fixed-height scroller, and
@@ -223,7 +246,7 @@
   #detail button {
     float: right; padding: 0 7px; font-size: 12px; font-weight: 500; color: var(--muted);
   }
-  body.has-descriptions tbody tr[data-row] { cursor: pointer; }
+  body.has-descriptions tbody tr[data-row], body.has-ai-summaries tbody tr[data-row] { cursor: pointer; }
   tbody tr.picked { background: var(--accent-soft); }
 
   #scroller { overflow: auto; height: calc(100vh - 218px); background: var(--bg); }
@@ -476,6 +499,7 @@
   var DOCS = "docs.bin", VENDORS = "vendors.bin", VTOK = "vtok.bin";
   var DESC_SRC = "descsrc.bin";
   var DESC_DOC = "descdoc.bin";
+  var AI_SRC = "aisrc.bin";
   var RESIDENT = [COLS_I32, COLS_F64, COLS_U8, DOCS, VENDORS];
 
   // --- payload ------------------------------------------------------------
@@ -496,6 +520,9 @@
   // One byte per row naming the parser its description came from; null on a
   // payload built before descsrc.bin existed.
   var descSrc = null, descDoc = null;
+  // One byte per row naming the model its AI summary came from; null on a
+  // payload built before aisrc.bin existed.
+  var aiSrc = null;
   var vtokLoad = null;           // promise for vtok.bin, fetched only when needed
 
   // --- view state ---------------------------------------------------------
@@ -719,7 +746,7 @@
       .then(function (got) {
         RESIDENT.forEach(function (f, i) { files[f] = got[i]; });
         decode();
-        return Promise.all([loadVendorGroups(), loadDescSources(), loadDescDocuments()]);
+        return Promise.all([loadVendorGroups(), loadDescSources(), loadDescDocuments(), loadAiSources()]);
       });
   }
 
@@ -767,6 +794,8 @@
 
     hasDesc = (meta.descCount || 0) > 0;
     document.body.classList.toggle("has-descriptions", hasDesc);
+    hasAi = (meta.aiCount || 0) > 0;
+    document.body.classList.toggle("has-ai-summaries", hasAi);
 
     viewBuf = new Int32Array(N);
     view = viewBuf.subarray(0, 0);
@@ -829,6 +858,24 @@
         descDoc = new Uint8Array(ab);
       }, function () {
         descDoc = null;
+      });
+  }
+
+  // Which rows carry an AI-generated summary. Same shape and same reason as
+  // loadDescSources: without it, a reader cannot tell a row that has one from
+  // one that does not until they click it, and almost every row has none --
+  // summaries only exist for documents scripts/ocr_pilot.py OCR'd, a small
+  // fraction of the corpus.
+  function loadAiSources() {
+    if (!hasAi) return Promise.resolve();
+    return fetch(BASE + dir + AI_SRC).then(ok)
+      .then(function (r) { return r.arrayBuffer(); })
+      .then(function (ab) {
+        need(ab.byteLength === N,
+             AI_SRC + " is " + ab.byteLength + " bytes for " + N + " rows");
+        aiSrc = new Uint8Array(ab);
+      }, function () {
+        aiSrc = null;
       });
   }
 
@@ -1130,7 +1177,7 @@
     for (var i = startRow; i < stop; i++) {
       var id = view[i], t = typeCol[id];
       html += '<tr data-row="' + id + '"' + (id === picked ? ' class="picked"' : '') +
-        (hasDesc ? ' tabindex="0" role="button" aria-expanded="' +
+        ((hasDesc || hasAi) ? ' tabindex="0" role="button" aria-expanded="' +
                    (id === picked ? 'true' : 'false') + '"' : '') + ">" +
         '<td class="doc"><a data-row="' + id + '" href="' + esc(permalink(id)) +
           '" target="_blank" rel="noopener">' + highlight(docStr(id)) + "</a></td>" +
@@ -1214,6 +1261,30 @@
   var hasDesc = false;
   var descBlocks = {}, descAge = [];
 
+  // AI-generated summaries (scripts/generate_ai_summaries.py), a local
+  // model's guess rather than the state's own words -- see the disclosure
+  // text in showDetail. Same deferred-block shape as descriptions, for the
+  // same reason: nobody should download this up front, and meta.aiCount is
+  // how the page tells a build with none from a 404 per click.
+  var hasAi = false;
+  var aiBlocks = {}, aiAge = [];
+
+  function getAiBlock(b) {
+    if (aiBlocks[b]) return aiBlocks[b];
+    var name = ("0000" + b).slice(-5);
+    var p = fetch(BASE + dir + "ai/" + name + ".bin").then(ok)
+      .then(function (r) { return r.arrayBuffer(); })
+      .then(function (ab) { return new Uint8Array(ab); });
+    p["catch"](function () { delete aiBlocks[b]; });
+    aiBlocks[b] = p;
+    aiAge.push(b);
+    while (aiAge.length > BLOCK_CACHE) {
+      var old = aiAge.shift();
+      if (old !== b) delete aiBlocks[old];
+    }
+    return p;
+  }
+
   function getDescBlock(b) {
     if (descBlocks[b]) return descBlocks[b];
     var name = ("0000" + b).slice(-5);
@@ -1295,6 +1366,21 @@
     return getDescBlock(b).then(function (u8) {
       var header = rows * 2;
       need(u8.length >= header, "description block " + b + " is " + u8.length +
+           " bytes; its header alone is " + header);
+      var lengths = new Uint16Array(u8.buffer, u8.byteOffset, rows);
+      var at = header;
+      for (var k = 0; k < i; k++) at += lengths[k];
+      if (!lengths[i]) return "";
+      return new TextDecoder().decode(u8.subarray(at, at + lengths[i]));
+    });
+  }
+
+  // Same shape as descFor, over the ai/ blocks instead of desc/.
+  function aiFor(id) {
+    var b = blockOf(id), rows = blockRows(b), i = id - b * meta.blockSize;
+    return getAiBlock(b).then(function (u8) {
+      var header = rows * 2;
+      need(u8.length >= header, "AI summary block " + b + " is " + u8.length +
            " bytes; its header alone is " + header);
       var lengths = new Uint16Array(u8.buffer, u8.byteOffset, rows);
       var at = header;
@@ -1614,7 +1700,8 @@
         ? '<div class="docs" id="detail-docs">' + docCount[id] +
           ' documents at statecontracts.nebraska.gov</div>'
         : "") +
-      '<div class="words" id="detail-words">Loading…</div>';
+      '<div class="words" id="detail-words">Loading…</div>' +
+      (hasAi ? '<div class="ai-summary" id="detail-ai" hidden></div>' : "");
     $("detail-close").addEventListener("click", closeDetail);
     el.classList.toggle("has-docs", hasDocuments(id));
     if (hasDocuments(id)) showDocuments(id);
@@ -1654,6 +1741,47 @@
       fitScroller();
       render();
     });
+
+    // Not gated on whether this particular row has one -- hasAi only says the
+    // build carries some, same as hasDesc. A row with nothing here simply
+    // stays hidden; unlike descFor's "none" branch, there is no whyBlank()
+    // equivalent, because a missing AI summary is not a fact worth stating --
+    // almost every row will never have one, and saying so on each would be
+    // noise, not honesty.
+    if (hasAi) {
+      aiFor(id).then(function (text) {
+        if (picked !== id) return;
+        var panel = $("detail-ai");
+        if (!panel) return;   // reader closed the row before this landed
+        if (text) {
+          panel.innerHTML = "";
+          var tag = document.createElement("div");
+          tag.className = "aitag";
+          tag.textContent = "🤖 AI-GENERATED SUMMARY";
+          var note = document.createElement("div");
+          note.className = "ainote";
+          note.textContent = "Generated from OCR text and not verified. Meant to help " +
+            "you decide whether to open the source document, not to be relied on as " +
+            "fact — read the original before citing anything here.";
+          panel.appendChild(tag);
+          panel.appendChild(note);
+          panel.appendChild(document.createTextNode(text));
+          panel.hidden = false;
+        } else {
+          panel.hidden = true;
+        }
+        fitScroller();
+        render();
+      }, function () {
+        // Best-effort, like vendor groups: an AI summary is an enhancement,
+        // not the reason the panel exists, so a fetch failure here just
+        // leaves it hidden rather than showing an error next to the real
+        // description.
+        if (picked !== id) return;
+        var panel = $("detail-ai");
+        if (panel) panel.hidden = true;
+      });
+    }
   }
 
   function openRow(tr) {
@@ -1830,7 +1958,7 @@
 
   function armDetail() {
     tbody.addEventListener("click", function (ev) {
-      if (!hasDesc) return;        // this build carries no descriptions
+      if (!hasDesc && !hasAi) return;   // this build carries neither
       if (anchorFor(ev)) return;   // the document link keeps its own behaviour
       var tr = ev.target.closest && ev.target.closest("tr[data-row]");
       if (tr) openRow(tr);
@@ -1840,7 +1968,7 @@
     // rows carry role/tabindex so they are reachable and announced; this makes
     // the two keys that role promises actually work.
     tbody.addEventListener("keydown", function (ev) {
-      if (!hasDesc || ev.key !== "Enter" && ev.key !== " ") return;
+      if ((!hasDesc && !hasAi) || ev.key !== "Enter" && ev.key !== " ") return;
       var tr = ev.target.closest && ev.target.closest("tr[data-row]");
       if (!tr || anchorFor(ev)) return;   // Enter on the link still follows it
       ev.preventDefault();                // Space would otherwise scroll
@@ -2236,6 +2364,11 @@
       var dsGot = crc32(descSrc), dsWant = meta.digests[DESC_SRC];
       say(dsWant === undefined || dsGot === dsWant, "crc32 " + DESC_SRC + " = " + dsGot +
           (dsWant === undefined ? " (no digest in meta)" : dsGot === dsWant ? "" : " — expected " + dsWant));
+    }
+    if (aiSrc) {
+      var asGot = crc32(aiSrc), asWant = meta.digests[AI_SRC];
+      say(asWant === undefined || asGot === asWant, "crc32 " + AI_SRC + " = " + asGot +
+          (asWant === undefined ? " (no digest in meta)" : asGot === asWant ? "" : " — expected " + asWant));
     }
 
     say(docOff[N] === docs.length, "document numbers span " + docOff[N] + " bytes of " + DOCS);

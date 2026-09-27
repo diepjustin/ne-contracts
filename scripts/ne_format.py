@@ -26,6 +26,7 @@ Layout, where n = row count and V = vendor count:
                      viewPresent[n], docLen[n], docCount[n]    (1 byte each)
     descsrc.bin      descSource[n]                             (1 byte each)
     descdoc.bin      descDocument[n]                           (1 byte each)
+    aisrc.bin        aiSource[n]                                (1 byte each)
     docs.bin         document numbers, packed, no separators
     vendors.bin      len[V] as u8, then vendor names packed as UTF-8
     vtok.bin         units[V] as u8, then V tokens packed as raw bytes
@@ -50,6 +51,12 @@ the two cannot disagree.
 
 docCount, by contrast, belongs in cols.u8.bin: it is a fact about the row,
 comes from the scrape, and is only ever written by a full build.
+
+aisrc.bin is the same idea as descsrc.bin, for a different kind of text: an
+AI-generated summary (build_site.py's --ai-summaries-only), attachable the
+same way and for the same reason. Its deferred block files live under ai/,
+alongside desc/ and xdoc/, none of which this comment enumerates -- see the
+note directly above write_desc_blocks and write_ai_blocks instead.
 
 Little-endian is assumed. Every browser this will run in is little-endian,
 but meta records it and the page asserts it rather than rendering whatever
@@ -93,6 +100,8 @@ DESC_DIR = "desc"
 XDOC_DIR = "xdoc"
 DESC_SRC = "descsrc.bin"
 DESC_DOC = "descdoc.bin"
+AI_DIR = "ai"
+AI_SRC = "aisrc.bin"
 WORDS = "words.bin"
 POSTINGS = "postings.bin"
 VGROUP = "vgroup.bin"
@@ -128,6 +137,10 @@ def block_path(outdir, block):
 
 def desc_path(outdir, block):
     return os.path.join(outdir, DESC_DIR, f"{block:05d}.bin")
+
+
+def ai_path(outdir, block):
+    return os.path.join(outdir, AI_DIR, f"{block:05d}.bin")
 
 
 def block_count(n):
@@ -329,6 +342,63 @@ def read_desc_sources(outdir, n):
     return column
 
 
+# AI-generated summaries (see scripts/generate_ai_summaries.py). Same deferred
+# block shape as descriptions, and for the same reason -- text nobody should
+# have to download up front -- but a different kind of claim: this is not the
+# state's own words, it is a local model's guess at what a document says, and
+# every byte here ships behind a label the page controls, never silently.
+#
+# aisrc.bin follows descsrc.bin's own reasoning exactly: it is a fact about
+# the summaries, attachable to a build that is already live
+# (--ai-summaries-only), so it cannot live in cols.u8.bin without going stale
+# the moment that path runs. 0 means no summary; nonzero indexes into
+# meta.aiModels, the same append-only, position-is-meaning scheme descsrc.bin
+# uses for meta.descSources.
+def write_ai_blocks(outdir, summaries, n):
+    """Write one block per BLOCK_ROWS rows. `summaries` maps row -> bytes."""
+    os.makedirs(os.path.join(outdir, AI_DIR), exist_ok=True)
+    for b in range(block_count(n)):
+        lo = b * BLOCK_ROWS
+        hi = min(lo + BLOCK_ROWS, n)
+        chunk = [summaries.get(i, b"") for i in range(lo, hi)]
+        for text in chunk:
+            if len(text) > 65535:
+                raise ValueError(f"an AI summary is {len(text)} bytes; the length is a u16")
+        lengths = array.array(DESC_LENGTH, [len(text) for text in chunk])
+        with open(ai_path(outdir, b), "wb") as f:
+            f.write(lengths.tobytes())
+            for text in chunk:
+                f.write(text)
+
+
+def write_ai_sources(outdir, sources, n):
+    """Which model produced each row's summary. `sources` maps row -> code.
+
+    Same shape and same reason as write_desc_sources: one byte per row, no
+    header, 0 for a row with no summary -- including every row on a build made
+    before this file existed, which is exactly how a missing aisrc.bin should
+    read.
+    """
+    column = array.array("B", bytes(n))
+    for row, code in sources.items():
+        column[row] = code
+    with open(os.path.join(outdir, AI_SRC), "wb") as f:
+        f.write(column.tobytes())
+
+
+def read_ai_sources(outdir, n):
+    """The model code per row, or None if this build predates the file."""
+    path = os.path.join(outdir, AI_SRC)
+    if not os.path.exists(path):
+        return None
+    data = open(path, "rb").read()
+    if len(data) != n:
+        raise ValueError(f"{AI_SRC} is {len(data)} bytes, expected {n}")
+    column = array.array("B")
+    column.frombytes(data)
+    return column
+
+
 # ---------------------------------------------------------------- documents
 #
 # The document list for rows that publish more than one. Same block layout as
@@ -443,6 +513,28 @@ def read_desc_blocks(outdir, n):
             pos += length
         if pos != len(data):
             raise ValueError(f"description block {b}: {len(data) - pos} bytes past the last row")
+    return out
+
+
+def read_ai_blocks(outdir, n):
+    """Every row's AI-summary bytes, reassembled from the blocks."""
+    out = [b""] * n
+    for b in range(block_count(n)):
+        lo = b * BLOCK_ROWS
+        hi = min(lo + BLOCK_ROWS, n)
+        rows = hi - lo
+        data = open(ai_path(outdir, b), "rb").read()
+        header = rows * 2
+        if len(data) < header:
+            raise ValueError(f"AI summary block {b}: {len(data)} bytes, header alone is {header}")
+        lengths = array.array(DESC_LENGTH)
+        lengths.frombytes(data[:header])
+        pos = header
+        for i, length in enumerate(lengths):
+            out[lo + i] = data[pos:pos + length]
+            pos += length
+        if pos != len(data):
+            raise ValueError(f"AI summary block {b}: {len(data) - pos} bytes past the last row")
     return out
 
 

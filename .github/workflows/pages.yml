@@ -151,7 +151,7 @@ jobs:
       # distilled output of long downloads against the state's servers -- 19
       # hours and ~23 hours -- so neither will ever be produced in CI, and both
       # are small enough to fetch once they exist.
-      - name: Fetch descriptions and document lists from the extraction release
+      - name: Fetch descriptions, document lists, and AI summaries from the extraction release
         if: steps.decide.outputs.build == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
@@ -213,6 +213,23 @@ jobs:
             [ -n "$keep" ] && mv "$keep" "$cached"
             echo "::warning::release $tag carries no documents.jsonl.gz — \
               building from the cached log alone"
+          fi
+
+          # AI summaries are the output of a local Ollama run against OCR'd
+          # text -- generation "will never live in CI" for the same reason
+          # OCR itself doesn't, so this release is the only path in. Unlike
+          # documents.jsonl.gz there is nothing nightly to merge with (CI
+          # never produces these), so a straight overwrite is correct.
+          # Missing is not a build failure: build_site.py then builds
+          # without AI summaries and every row simply has none, same as
+          # today's site.
+          if gh release download "$tag" --pattern 'ai_summaries.jsonl.gz' \
+               --dir data --clobber 2>/dev/null; then
+            gunzip -f data/ai_summaries.jsonl.gz
+            echo "AI summaries: $(wc -l < data/ai_summaries.jsonl) records"
+          else
+            echo "::warning::release $tag carries no ai_summaries.jsonl.gz — \
+              building without AI summaries"
           fi
 
       - name: Build the payload

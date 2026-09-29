@@ -911,19 +911,38 @@ def write_search_index(outdir, descriptions, meta):
 
 
 def carry_descriptions_forward(view_tokens):
-    """Row -> description bytes, recovered from the build being replaced.
+    """Row -> (description bytes, source code, source document's token or None).
 
-    Descriptions come from a 20-hour document collection whose inputs
-    (data/doc_text.jsonl, 1.3 GB) will never live in CI, so the weekly rebuild
-    has no way to regenerate them. Without this it would publish a build with
-    no descriptions at all and the feature would silently disappear every
-    Sunday.
+    Recovered from the build being replaced. Descriptions come from a 20-hour
+    document collection whose inputs (data/doc_text.jsonl, 1.3 GB) will never
+    live in CI; CI fetches their distilled output, scope.jsonl, which overlays
+    whatever is carried here. That does not make this a fallback. pages.yml
+    restores the previous payload before every nightly dispatch builds, so
+    every nightly build comes through here, and a carried row is published
+    as-is wherever scope.jsonl has nothing better to say about it.
 
     They survive because they are keyed by view token, not by row: the token is
     the state's own identifier for a document and is stable across rebuilds,
-    while row numbers are not -- a week of --daily scraping inserts records and
-    shifts every row after them. So read the previous build's tokens and
+    while row numbers are not -- a night of --daily scraping inserts records
+    and shifts every row after them. So read the previous build's tokens and
     descriptions together, and re-key onto whatever rows this build has.
+
+    Where each description came from travels with it, because the text alone
+    is not what the page publishes. Until Sep 2026 only the text was carried:
+    every carried row was relabelled source "unknown", placed on the record's
+    first document and ranked as though read from it, so scope.jsonl's own
+    record of a later document -- which ranks below the first -- was never
+    allowed to correct it. The first nightly after a fresh build turned 1,050
+    descriptions read from a later document into "description read from this
+    one" beside the first, and every nightly after kept them that way.
+
+    The source document is carried as its token, not its position. Positions
+    are the state's ordering, and a newly filed document shifts them between
+    builds; load_descriptions looks the token up in today's list, which gives
+    the position and rank a fresh build would have given it. None means the
+    previous build does not say: it predates descdoc.bin, or it labels the row
+    "unknown" -- which is what the text-only carry wrote, beside a position 0
+    that was assumed rather than recorded.
 
     Records added since the last extraction simply have none, which is honest:
     nobody has read their document yet.
@@ -943,17 +962,47 @@ def carry_descriptions_forward(view_tokens):
     count = meta["count"]
     _dn, view = ne_format.read_token_blocks(previous, count)
     previous_desc = ne_format.read_desc_blocks(previous, count)
+    # Each None on a payload built before its file existed: descsrc.bin in
+    # Aug 2026, xdoc/ on 29 Aug, descdoc.bin on 1 Sep.
+    previous_src = ne_format.read_desc_sources(previous, count)
+    previous_doc = ne_format.read_desc_documents(previous, count)
+    previous_lists = (ne_format.read_xdoc_blocks(previous, count)
+                      if os.path.isdir(os.path.join(previous, ne_format.XDOC_DIR)) else None)
+    unknown = DESC_SOURCE_CODE["unknown"]
+
+    def source_document(i, own_token, source):
+        """The token of the document row i's description was read from, or None."""
+        if previous_doc is None or source == unknown:
+            return None
+        position = previous_doc[i]
+        if position == ne_format.DESC_DOC_UNKNOWN:
+            return None
+        listed = previous_lists[i] if previous_lists is not None else b""
+        if not listed:
+            # A row with one document ships no list; its only document is the
+            # one its own View URL names, which is position 0 and nothing else.
+            return own_token if position == 0 else None
+        documents = ne_format.unpack_documents(listed)
+        if position >= len(documents):
+            return None
+        return quote(base64.b64encode(documents[position]["token"]).decode(), safe="")
 
     by_token = {}
     for i in range(count):
         if columns["viewPresent"][i] and previous_desc[i]:
-            by_token[quote(base64.b64encode(view[i]).decode(), safe="")] = previous_desc[i]
+            token = quote(base64.b64encode(view[i]).decode(), safe="")
+            source = previous_src[i] if previous_src is not None else 0
+            # 0 beside text would say the row has no description, and a code
+            # past the end is a newer build's parser; neither is a label.
+            if not 0 < source < len(DESC_SOURCES):
+                source = unknown
+            by_token[token] = (previous_desc[i], source, source_document(i, token, source))
 
     carried = {}
     for row, token in enumerate(view_tokens):
-        text = by_token.get(token) if token else None
-        if text:
-            carried[row] = text
+        found = by_token.get(token) if token else None
+        if found:
+            carried[row] = found
 
     print(f"descriptions  : {len(carried):,} carried forward from {os.path.basename(previous)}"
           + (f", {len(by_token) - len(carried):,} dropped (rows gone)"
@@ -965,9 +1014,11 @@ def carry_descriptions_forward(view_tokens):
 # the on-disk encoding: append only, never renumber, or an old payload read by
 # a newer page relabels every row.
 #
-# UNKNOWN exists for descriptions carried forward from a previous build, where
-# the text survives and the source does not. That is not "no source" -- it is
-# "we did not keep it", and the page says nothing rather than guessing.
+# UNKNOWN exists for text whose parser was not kept: carried forward from a
+# build made before descsrc.bin existed, or named by a parser this build has
+# never heard of. That is not "no source" -- it is "we did not keep it", and the
+# page says nothing rather than guessing. Carried rows keep their own source
+# since Sep 2026; before that every one of them was relabelled this.
 DESC_SOURCES = ("", "line_items", "cover_sheet", "services_clause",
                 "cover_sheet_form", "purchasing_bureau", "direct_purchase",
                 "unknown", "contract_description")
@@ -1056,9 +1107,9 @@ def document_positions(view_tokens):
     # publish one appear nowhere below. Building the map from that file alone
     # dropped 532,720 rows' descriptions, and a local build hid it completely:
     # carry_descriptions_forward had them from the previous payload, so the
-    # count looked right while the join underneath answered almost nothing. CI
-    # has no previous build to carry from, and published 18,305 descriptions
-    # where the site had 543,000.
+    # count looked right while the join underneath answered almost nothing. CI,
+    # which had no previous build to carry from at the time, published 18,305
+    # descriptions where the site had 543,000.
     where = {token: (row, 0, True) for token, row in row_of.items()}
 
     for entry in load_documents(os.path.join(ROOT, "data", "documents.jsonl")).values():
@@ -1089,21 +1140,20 @@ def load_descriptions(view_tokens, carry=True):
     # The previous build is the floor, so a rebuild never loses descriptions it
     # was already publishing. A local scope.jsonl then overlays it, which is
     # strictly newer: it covers every document extracted so far, including any
-    # collected since that build was made.
-    descriptions = carry_descriptions_forward(view_tokens) if carry else {}
-    # Everything carried forward arrived as text alone, so its source is not
-    # knowable. Recorded as such, and overwritten below by anything scope.jsonl
-    # also covers -- which, on a build with a current scope.jsonl, is all of it.
-    sources = {row: DESC_SOURCE_CODE["unknown"] for row in descriptions}
+    # collected since that build was made. On CI's nightly build the floor is
+    # the previous night's payload, restored from the Actions cache.
+    carried = carry_descriptions_forward(view_tokens) if carry else {}
+    descriptions = {row: text for row, (text, _source, _token) in carried.items()}
+    # The parser each carried description came from, as the previous build
+    # recorded it -- "unknown" only where that build did not.
+    sources = {row: source for row, (_text, source, _token) in carried.items()}
     # Which of the record's documents a row's description was read from, as a
-    # position in the state's list. Carried-forward text was joined by the
-    # row's own View URL, so it came from the primary.
-    documents = dict.fromkeys(descriptions, 0)
+    # position in the state's list.
+    documents = {}
 
-    if not os.path.exists(SCOPE_JSONL):
-        if not descriptions:
-            print(f"note: no {SCOPE_JSONL} and nothing to carry forward — "
-                  "building without descriptions")
+    if not carried and not os.path.exists(SCOPE_JSONL):
+        print(f"note: no {SCOPE_JSONL} and nothing to carry forward — "
+              "building without descriptions")
         return descriptions, sources, documents
 
     # A row is described by its primary if the primary says anything at all.
@@ -1116,8 +1166,33 @@ def load_descriptions(view_tokens, carry=True):
         return 0 if is_primary else 1 + position
 
     where = document_positions(view_tokens)
-    best = {row: 0 for row in descriptions}
-    added = filled = unmatched = 0
+    # A carried row is placed and ranked by looking its source document up in
+    # today's list, exactly as the scope.jsonl record that first described it
+    # was -- so the rules below treat it as that record: the same document read
+    # again overlays it, a better-ranked one displaces it, a worse one does
+    # not. Ranking every carried row as the primary, as this used to, let no
+    # later document's record ever correct one.
+    #
+    # A row whose document cannot be placed -- the previous build did not keep
+    # it, today's list no longer has it, or it is listed for another row that
+    # shares this one's View URL (39 rows on 29 Sep 2026, which only the carry
+    # reaches) -- claims no position and takes no rank. Anything scope.jsonl
+    # reads for the row then replaces it, which is the fresh build's answer,
+    # and the carried text stands only where scope.jsonl says nothing at all.
+    best = {}
+    for row, (_text, _source, token) in carried.items():
+        found = where.get(token) if token else None
+        if found is not None and found[0] == row:
+            _row, position, is_primary = found
+            documents[row] = position
+            best[row] = rank(is_primary, position)
+        else:
+            documents[row] = ne_format.DESC_DOC_UNKNOWN
+
+    if not os.path.exists(SCOPE_JSONL):
+        return descriptions, sources, documents
+
+    added = unmatched = 0
     unnamed = collections.Counter()
     with open(SCOPE_JSONL, encoding="utf-8") as f:
         for line in f:
@@ -1134,8 +1209,6 @@ def load_descriptions(view_tokens, carry=True):
                 continue
             if row not in descriptions:
                 added += 1
-                if not is_primary:
-                    filled += 1
             descriptions[row] = record["description"].encode("utf-8")
             source = record.get("source") or ""
             if source and source not in DESC_SOURCE_CODE:
@@ -1147,12 +1220,22 @@ def load_descriptions(view_tokens, carry=True):
             documents[row] = position
             best[row] = here
 
+    # Counted over what is published, carried or not. It used to count only
+    # rows new to this build, so a carried build printed nothing here -- and
+    # the line vanishing between a fresh build (1,051) and the next night's
+    # carried one was the only visible sign that those rows had lost their
+    # source.
+    filled = sum(1 for r in best.values() if r)
+    unplaced = len(descriptions) - len(best)
     print(f"descriptions  : {len(descriptions):,} joined to rows"
           + (f", {added:,} new since the last build" if added else "")
           + (f", {unmatched:,} unmatched" if unmatched else ""))
     if filled:
         print(f"                {filled:,} of those read from a document other than "
               "the record's first, where the first said nothing")
+    if unplaced:
+        print(f"                {unplaced:,} carried forward without a document this "
+              "build can place them on — the page marks none")
     for source, count in unnamed.most_common():
         print(f"    note: {count:,} rows carry source {source!r}, which this build "
               f"does not know — add it to DESC_SOURCES to label them")
@@ -1166,8 +1249,9 @@ def load_ai_summaries(view_tokens):
     only ever summarizes a record's primary document (the one
     scripts/ocr_pilot.py OCR'd), so there is no other-document fallback and no
     rank to compute -- a token either is a row's own view token or it isn't.
-    No carry-forward either: unlike descriptions, which the weekly CI rebuild
-    has no way to regenerate (see carry_descriptions_forward), AI summaries
+    No carry-forward either: unlike descriptions, which every nightly build
+    carries forward from the previous one as a floor (see
+    carry_descriptions_forward), AI summaries
     are meant to be fetched fresh from a release asset on every build, the
     same way scope.jsonl already is. A local iterative build simply has fewer
     summaries until data/ai_summaries.jsonl is refreshed.

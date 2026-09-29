@@ -668,9 +668,20 @@ discovered later:
   them to the newest three.
 
 Descriptions are built in CI from `scope.jsonl.gz`, downloaded from the newest
-`extraction-data-*` release. `carry_descriptions_forward()` remains as a fallback but
-cannot be the main path any more: it reads the build being replaced, and that build is
-no longer in the repository.
+`extraction-data-*` release, laid over the previous build's. `carry_descriptions_forward()`
+is not a fallback: `pages.yml` restores the build being replaced from the payload cache
+before every nightly dispatch, so every nightly build starts from it, and only a build
+whose restore missed — a push that moved the key — starts from `scope.jsonl` alone. So a
+carried description keeps its parser (`descsrc.bin`) and the document it was read from
+(`descdoc.bin`, carried as that document's token and looked up in tonight's list), and is
+ranked as the record that first described it was: `scope.jsonl` replaces it exactly where
+it would have beaten the original. Until Sep 2026 only the text was carried, relabelled
+"unknown", placed on the record's first document and ranked as though read from there,
+so no later document's record could ever correct it; the first nightly after a fresh
+build put *"description read from this one"* beside the wrong document on 1,050 rows. A
+carried description whose document was never recorded, or cannot be placed in tonight's
+list, now marks no document (`descdoc.bin` 255) and gives way to anything `scope.jsonl`
+reads for its row.
 
 **`documents.jsonl.gz` rides on the same release**, for the same reason: it is the output
 of ~23 hours of detail fetches and will never be produced in CI. It is optional — a

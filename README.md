@@ -898,6 +898,28 @@ the full list height, which browsers cap at 2^24 px. At 739,605 rows × 33 px th
 24.4 M and the bottom third of the table silently becomes unreachable — the scrollbar
 just stops. The page caps the track at 15 M px and scales scroll position past that.
 
+**The sticky filter bar was taller than the phone it was pinned to.** `.controls` had been
+`position: sticky` since the first commit, at every width. On a phone it wraps to 668px
+(375 wide) or 732px (320 wide), and `fitScroller` holds the table at `MIN_TABLE_H`
+(220px) and expects the reader to scroll the page to reach it — so the pinned bar
+followed that scroll down and sat on the table. Swept with `document.elementFromPoint` at
+every page-scroll offset, the most of the table ever visible was 0px at 375x667,
+390x664, 320x640 and 320x568, 164px at 390x844 and 60px at 844x390, and a focused row
+sat underneath the bar at every one of them (`focus()` at each, and a real Tab press from
+Reset at 375x667). Desktop and tablet were
+fine, because the page barely scrolls there and the bar never gets the chance to stick.
+
+The bar is now static at `(max-width: 720px), (max-height: 700px)`. Sticky needs the
+viewport to hold its 12px offset, the bar and the 220px table: 900px for an upright phone
+375 wide, which almost none has once the browser's own bars are counted, and ~623px
+above 720 wide, where the tallest bar (391px, just past the breakpoint) sits. 700
+leaves a row of wrap for fonts wider than the macOS ones it was measured with. After: the
+full 220px of table reachable and the focused row uncovered at all six; still sticky at
+768x1024, 1024x768 and 1280x800. `tests/test_page_layout.py` cascades the stylesheet for a
+given viewport and fails if the bar is sticky anywhere it cannot fit. **A sticky element
+has to be shorter than the viewport, less whatever it must leave room for, at every
+width the page supports** — check it at a phone size, not just the one it was drawn at.
+
 **Both purchase-order forms wrap their description column, and both parsers stopped at
 the first line.** The single worst bug here, and it survived because the documentation
 asserted the opposite: that the University's 40-character column *cut* the text and we

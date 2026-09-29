@@ -1,5 +1,6 @@
 """build_vendor_rows() feeds ne-connect's per-vendor itemized fetch."""
 
+import json
 import os
 import sys
 
@@ -56,6 +57,58 @@ def test_purchase_orders_merge_into_the_same_vendor_key(tmp_path, monkeypatch):
     rows = export_vendor_rows.build_vendor_rows()
 
     assert len(rows["ACME CO"]) == 2
+
+
+def test_state_agency_rows_are_exported(tmp_path, monkeypatch):
+    # ne-connect's totals read state_agencies.csv alongside the two nu_ files,
+    # so a vendor that appears only there (most state vendors do) must still
+    # get its itemized rows -- this file was once left out of the export and
+    # every such vendor's table in ne-connect came up blank.
+    state_row = (
+        "15875,OC,054,Historical Society,SEWAH STUDIOS INC,"
+        '"$1,460,960.00",08/11/2023,08/10/2027,Active,https://example.gov/3,\n'
+    )
+    (tmp_path / "state_agencies.csv").write_text(HEADER + state_row, encoding="utf-8")
+    monkeypatch.setattr(export_vendor_rows, "DATA_DIR", tmp_path)
+
+    rows = export_vendor_rows.build_vendor_rows()
+
+    assert rows["SEWAH STUDIOS INC"] == [
+        ["15875", "OC", "Historical Society", 1460960.0, "08/11/2023", "08/10/2027", "Active", "https://example.gov/3"]
+    ]
+
+
+def test_state_agency_rows_merge_into_the_same_vendor_key(tmp_path, monkeypatch):
+    contract_row = (
+        "80-2-198,CN,050,Chadron State College,ACME CO,$100.00,01/06/2014,"
+        "01/06/2030,Active,https://example.gov/1,\n"
+    )
+    state_row = (
+        "15875,OC,054,Historical Society,ACME CO,$25.00,08/11/2023,"
+        "08/10/2027,Active,https://example.gov/3,\n"
+    )
+    data_dir = _write_contracts(tmp_path, contract_row).parent
+    (data_dir / "state_agencies.csv").write_text(HEADER + state_row, encoding="utf-8")
+    monkeypatch.setattr(export_vendor_rows, "DATA_DIR", data_dir)
+
+    rows = export_vendor_rows.build_vendor_rows()
+
+    assert [r[2] for r in rows["ACME CO"]] == ["Chadron State College", "Historical Society"]
+
+
+def test_main_writes_a_shard_from_state_agency_rows_alone(tmp_path, monkeypatch):
+    state_row = (
+        "15875,OC,054,Historical Society,WERNER CONSTRUCTION INC - PO'S,"
+        "$10.00,08/11/2023,08/10/2027,Active,https://example.gov/3,\n"
+    )
+    (tmp_path / "state_agencies.csv").write_text(HEADER + state_row, encoding="utf-8")
+    monkeypatch.setattr(export_vendor_rows, "DATA_DIR", tmp_path)
+    out_dir = tmp_path / "d" / "rows"
+    monkeypatch.setattr(export_vendor_rows, "OUT_DIR", out_dir)
+
+    assert export_vendor_rows.main() == 0
+    shard = json.loads((out_dir / "W.json").read_text(encoding="utf-8"))
+    assert len(shard["WERNER CONSTRUCTION INC - PO'S"]) == 1
 
 
 def test_unparseable_amount_defaults_to_zero():

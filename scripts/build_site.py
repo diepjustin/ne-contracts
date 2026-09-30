@@ -278,6 +278,49 @@ def find_permalink_collision(docs, entity_column, type_column, view_tokens):
             if len(rows) > 1 and len({view_tokens[r] for r in rows}) > 1]
 
 
+def row_fingerprint(r):
+    """What the build's duplicate check compares, for one CSV row as a dict.
+
+    A resumed scrape re-fetches a page, and its rows repeat on all five.
+    """
+    return (r["Document Number"], r["Entity Name"], r["Status"],
+            r["Document Type"], r["Detail URL"])
+
+
+# Every CSV column but Status. An Expired row that matches an Active row on all
+# of these is one record listed twice, not two versions of it.
+TWIN_COLUMNS = ("Document Number", "Document Type", "Entity Code", "Entity Name", "Vendor",
+                "Amount", "Begin Date", "End Date", "Detail URL", "View URL")
+
+
+def twin_key(r):
+    return tuple(r[c] for c in TWIN_COLUMNS)
+
+
+def active_twin_keys(paths):
+    """twin_key of every Active row the build keeps, read in a pass of its own.
+
+    A pass of its own because of file order: --daily appends, so the Active
+    row of a pair sits after its Expired twin, and the main loop meets the
+    Expired one first. Only Active rows are held -- ~44k tuples, not 740k.
+    An Active row main() will drop as a duplicate is skipped here too, so an
+    Expired row is only ever dropped in favour of a row that is published.
+    """
+    keys = set()
+    kept = set()
+    for path in paths:
+        with open(path, newline="", encoding="utf-8") as f:
+            for r in csv.DictReader(f):
+                if r["Status"] != "Active":
+                    continue
+                fingerprint = row_fingerprint(r)
+                if fingerprint in kept:
+                    continue
+                kept.add(fingerprint)
+                keys.add(twin_key(r))
+    return keys
+
+
 def build_rows(columns, docs, dn_tokens, view_tokens):
     """The legacy 11-field row list, rebuilt from the columns.
 
@@ -364,15 +407,32 @@ def main():
     seen = set()
     duplicates = 0
 
+    # An Expired row whose every other column matches an Active row is one
+    # record listed twice. --daily makes these: a record missed from one
+    # night's Active search is flipped to Expired, then appended as new when
+    # it reappears, so unchecked the page lists it twice -- once falsely
+    # Expired -- and adds its amount into every total twice. scrape.py never
+    # rewrites the stale row, so the pair stays in the CSV, which is a record
+    # of what was scraped, and the Expired twin is dropped here. A pair that
+    # differs anywhere is kept: it may be a genuine amendment, like 45500 at
+    # the Medical Center, $2,558,983 expired and $21,204,743 active.
+    twin_keys = active_twin_keys(DATA.values())
+    twins = 0
+    twin_amount = 0.0
+
     for path in DATA.values():
         with open(path, newline="", encoding="utf-8") as f:
             for r in csv.DictReader(f):
-                fingerprint = (r["Document Number"], r["Entity Name"], r["Status"],
-                               r["Document Type"], r["Detail URL"])
+                fingerprint = row_fingerprint(r)
                 if fingerprint in seen:
                     duplicates += 1
                     continue
                 seen.add(fingerprint)
+
+                if r["Status"] == "Expired" and twin_key(r) in twin_keys:
+                    twins += 1
+                    twin_amount += to_amount(r["Amount"])
+                    continue
 
                 ent = r["Entity Name"]
                 if ent not in ENTITIES:
@@ -530,6 +590,9 @@ def main():
     orig = sum(os.path.getsize(p) for p in DATA.values())
     if duplicates:
         print(f"duplicate rows: {duplicates:,} dropped (a resumed scrape redid a page)")
+    if twins:
+        print(f"expired twins : {twins:,} dropped, ${twin_amount:,.2f} no longer counted twice "
+              "(identical to an Active row with the same Detail URL)")
 
     if args.emit_json:
         verify_urls(payload["url"], payload["vtok"], payload["rows"], sources)

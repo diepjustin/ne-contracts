@@ -564,3 +564,91 @@ def test_the_page_can_never_mark_the_unknown_document():
     shown = int(re.search(r"var SHOWN = (\d+);", page).group(1))
     assert "i === from" in page
     assert shown <= NO_DOCUMENT
+
+# --- one record listed twice ------------------------------------------------
+#
+# --daily flips a record missed from one night's search to Expired, then
+# appends it again as new when it comes back. The 28 Sep 2026 release carried 302
+# Detail URLs with both an Active and an Expired row; 134 were identical in
+# every other column, so the page listed them twice and totalled them twice.
+# The rest differ somewhere and may be real amendments, so they must survive.
+
+DETAIL = ("https://statecontracts.nebraska.gov/Search/SearchDocuments"
+          "?A=a1&D=d1&DN={dn}&N=n1&DT=dt1&V=v1")
+VIEW = "https://statecontracts.nebraska.gov/Search/ViewDocument?D={tok}"
+
+
+def _row(doc, status, amount, dn, tok="t1"):
+    return [doc, "O4", "027", "Roads, Department of", "ACME PAVING", amount, "08/13/2026",
+            "01/01/2099", status, DETAIL.format(dn=dn), VIEW.format(tok=tok)]
+
+
+def _build(monkeypatch, tmp_path, rows):
+    """build_site.main() over one state CSV; returns the emitted payload."""
+    import csv
+
+    header = ["Document Number", "Document Type", "Entity Code", "Entity Name", "Vendor",
+              "Amount", "Begin Date", "End Date", "Status", "Detail URL", "View URL"]
+    paths = {}
+    for dataset in build_site.DATA:
+        paths[dataset] = str(tmp_path / f"{dataset}.csv")
+        with open(paths[dataset], "w", newline="", encoding="utf-8") as f:
+            csv.writer(f).writerows([header] + (rows if dataset == "state" else []))
+
+    monkeypatch.setattr(build_site, "DATA", paths)
+    monkeypatch.setattr(build_site, "SCRAPE_META", str(tmp_path / "scrape_meta.json"))
+    monkeypatch.setattr(build_site, "incomplete_coverage", lambda: [])
+    monkeypatch.setattr(build_site, "load_document_counts", lambda urls, _tokens: (
+        [255] * len(urls), {}, {"checked": 0, "moved": 0, "gone": 0, "clamped": 0}))
+    out = tmp_path / "payload.json"
+    monkeypatch.setattr(sys, "argv", ["build_site.py", "--emit-json", str(out)])
+    build_site.main()
+    return json.loads(out.read_text(encoding="utf-8"))
+
+
+def test_an_identical_expired_twin_is_dropped(monkeypatch, tmp_path, capsys):
+    """Roads' 1454299, $4,920 from 08/13/2026: Expired and Active, identical.
+    The Expired row comes first -- the full scrape wrote it, --daily appended
+    the Active one -- so the build has to know about the Active row before it
+    meets its twin."""
+    payload = _build(monkeypatch, tmp_path, [
+        _row("1454299", "Expired", "$4,920.00", "dn1"),
+        _row("1454299", "Active", "$4,920.00", "dn1"),
+    ])
+
+    assert payload["meta"]["count"] == 1
+    assert [payload["meta"]["statuses"][r[5]] for r in payload["rows"]] == ["Active"]
+    assert "expired twins : 1 dropped, $4,920.00" in capsys.readouterr().out
+
+
+def test_a_pair_that_differs_anywhere_is_kept(monkeypatch, tmp_path):
+    """The 45500 shape -- one URL, $2,558,983 expired and $21,204,743 active --
+    and a pair differing only in which document the row points at."""
+    payload = _build(monkeypatch, tmp_path, [
+        _row("45500", "Expired", "$2,558,983.00", "dn1"),
+        _row("45500", "Active", "$21,204,743.00", "dn1"),
+        _row("300100", "Expired", "$50,000.00", "dn2", tok="t2"),
+        _row("300100", "Active", "$50,000.00", "dn2", tok="t3"),
+    ])
+
+    assert payload["meta"]["count"] == 4
+
+
+def test_a_twin_is_only_dropped_for_a_row_that_is_published(tmp_path):
+    """Two Active rows sharing a fingerprint are one row to main(), which keeps
+    the first. An Expired row matching only the second must stay, or its
+    values would leave the page entirely."""
+    import csv
+
+    path = tmp_path / "state.csv"
+    header = list(build_site.TWIN_COLUMNS[:8]) + ["Status"] + list(build_site.TWIN_COLUMNS[8:])
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        csv.writer(f).writerows([header,
+                                 _row("7", "Active", "$1.00", "dn7"),
+                                 _row("7", "Active", "$2.00", "dn7")])
+    keys = build_site.active_twin_keys([str(path)])
+
+    first = dict(zip(header, _row("7", "Expired", "$1.00", "dn7")))
+    second = dict(zip(header, _row("7", "Expired", "$2.00", "dn7")))
+    assert build_site.twin_key(first) in keys
+    assert build_site.twin_key(second) not in keys

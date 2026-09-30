@@ -341,10 +341,40 @@ python3 scripts/scrape.py state --daily
 An unseen record gets a detail fetch and a new row. A known record is not rewritten. A
 previously-Active record that does not appear today has its `Status` flipped to `Expired`
 in place — **unless the disappearance is too large to be real**. An entity that returns
-no records at all while it had active ones, or that loses more than half of 20 or more,
-is refused and re-checked on the next run. That is not hypothetical tidiness: without it,
-one outage expired all 44,063 active records in a single green run (see "Things that bit
-us").
+no records at all while it had five or more active ones, or that loses more than half of
+20 or more, is refused and re-checked on the next run. That is not hypothetical tidiness:
+without it, one outage expired all 44,063 active records in a single green run (see
+"Things that bit us"). Below five an empty answer is believed, because a small body's
+last contract ending is a real ending — refusing it held the state dataset open for four
+nights.
+
+That floor has a price. A night the state answers empty for everything now flips every
+state entity with one to four active records to `Expired` — 17 of them, 29 records, in
+the 28 Sep 2026 release — while the larger ones are refused. The night does not finish,
+so the stamp stays put and the log names the refusals, but the guard rail below skips
+entities under five, so those small flips pass it. Nothing restores those rows in the
+CSV: `--daily` only ever flips Active to Expired.
+
+**A record that comes back is appended, and its Expired row stays.** A record flipped to
+`Expired` — after a night it was missed, or after an empty night like the one above — is
+unknown when it is listed again, because `--daily` knows only Active rows. It gets a
+detail fetch and a new `Active` row, and the old row is not touched. Unchecked, the site
+then lists it twice, once falsely Expired, and adds its amount into every total twice.
+The 28 Sep 2026 release has 302 Detail URLs carrying both statuses; 134 are identical in
+every other column. `build_site.py` drops an Expired row whose every other column, View
+URL included, matches a published Active row with the same Detail URL — 131 rows and
+$18,505,640.26 on that release, the other three pairs' twins already falling to the
+duplicate-row check. So the site shows such a record once, as Active, while the CSV —
+and the `ne-contracts-hub-data-*` release, which ships the raw CSVs — keeps the stale
+Expired row beside the new one. The new row's View URL comes from a fresh detail fetch,
+so if the state has filed a newer document ahead of the old first one the pair differs
+and both stay listed. A pair that differs anywhere is kept; `45500` below is one.
+
+Undoing `--daily`'s own flips in the CSV is deferred, because the undo would rewrite the
+baseline in place on the word of the same Active search whose silence made the flip,
+and no refusal was found that neither lets a search leaking Expired records rewrite
+thousands of rows in one green night nor turns an outage spread over two nights into a
+permanent, silent freeze.
 
 **Amendments are recorded rather than discarded.** Amount, vendor, begin and end date are
 compared against what the CSV already held, and any move is appended to
@@ -371,7 +401,12 @@ detail panel is the next step, and wants a few weeks of accumulation first.
 previously-Active records flip to Expired in a day, skipped below 5 records where the
 percentage is noise. That is implausible as real attrition but exactly what a
 renamed or retired entity looks like — which `check_entity_drift.py`, run first, is
-meant to catch before it gets this far.
+meant to catch before it gets this far. It sees every entity whose flips were patched,
+even on a night another entity did not finish: those entries are marked
+`"complete": false`, and only the scrape time waits for every entity to finish. Its skip
+below five is the same line as the scrape's all-gone floor, so the small bodies an empty
+night expires (above) pass it; an entity the scrape refused is not patched and has
+nothing to report.
 
 ### Getting the data back
 
@@ -1000,10 +1035,10 @@ rewritten the CSV and saved it to the Actions cache. A
 check that runs before publishing cannot protect data that is already written.
 
 So the refusal now lives in the scrape, where the write happens. An entity that returns
-nothing while it had active records is refused, as is one where more than half of 20+
-active records vanish at once; both re-check next run. Ordinary expiries still flip, and
-a small body genuinely clearing out its four contracts still flips — a guard that freezes
-the database would be its own bug, so both cases have tests.
+nothing while it had five or more active records is refused, as is one where more than
+half of 20+ active records vanish at once; both re-check next run. Ordinary expiries
+still flip, and a small body genuinely clearing out its four contracts still flips — a
+guard that freezes the database would be its own bug, so both cases have tests.
 
 **It compounded quietly.** Once every record read Expired, the next night's scrape had no
 memory of them: `known_active` was empty, so all 44,063 active contracts looked new and
@@ -1016,6 +1051,19 @@ two poisoned Actions caches and rebuilding from the pre-outage one; the restored
 came back at exactly 44,063 active and 695,542 expired, which is the local count less the
 128 duplicate rows the build drops — that reconciliation is what proved the older cache
 was undamaged.
+
+**Then the refusal froze the database it was guarding.** The first version had no floor:
+any entity answering empty was refused, however few records it had. On 25 Sep 2026 the
+state stopped listing the one active record of the Coordinating Commission for
+Postsecondary Education, and that one real ending was refused every night after. The
+scrape time and the diff report were written only on a night every entity finished, so the
+state dataset's stamp stuck at 24 Sep — and the page shows the oldest stamp — while the
+300 flips patched on those four nights (42, 118, 120 and 20 rows) reached no report:
+`check_daily_diff.py` went on printing "Guard rail passed: 2 dataset-run(s)" with the
+state never among them. The test claiming a four-contract body could clear out had only
+ever emptied three of the four. The floor is now five, the guard rail's own
+`MIN_BASELINE`, and a night that does not finish still reports what it patched. What the
+floor costs on a night the state answers empty is under "Daily updates".
 
 **The End column was blank for every row, from the first build.** A local `var end` for
 the virtual scroller's row window shadowed the module-level `end` column, so

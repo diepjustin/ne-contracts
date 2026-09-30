@@ -598,6 +598,17 @@ def scrape_entity(session, entity_name, entity_val, status, entity_type, doc_typ
     return total, True
 
 
+def local_timestamp():
+    """Now, as local time with an explicit UTC offset.
+
+    The browser renders these in the reader's own timezone without guessing
+    where the scrape ran. Shared with the daily diff report so an unfinished
+    night's entries carry the same shape of stamp as a finished one's, without
+    touching scrape_meta.json.
+    """
+    return datetime.datetime.now().astimezone().isoformat(timespec="seconds")
+
+
 def record_scrape_time(dataset):
     """Stamp this dataset's completion time, preserving stamps for other datasets."""
     stamps = {}
@@ -608,9 +619,7 @@ def record_scrape_time(dataset):
         except (OSError, ValueError):
             stamps = {}  # unreadable or corrupt: start fresh rather than fail the scrape
 
-    # Local time with an explicit UTC offset, so the browser can render it in
-    # the reader's own timezone without guessing where the scrape ran.
-    stamps[dataset] = datetime.datetime.now().astimezone().isoformat(timespec="seconds")
+    stamps[dataset] = local_timestamp()
 
     with open(SCRAPE_META, "w", encoding="utf-8") as f:
         json.dump(stamps, f, indent=2, sort_keys=True)
@@ -904,13 +913,25 @@ def patch_status_to_expired(csv_path, flip_urls):
 
 DAILY_DIFF_REPORT = "data/daily_diff_report.json"
 
+# The per-entity counts --daily reports, each summed into an entry's totals.
+REPORT_COUNTS = ("previously_active", "still_active", "newly_active", "flipped_to_expired")
 
-def append_daily_diff_report(dataset, entity_report, stamp):
-    """Append one dataset-run's per-entity counts to the accumulating report.
+
+def append_daily_diff_report(dataset, entity_report, stamp, complete=True):
+    """Add one dataset-run's per-entity counts to the accumulating report.
 
     Consumed by scripts/check_daily_diff.py on the nightly publish leg, then
     cleared -- so in the ordinary case this file holds one evening's three
     entries. See that script for how the totals here get used as a guard rail.
+
+    `complete` is False for a night some entity did not finish. Its entities'
+    flips are already patched into the CSV, so they are reported anyway: from
+    25 Sep 2026 one refused entity kept the state dataset unfinished for four
+    nights, and the 300 flips patched on those nights reached no report and
+    were never checked. A same-day re-run merges into that night's unfinished
+    entry rather than adding another, and an entity already in it keeps its
+    first counts -- those carry the real flips, and a re-scan after the patch
+    would report none -- so no entity is ever counted twice in one night.
     """
     entries = []
     if os.path.exists(DAILY_DIFF_REPORT):
@@ -920,9 +941,18 @@ def append_daily_diff_report(dataset, entity_report, stamp):
         except (OSError, ValueError):
             entries = []  # unreadable or corrupt: start the report fresh
 
-    totals = {k: sum(e[k] for e in entity_report.values())
-              for k in ("previously_active", "still_active", "newly_active", "flipped_to_expired")}
-    entries.append({"dataset": dataset, "timestamp": stamp, "entities": entity_report, "totals": totals})
+    night = stamp[:10]  # local date, the same day load_daily_progress counts in
+    entry = next((e for e in entries
+                  if e.get("dataset") == dataset and not e.get("complete", True)
+                  and str(e.get("timestamp", ""))[:10] == night), None)
+    if entry is None:
+        entry = {"dataset": dataset, "entities": {}}
+        entries.append(entry)
+    for name, counts in entity_report.items():
+        entry["entities"].setdefault(name, counts)
+    entry["timestamp"] = stamp
+    entry["complete"] = complete
+    entry["totals"] = {k: sum(e[k] for e in entry["entities"].values()) for k in REPORT_COUNTS}
 
     tmp = DAILY_DIFF_REPORT + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
@@ -962,6 +992,53 @@ def save_daily_progress(path, done_entities):
         json.dump({"date": datetime.date.today().isoformat(),
                    "done_entities": sorted(done_entities)}, f, indent=2)
     os.replace(tmp, path)
+
+
+# How many active records an entity needs before "all of them vanished" is
+# refused rather than believed. Without a floor, one record was enough: the
+# Coordinating Commission for Postsecondary Education had a single active
+# record, the state stopped listing it on 25 Sep 2026, and the refusal turned
+# that one ending into a night that never finished -- four nights running.
+# The scrape time and the diff report were written only on a finished night,
+# so the state dataset's "last updated" froze at 24 Sep and 300 flips patched
+# on those nights were never checked. Five matches check_daily_diff.py's
+# MIN_BASELINE, below which it too calls a percentage noise, and it is what
+# lets a small body genuinely ending its four contracts flip.
+#
+# The price: an outage that answers empty for every entity now flips each
+# entity with one to four active records to Expired -- 17 state entities, 29
+# records, on the 28 Sep 2026 release -- and nothing puts those rows back.
+# --daily only ever flips Active -> Expired. When the records are listed again
+# they are unknown, so each is appended as a new Active row. Where that row
+# matches the stale one in every column, View URL included, build_site.py drops
+# the Expired twin and the site lists the record once; the CSV keeps both.
+ALL_GONE_FLOOR = 5
+
+
+def refuse_flips(known, seen):
+    """Why tonight's disappearances for one entity cannot be trusted, or None.
+
+    An entity that returns nothing is the state failing, not 20,000 contracts
+    ending overnight. On 17-18 Aug 2026 its search answered "No results found"
+    for every entity for two days; scrape_entity treats an empty first page as
+    a clean finish, so `seen` came back empty, `known - seen` was everything,
+    and a single run marked all 44,063 active records in the database Expired.
+    Nothing failed, and nothing could undo it: --daily only ever flips Active
+    -> Expired.
+
+    So a flip has to be evidence of an ending, not of an absence. Refuse the
+    two shapes that cannot be real -- five or more active records all gone,
+    or more than half of 20+ gone at once -- and re-check next run.
+    """
+    if len(known) >= ALL_GONE_FLOOR and not seen:
+        return (f"saw 0 records but {len(known):,} were active -- refusing to expire them. "
+                "The state is answering empty, not reporting an ending. Will re-check next run.")
+    vanished = known - seen
+    share = len(vanished) / len(known) if known else 0
+    if len(known) >= 20 and share > 0.5:
+        return (f"{len(vanished):,} of {len(known):,} active records ({share:.0%}) vanished "
+                "at once -- refusing to expire them. Will re-check next run.")
+    return None
 
 
 def run_daily(args):
@@ -1052,29 +1129,14 @@ def run_daily(args):
                 print(f"  {entity_name}: not finished this run, will re-scan from the top later.")
                 continue
 
-            # An entity that returns nothing is the state failing, not 20,000
-            # contracts ending overnight. On 17-18 Aug 2026 its search answered
-            # "No results found" for every entity for two days; scrape_entity
-            # treats an empty first page as a clean finish, so `seen` came back
-            # empty, `known - seen` was everything, and a single run marked all
-            # 44,063 active records in the database Expired. Nothing failed, and
-            # nothing could undo it: --daily only ever flips Active -> Expired.
-            #
-            # So a flip has to be evidence of an ending, not of an absence.
-            # Refuse the two shapes that cannot be real and re-check next run.
-            vanished = known - seen
-            share = len(vanished) / len(known) if known else 0
-            if known and not seen:
-                print(f"  {entity_name}: saw 0 records but {len(known):,} were active -- "
-                      "refusing to expire them. The state is answering empty, not "
-                      "reporting an ending. Will re-check next run.")
-                continue
-            if len(known) >= 20 and share > 0.5:
-                print(f"  {entity_name}: {len(vanished):,} of {len(known):,} active records "
-                      f"({share:.0%}) vanished at once -- refusing to expire them. Will "
-                      "re-check next run.")
+            # A refused entity is re-scanned next run, and nothing of it is
+            # patched or reported tonight.
+            refusal = refuse_flips(known, seen)
+            if refusal:
+                print(f"  {entity_name}: {refusal}")
                 continue
 
+            vanished = known - seen
             report[entity_name] = {
                 "previously_active": len(known),
                 "still_active": len(seen & known),
@@ -1101,10 +1163,17 @@ def run_daily(args):
             os.remove(progress_path)  # today is done; tomorrow starts fresh anyway, but tidy
         print(f"\nDaily scrape complete for {args.dataset}. Scrape time recorded: {stamp}")
     else:
+        # The flips above are in the CSV whether or not the night finishes, so
+        # the guard rail has to see them tonight -- but the scrape time stays
+        # unrecorded, because "last updated" must never claim an entity that
+        # was not read.
+        if report:
+            append_daily_diff_report(args.dataset, report, local_timestamp(), complete=False)
         remaining = sorted(set(entities) - done_today)
         print(f"\nDaily scrape incomplete -- {len(remaining)} entit(y/ies) not finished today: "
-              f"{remaining[:5]}{'...' if len(remaining) > 5 else ''}. Re-run to finish before "
-              "the report is finalized.")
+              f"{remaining[:5]}{'...' if len(remaining) > 5 else ''}. The {len(report)} "
+              "finished this run are patched and in the diff report; the scrape time is "
+              "recorded only once every entity finishes. Re-run to finish.")
 
 
 CSV_HEADER = [

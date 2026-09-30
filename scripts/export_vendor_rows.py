@@ -10,10 +10,11 @@ flat JSON keyed by the name ne-connect's own Party objects use -- and this
 is the fourth. See ne-connect/docs/SCHEMA.md's "Cross-fetch" sections for
 the pattern.
 
-Sharded, not one file: a single vendor (Amazon Capital Services, ~66,900
-purchase-order line items) alone makes a combined export ~190 MB -- past
-GitHub's hard 100 MB per-file push limit, confirmed the hard way on a real
-build. d/rows/<A-Z or _>.json shards by the vendor name's first character
+Sharded, not one file: a single vendor (Amazon Capital Services, ~74,500
+line items as of 2026-09-28) alone makes a combined export too large -- it
+was ~190 MB before state agencies were added, past GitHub's hard 100 MB
+per-file push limit, confirmed the hard way on a real build, and is ~281 MB
+now. d/rows/<A-Z or _>.json shards by the vendor name's first character
 instead of truncating any real record.
 
 Usage:
@@ -30,14 +31,41 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT / "data"
-CONTRACT_FILES = ("nu_contracts.csv", "nu_purchase_orders.csv")
-# One vendor alone (Amazon Capital Services, ~66,900 purchase-order line
-# items) makes a single combined export ~190 MB -- past GitHub's hard
-# 100 MB per-file push limit, confirmed the hard way on a real build.
+# All three, because ne-connect's totals read all three: its
+# ingest/sources.py CONTRACT_FILES lists the same tuple, so every vendor it
+# shows a record count and dollar figure for must have its rows here, or the
+# itemized table under that figure comes up blank. state_agencies.csv was
+# missing from this tuple until 2026-09-29, with nothing on record saying
+# why -- and on the 2026-09-28 hub-data release it is 237,232 of 747,797
+# rows and $94.01B of $108.25B. 24,316 of its 25,722 vendors appear in no
+# other file (WERNER CONSTRUCTION INC - PO'S: 265 records, $1,378,300,656
+# in ne-connect's totals, zero itemized rows). The three files share one
+# header and no Detail URL appears in more than one of them, so no record
+# is listed from two files. Rows repeated within one file (53 in
+# state_agencies.csv, 135 in nu_purchase_orders.csv) are exported as the
+# state published them, because ne-connect's totals count them too.
+CONTRACT_FILES = ("nu_contracts.csv", "nu_purchase_orders.csv", "state_agencies.csv")
+# One vendor alone (Amazon Capital Services) makes a single combined export
+# too large -- ~190 MB even before state agencies were added, past GitHub's
+# hard 100 MB per-file push limit, confirmed the hard way on a real build.
 # Sharded by the vendor name's first character instead of truncating any
-# real record: 36 shards, largest ~42 MB (well under even the 50 MB warning
-# threshold), all real data intact. ne-connect fetches only the one shard a
-# looked-up vendor's name falls into.
+# real record: 27 shards, all real data intact. ne-connect fetches only the
+# one shard a looked-up vendor's name falls into.
+#
+# Measured on the 2026-09-28 release with all three files: 281 MB total
+# (30 MB gzipped, which is what Pages actually sends), largest A.json at
+# 48.8 MB raw (51,124,983 bytes) / 4.5 MB gzipped -- up from 42.1 MB
+# before state agencies were added. That is at the ~50 MB line, not
+# comfortably under it: A.json grew ~470 KB between the 17 Sep local
+# capture and that release (11 days of contracts/POs, 7 of state), so at
+# that pace it passes 50 MB in about a month. Amazon Capital Services
+# alone is 28.0 MB of it. d/ is gitignored and only ever deployed as a
+# Pages artifact (see pages.yml), so GitHub's 100 MB push limit bites only
+# if a shard is ever committed. Nothing watches the 50 MB line: main()
+# only warns past 90 MB, within 10 MB of that push limit. Revisiting the
+# shard scheme is a two-repo change, because ne-connect's
+# contractShardKey() mirrors it, so it cannot change on this side alone.
+# (MB here is 1024*1024 bytes, the unit main() prints.)
 OUT_DIR = ROOT / "d" / "rows"
 
 # Some fields (Detail URL especially) can run long in practice -- match the
@@ -63,7 +91,8 @@ def shard_key(vendor: str) -> str:
 
 
 def build_vendor_rows() -> dict:
-    """Vendor (raw, exact string) -> every contract/PO row naming it.
+    """Vendor (raw, exact string) -> every contract, purchase-order and
+    state-agency row naming it.
 
     Row shape: [document_number, document_type, entity_name, amount,
     begin_date, end_date, status, detail_url]. Keyed by the exact raw
@@ -100,7 +129,7 @@ def build_vendor_rows() -> dict:
 def main() -> int:
     rows = build_vendor_rows()
     if not rows:
-        print("no nu_contracts.csv/nu_purchase_orders.csv found under data/ -- run scripts/scrape.py first")
+        print("no " + "/".join(CONTRACT_FILES) + " found under data/ -- run scripts/scrape.py first")
         return 1
 
     shards = defaultdict(dict)

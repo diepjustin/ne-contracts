@@ -101,7 +101,9 @@ jobs:
 
       # Best effort. On an ordinary push this restores the payload the last
       # build made, so no rebuild is needed and no CSVs are required. If it
-      # misses, the build below makes one.
+      # misses, the build below makes one. On a dispatch, which rebuilds
+      # regardless, it is still used: build_site.py carries its descriptions
+      # forward, so skipping it would change what the build publishes.
       - name: Restore the last built payload
         id: payload
         uses: actions/cache/restore@v5
@@ -144,9 +146,13 @@ jobs:
 
       # Descriptions come from a 19-hour document download that will never live
       # in CI. scope.jsonl is its distilled output and small enough to fetch, so
-      # the build makes them properly instead of carrying the previous build's
-      # forward -- which it can no longer do anyway, now that the previous build
-      # is not in the repository.
+      # the build reads them from it -- on top of the previous build's, which
+      # build_site.py carries forward whenever the payload restore above found
+      # one. That is every nightly dispatch: the restore runs before the
+      # rebuild decision, so last night's payload is the floor tonight's build
+      # starts from, and a carried row keeps the source and document it was
+      # read from. Only a build whose restore missed -- a push that moved the
+      # key -- starts from scope.jsonl alone.
       # Descriptions, and which documents each record publishes. Both are the
       # distilled output of long downloads against the state's servers -- 19
       # hours and ~23 hours -- so neither will ever be produced in CI, and both

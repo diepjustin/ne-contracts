@@ -111,6 +111,26 @@
     border-radius: var(--radius); box-shadow: var(--shadow);
     position: sticky; top: 12px; z-index: 5;
   }
+  /* Sticky only where it fits under itself. The bar wraps as the window
+     narrows -- 166px tall at 1366 wide, 242 at 1024, 318 at 768, 391 just
+     past 720 and 596-732 on a phone -- and fitScroller holds the table at
+     MIN_TABLE_H (220px) and lets the page scroll once there is no room for
+     more. Pinned, the bar rode that scroll down and covered the table: at
+     375x667, 390x664 and 320x568 not one pixel of it could be scrolled into
+     view, 60px at 844x390, and a row given focus (Tab, at 375x667) landed
+     underneath. It fits when the viewport is at least 12 + bar + 220px tall:
+     900px for an upright phone 375 wide, which almost none has once the
+     browser's own bars are counted, and ~623px in the worst band above 720.
+     700 rather than that leaves a row of wrap for fonts wider than the macOS
+     ones this was measured with. The cost: any window 700px tall or less
+     inside the browser -- a 1366x768 or 1280x720 screen, a window that isn't
+     maximized -- loses the pinned bar, even where the bar would have fit.
+     Little is lost: at 1366x657 the bar only stuck after 210px of page
+     scroll, which the page only has once a row's document list is open, and
+     a static bar can never cover the table. */
+  @media (max-width: 720px), (max-height: 700px) {
+    .controls { position: static; }
+  }
   /* Thirteen controls in one flat row wrapped as a wall, one at a time, on
      anything narrower than a wide desktop. Grouped by what they do, a group
      wraps as a unit and a divider marks where one kind of control ends and
@@ -562,7 +582,10 @@
   }
 
   // Below this the table is not worth showing and the reader is better served
-  // by scrolling the page to reach it.
+  // by scrolling the page to reach it. That scroll only reaches it because
+  // .controls stops being sticky wherever it would not leave this much room
+  // under itself -- see the @media rule after .controls. Pinned, the bar
+  // followed the scroll down, and at 375x667 no row could reach the screen.
   var MIN_TABLE_H = 220;
   var PAGE = location.origin + location.pathname;
 

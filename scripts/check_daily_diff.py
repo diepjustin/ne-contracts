@@ -1,6 +1,7 @@
 """Guard rail for --daily publishing.
 
-Reads data/daily_diff_report.json (one entry per dataset per run, written by
+Reads data/daily_diff_report.json (one entry per dataset per completed run,
+and one per dataset per day for runs that did not finish -- written by
 scrape.py's --daily mode) and refuses to bless the data if any single day's
 Active -> Expired drop, for any one entity, looks more like a scraping
 failure than real-world contract expiration.
@@ -19,6 +20,11 @@ next run starts counting from zero; the failure is on record in this run's
 logs. Note what that means: the rejected night is not re-examined tomorrow.
 Holding data back from the *site* was never the real protection -- the
 refusals inside scrape.py are, because they run where the write happens.
+
+An entry marked "complete": false comes from a night some entity did not
+finish. Its flips are already in the CSV, so it is checked like any other;
+until Sep 2026 such nights wrote no entry at all, and four of them went
+unchecked while one refused entity held the state dataset open.
 """
 import json
 import os
@@ -55,20 +61,25 @@ def main():
         for name, counts in entry["entities"].items():
             base, flipped = counts["previously_active"], counts["flipped_to_expired"]
             if base >= MIN_BASELINE and flipped / base > MAX_SINGLE_DAY_FLIP_FRACTION:
-                violations.append((entry["dataset"], entry["timestamp"], name, flipped, base))
+                violations.append((entry["dataset"], entry["timestamp"], name, flipped, base,
+                                   entry.get("complete", True)))
 
     if violations:
         print(f"GUARD RAIL FAILED: {len(violations)} entity/day combination(s) look implausible:")
-        for dataset, ts, name, flipped, base in violations:
-            print(f"  [{dataset} @ {ts}] {name}: {flipped}/{base} ({flipped/base:.0%}) flipped Active -> Expired")
+        for dataset, ts, name, flipped, base, complete in violations:
+            night = "" if complete else ", unfinished night"
+            print(f"  [{dataset} @ {ts}{night}] {name}: {flipped}/{base} ({flipped/base:.0%}) "
+                  "flipped Active -> Expired")
         print("\nNot publishing tonight. Investigate before the next scheduled run -- check "
               "scripts/check_entity_drift.py first (a renamed/retired entity looks exactly like "
               "this: previously_active > 0, seen = 0, 100% flipped).")
         clear_report()
         return 1
 
-    print(f"Guard rail passed: {len(entries)} dataset-run(s) checked since the last publish, "
-          "nothing implausible.")
+    unfinished = sum(1 for entry in entries if not entry.get("complete", True))
+    of_them = f" ({unfinished} from a night that did not finish)" if unfinished else ""
+    print(f"Guard rail passed: {len(entries)} dataset-run(s){of_them} checked since the last "
+          "publish, nothing implausible.")
     clear_report()
     return 0
 

@@ -7,9 +7,13 @@ the wrong row shows one contract's words beside another's money. None of these
 announce themselves, which is exactly why they need tests.
 """
 
+import array
+import base64
 import json
 import os
+import re
 import sys
+from urllib.parse import quote, unquote
 
 import pytest
 
@@ -17,6 +21,7 @@ SCRIPTS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 sys.path.insert(0, SCRIPTS)
 
 import build_site  # noqa: E402
+import ne_format  # noqa: E402
 
 
 # --- parsing the state's own formatting ------------------------------------
@@ -346,3 +351,304 @@ def test_a_row_absent_from_the_documents_log_still_matches(monkeypatch, tmp_path
         [{"tok": "never-backfilled", "doc": "D9", "source": "line_items",
           "description": "SCRAPED LAST NIGHT"}])
     assert descriptions[0] == b"SCRAPED LAST NIGHT"
+
+
+# --- carrying a description into the next build -----------------------------
+#
+# pages.yml restores the previous payload before every nightly dispatch, so
+# carry_descriptions_forward runs on every nightly build, not just locally. Every
+# test above passes carry=False, which is how it went untested while it
+# relabelled every carried row "unknown", placed it on the record's first
+# document and ranked it as though read from there -- and the next night's
+# scope.jsonl record of the document it really came from was then outranked by
+# the carried copy of itself. The live build of 28 Sep 2026 had 1,090 such
+# rows, 1,050 of them read from a later document, the page saying
+# "description read from this one" beside the first.
+
+COVER_SHEET = build_site.DESC_SOURCE_CODE["cover_sheet"]
+UNKNOWN = build_site.DESC_SOURCE_CODE["unknown"]
+NO_DOCUMENT = ne_format.DESC_DOC_UNKNOWN
+
+
+def _tok(k):
+    """A view token spelled the way the state spells one -- 16 bytes, base64,
+    percent-encoded -- because the carry path rebuilds it from the 16 raw bytes
+    in the previous build's token blocks, and a made-up string would not
+    survive that round trip."""
+    return quote(base64.b64encode(bytes([k]) * ne_format.TOKEN_BYTES).decode(), safe="")
+
+
+def _record(tokens, key="k1"):
+    """A documents.jsonl entry for one record publishing these documents."""
+    return {"k": key, "doc": "CW8847", "entity": "E", "n": len(tokens),
+            "documents": [{"name": f"DOC{i}", "size": "1Mb", "token": t}
+                          for i, t in enumerate(tokens)]}
+
+
+def _previous_build(tmp_path, view_tokens, descriptions, sources=None, documents=None,
+                    lists=None):
+    """Leave behind the payload an earlier build_site.main() would have.
+
+    Written with the same ne_format writers main() uses, so the carry path
+    reads real files. `sources`, `documents` and `lists` left as None are not
+    written at all, which is what a payload made before descsrc.bin, descdoc.bin
+    or the xdoc blocks existed looks like.
+    """
+    n = len(view_tokens)
+    outdir = str(tmp_path / "d" / "prev")
+    columns = {name: array.array("i", [0] * n) for name in ne_format.I32_COLUMNS}
+    columns.update({name: array.array("d", [0.0] * n) for name in ne_format.F64_COLUMNS})
+    columns.update({name: array.array("B", [0] * n) for name in ne_format.U8_COLUMNS})
+    columns["viewPresent"] = array.array("B", [1 if t else 0 for t in view_tokens])
+    columns["docLen"] = array.array("B", [1] * n)
+    ne_format.write_payload(outdir, columns, [b"D"] * n, [b"V"], [b"\x00" * 16],
+                            {"count": n, "vendorCount": 1, "descCount": len(descriptions)})
+    view = [base64.b64decode(unquote(t)) if t else b"" for t in view_tokens]
+    ne_format.write_token_blocks(outdir, [b""] * n, view, n)
+    ne_format.write_desc_blocks(outdir, descriptions, n)
+    if sources is not None:
+        ne_format.write_desc_sources(outdir, sources, n)
+    if documents is not None:
+        ne_format.write_desc_documents(outdir, documents, n)
+    if lists is not None:
+        ne_format.write_xdoc_blocks(outdir, {
+            row: ne_format.pack_documents([
+                {"token": base64.b64decode(unquote(t)), "name": f"DOC{i}", "size": "1Mb"}
+                for i, t in enumerate(tokens)])
+            for row, tokens in lists.items()}, n)
+    (tmp_path / "manifest.json").write_text(json.dumps({"buildId": "prev", "dir": "d/prev"}))
+
+
+def _carry(monkeypatch, tmp_path, view_tokens, docs_entries, scope_records):
+    """load_descriptions as tonight's build runs it: the previous payload on disk."""
+    monkeypatch.setattr(build_site, "OUT_DIR", str(tmp_path))
+    monkeypatch.setattr(build_site, "ROOT", str(tmp_path))
+    monkeypatch.setattr(build_site, "SCOPE_JSONL", _scope(tmp_path, scope_records))
+    (tmp_path / "data").mkdir(exist_ok=True)
+    os.replace(_documents(tmp_path, docs_entries), str(tmp_path / "data" / "documents.jsonl"))
+    return build_site.load_descriptions(view_tokens, carry=True)
+
+
+# CW8847 at the University of Nebraska Kearney: five documents, the first says
+# nothing, and "Elevator service agreement" is the cover sheet of the third.
+CW8847 = [_tok(1), _tok(2), _tok(3), _tok(4), _tok(5)]
+CW8847_SCOPE = [
+    {"tok": CW8847[2], "doc": "CW8847", "source": "cover_sheet",
+     "description": "Elevator service agreement"},
+    {"tok": CW8847[3], "doc": "CW8847", "source": "cover_sheet",
+     "description": "Elevator service agreement for UNK campus. Amendment #2"},
+]
+
+
+def test_a_fresh_build_then_a_carried_one_publish_the_same_provenance(monkeypatch, tmp_path):
+    """The nightly sequence, end to end: a fresh build, its payload restored,
+    then tonight's build carrying it forward against the same scope.jsonl.
+    Nothing changed in between, so nothing published may change either."""
+    view_tokens = [CW8847[0], _tok(9)]
+    entries = [_record(CW8847)]
+    scope = CW8847_SCOPE + [{"tok": _tok(9), "doc": "P1", "source": "line_items",
+                             "description": "ORDINARY ROW"}]
+
+    fresh = _run(monkeypatch, tmp_path, view_tokens, entries, scope)
+    assert fresh[0][0] == b"Elevator service agreement"
+    assert (fresh[1][0], fresh[2][0]) == (COVER_SHEET, 2)
+
+    descriptions, sources, documents = fresh
+    _previous_build(tmp_path, view_tokens, descriptions, sources, documents,
+                    lists={0: CW8847})
+    carried = _carry(monkeypatch, tmp_path, view_tokens, entries, scope)
+
+    assert carried == fresh
+
+
+def test_a_carried_later_document_keeps_its_source_and_place(monkeypatch, tmp_path):
+    """With nothing in scope.jsonl for the row, the carried copy is all there is,
+    so it has to carry its own provenance rather than the first document's."""
+    _previous_build(tmp_path, [CW8847[0]], {0: b"Elevator service agreement"},
+                    {0: COVER_SHEET}, {0: 2}, lists={0: CW8847})
+    descriptions, sources, documents = _carry(
+        monkeypatch, tmp_path, [CW8847[0]], [_record(CW8847)], [])
+    assert descriptions[0] == b"Elevator service agreement"
+    assert sources[0] == COVER_SHEET
+    assert documents[0] == 2
+
+
+def test_a_carried_row_ranks_as_the_document_it_came_from(monkeypatch, tmp_path):
+    """Its rank is the rank of the record that described it: a later document
+    does not displace it, and the record's own first document still does."""
+    _previous_build(tmp_path, [CW8847[0]], {0: b"FROM THE THIRD"},
+                    {0: COVER_SHEET}, {0: 2}, lists={0: CW8847})
+    later = [{"tok": CW8847[4], "doc": "CW8847", "source": "cover_sheet",
+              "description": "FROM THE FIFTH"}]
+    descriptions, _sources, documents = _carry(
+        monkeypatch, tmp_path, [CW8847[0]], [_record(CW8847)], later)
+    assert (descriptions[0], documents[0]) == (b"FROM THE THIRD", 2)
+
+    first = [{"tok": CW8847[0], "doc": "CW8847", "source": "cover_sheet",
+              "description": "THE CONTRACT ITSELF"}]
+    descriptions, _sources, documents = _carry(
+        monkeypatch, tmp_path, [CW8847[0]], [_record(CW8847)], first)
+    assert (descriptions[0], documents[0]) == (b"THE CONTRACT ITSELF", 0)
+
+
+def test_a_carried_drifted_primary_is_still_the_primary(monkeypatch, tmp_path):
+    """The CSV's document no longer sorts first. Its description is still the
+    primary's and outranks the newcomer ahead of it -- which a rank worked out
+    from the position alone (1 + 1) would not."""
+    listed = [_tok(7), _tok(8)]                      # newcomer, then the CSV's own
+    _previous_build(tmp_path, [listed[1]], {0: b"OLD"}, {0: COVER_SHEET}, {0: 1},
+                    lists={0: listed})
+    newcomer = [{"tok": listed[0], "doc": "D1", "source": "cover_sheet",
+                 "description": "NEW"}]
+    descriptions, _sources, documents = _carry(
+        monkeypatch, tmp_path, [listed[1]], [_record(listed)], newcomer)
+    assert (descriptions[0], documents[0]) == (b"OLD", 1)
+
+
+def test_a_carried_position_follows_its_document_when_the_list_reorders(monkeypatch, tmp_path):
+    """A document filed since the last build sorts ahead of the source. The
+    position is the state's order today, which is what the page's list shows,
+    so a carried position copied as-is would mark the document beside it."""
+    _previous_build(tmp_path, [CW8847[0]], {0: b"Elevator service agreement"},
+                    {0: COVER_SHEET}, {0: 2}, lists={0: CW8847})
+    today = CW8847[:1] + [_tok(6)] + CW8847[1:]      # a new second document
+    descriptions, sources, documents = _carry(
+        monkeypatch, tmp_path, [CW8847[0]], [_record(today)], CW8847_SCOPE)
+    assert descriptions[0] == b"Elevator service agreement"
+    assert (sources[0], documents[0]) == (COVER_SHEET, 3)
+
+
+def test_a_carried_single_document_row_keeps_position_zero(monkeypatch, tmp_path):
+    """About 95% of rows publish one document and ship no xdoc list, so the
+    carry has to recover their source from the row's own View URL. With
+    nothing in scope.jsonl for the row, the carried copy must still name
+    document 0 -- not the unknown marker, which would drop a true claim."""
+    _previous_build(tmp_path, [_tok(9)], {0: b"ORDINARY ROW"},
+                    {0: COVER_SHEET}, {0: 0}, lists={})
+    descriptions, sources, documents = _carry(monkeypatch, tmp_path, [_tok(9)], [], [])
+    assert descriptions[0] == b"ORDINARY ROW"
+    assert (sources[0], documents[0]) == (COVER_SHEET, 0)
+
+
+def test_an_older_payload_without_provenance_claims_no_document(monkeypatch, tmp_path):
+    """A payload built before descsrc.bin and descdoc.bin kept only the text. Its
+    source is unknown and so is its document: 0 would be a claim, and the page
+    prints "description read from this one" beside whichever document the byte
+    names. The text itself stays -- the previous build is still the floor."""
+    _previous_build(tmp_path, [CW8847[0]], {0: b"Elevator service agreement"})
+    descriptions, sources, documents = _carry(
+        monkeypatch, tmp_path, [CW8847[0]], [_record(CW8847)], [])
+    assert descriptions[0] == b"Elevator service agreement"
+    assert sources[0] == UNKNOWN
+    assert documents[0] == NO_DOCUMENT
+
+
+def test_a_build_that_lost_its_provenance_is_corrected_by_scope(monkeypatch, tmp_path):
+    """The live payload's own state: carried rows labelled "unknown" beside a
+    position 0 that was never recorded, only assumed. Trusting that 0 would rank
+    the row as the primary and keep outranking the record that could fix it,
+    every night, so an "unknown" row is placed nowhere and scope.jsonl decides."""
+    _previous_build(tmp_path, [CW8847[0]], {0: b"Elevator service agreement"},
+                    {0: UNKNOWN}, {0: 0}, lists={0: CW8847})
+    descriptions, sources, documents = _carry(
+        monkeypatch, tmp_path, [CW8847[0]], [_record(CW8847)], CW8847_SCOPE)
+    assert descriptions[0] == b"Elevator service agreement"
+    assert (sources[0], documents[0]) == (COVER_SHEET, 2)
+
+
+def test_the_page_can_never_mark_the_unknown_document():
+    """DESC_DOC_UNKNOWN works only because index.html marks the document whose
+    index equals the byte, among the few it lists. Listing that many would
+    turn "we do not know" back into a claim about one of them."""
+    page = open(os.path.join(os.path.dirname(SCRIPTS), "index.html"), encoding="utf-8").read()
+    shown = int(re.search(r"var SHOWN = (\d+);", page).group(1))
+    assert "i === from" in page
+    assert shown <= NO_DOCUMENT
+
+# --- one record listed twice ------------------------------------------------
+#
+# --daily flips a record missed from one night's search to Expired, then
+# appends it again as new when it comes back. The 28 Sep 2026 release carried 302
+# Detail URLs with both an Active and an Expired row; 134 were identical in
+# every other column, so the page listed them twice and totalled them twice.
+# The rest differ somewhere and may be real amendments, so they must survive.
+
+DETAIL = ("https://statecontracts.nebraska.gov/Search/SearchDocuments"
+          "?A=a1&D=d1&DN={dn}&N=n1&DT=dt1&V=v1")
+VIEW = "https://statecontracts.nebraska.gov/Search/ViewDocument?D={tok}"
+
+
+def _row(doc, status, amount, dn, tok="t1"):
+    return [doc, "O4", "027", "Roads, Department of", "ACME PAVING", amount, "08/13/2026",
+            "01/01/2099", status, DETAIL.format(dn=dn), VIEW.format(tok=tok)]
+
+
+def _build(monkeypatch, tmp_path, rows):
+    """build_site.main() over one state CSV; returns the emitted payload."""
+    import csv
+
+    header = ["Document Number", "Document Type", "Entity Code", "Entity Name", "Vendor",
+              "Amount", "Begin Date", "End Date", "Status", "Detail URL", "View URL"]
+    paths = {}
+    for dataset in build_site.DATA:
+        paths[dataset] = str(tmp_path / f"{dataset}.csv")
+        with open(paths[dataset], "w", newline="", encoding="utf-8") as f:
+            csv.writer(f).writerows([header] + (rows if dataset == "state" else []))
+
+    monkeypatch.setattr(build_site, "DATA", paths)
+    monkeypatch.setattr(build_site, "SCRAPE_META", str(tmp_path / "scrape_meta.json"))
+    monkeypatch.setattr(build_site, "incomplete_coverage", lambda: [])
+    monkeypatch.setattr(build_site, "load_document_counts", lambda urls, _tokens: (
+        [255] * len(urls), {}, {"checked": 0, "moved": 0, "gone": 0, "clamped": 0}))
+    out = tmp_path / "payload.json"
+    monkeypatch.setattr(sys, "argv", ["build_site.py", "--emit-json", str(out)])
+    build_site.main()
+    return json.loads(out.read_text(encoding="utf-8"))
+
+
+def test_an_identical_expired_twin_is_dropped(monkeypatch, tmp_path, capsys):
+    """Roads' 1454299, $4,920 from 08/13/2026: Expired and Active, identical.
+    The Expired row comes first -- the full scrape wrote it, --daily appended
+    the Active one -- so the build has to know about the Active row before it
+    meets its twin."""
+    payload = _build(monkeypatch, tmp_path, [
+        _row("1454299", "Expired", "$4,920.00", "dn1"),
+        _row("1454299", "Active", "$4,920.00", "dn1"),
+    ])
+
+    assert payload["meta"]["count"] == 1
+    assert [payload["meta"]["statuses"][r[5]] for r in payload["rows"]] == ["Active"]
+    assert "expired twins : 1 dropped, $4,920.00" in capsys.readouterr().out
+
+
+def test_a_pair_that_differs_anywhere_is_kept(monkeypatch, tmp_path):
+    """The 45500 shape -- one URL, $2,558,983 expired and $21,204,743 active --
+    and a pair differing only in which document the row points at."""
+    payload = _build(monkeypatch, tmp_path, [
+        _row("45500", "Expired", "$2,558,983.00", "dn1"),
+        _row("45500", "Active", "$21,204,743.00", "dn1"),
+        _row("300100", "Expired", "$50,000.00", "dn2", tok="t2"),
+        _row("300100", "Active", "$50,000.00", "dn2", tok="t3"),
+    ])
+
+    assert payload["meta"]["count"] == 4
+
+
+def test_a_twin_is_only_dropped_for_a_row_that_is_published(tmp_path):
+    """Two Active rows sharing a fingerprint are one row to main(), which keeps
+    the first. An Expired row matching only the second must stay, or its
+    values would leave the page entirely."""
+    import csv
+
+    path = tmp_path / "state.csv"
+    header = list(build_site.TWIN_COLUMNS[:8]) + ["Status"] + list(build_site.TWIN_COLUMNS[8:])
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        csv.writer(f).writerows([header,
+                                 _row("7", "Active", "$1.00", "dn7"),
+                                 _row("7", "Active", "$2.00", "dn7")])
+    keys = build_site.active_twin_keys([str(path)])
+
+    first = dict(zip(header, _row("7", "Expired", "$1.00", "dn7")))
+    second = dict(zip(header, _row("7", "Expired", "$2.00", "dn7")))
+    assert build_site.twin_key(first) in keys
+    assert build_site.twin_key(second) not in keys

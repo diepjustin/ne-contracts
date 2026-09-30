@@ -297,13 +297,27 @@ def write_desc_sources(outdir, sources, n):
         f.write(column.tobytes())
 
 
+# descdoc.bin's reserved value for "no record of which document this was".
+#
+# Needed because 0 is not neutral: it is a claim that the record's first
+# document is the source, and index.html prints "description read from this
+# one" beside whichever document the byte names. A description carried forward
+# from a build that never kept its source used to be written as 0, and the live
+# site put that sentence beside the wrong document on 1,050 rows. The page
+# lists at most six documents and marks the one whose index equals this byte,
+# so 255 marks none -- which is also the honest reading of a position past 254,
+# and why the clamp below lands there.
+DESC_DOC_UNKNOWN = 255
+
+
 def write_desc_documents(outdir, positions, n):
     """Which of a record's documents each description was read from.
 
     A position in the state's own list, so it indexes the same order the xdoc
     blocks ship. 0 for a row described by its first document and for a row with
     no description at all -- the page asks whether there *is* one before it
-    reads this, so the two never have to be told apart here.
+    reads this, so the two never have to be told apart here. DESC_DOC_UNKNOWN
+    for a description nobody recorded the source document of.
 
     Its own file for the same reason as descsrc.bin: --descriptions-only writes
     descriptions onto a built payload without touching a resident column, and a
@@ -312,7 +326,7 @@ def write_desc_documents(outdir, positions, n):
     """
     column = array.array("B", bytes(n))
     for row, position in positions.items():
-        column[row] = min(position, 255)
+        column[row] = min(position, DESC_DOC_UNKNOWN)
     with open(os.path.join(outdir, DESC_DOC), "wb") as f:
         f.write(column.tobytes())
 

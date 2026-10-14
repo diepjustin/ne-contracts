@@ -33,6 +33,7 @@ import csv
 import datetime
 import json
 import gzip
+import math
 import os
 import random
 import re
@@ -215,9 +216,14 @@ def to_ymd(mdy):
 
 def to_amount(raw):
     try:
-        return round(float(raw.replace("$", "").replace(",", "").strip()), 2)
+        value = round(float(raw.replace("$", "").replace(",", "").strip()), 2)
     except ValueError:
         return 0.0
+    # float() accepts "NaN" and "inf". NaN != NaN, so a single one makes the
+    # round-trip comparison report a whole 100,000-row chunk as differing, and
+    # an infinite amount is not a figure anyone should be shown: both read as
+    # unparseable, like any other text that is not a number.
+    return value if math.isfinite(value) else 0.0
 
 
 def scraped_at():

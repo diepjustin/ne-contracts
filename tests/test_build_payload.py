@@ -387,13 +387,16 @@ def test_more_entries_than_a_u8_column_holds_stop_the_build_cleanly(site, make_r
         site.build()
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "build-04: to_amount('NaN') is nan, nan != nan, so the byte comparison in verify_payload "
-    "reports 'rows 0..N differ after decoding' for a whole 100,000-row chunk. Not in the data "
-    "today. Returning 0.0 for a non-finite amount (math.isfinite) is the fix."))
-@pytest.mark.parametrize("raw", ["NaN", "inf", "-Infinity"])
+@pytest.mark.parametrize("raw", ["NaN", "nan", "inf", "-inf", "Infinity", "-Infinity", "$1e999", "1,e999"])
 def test_a_non_finite_amount_is_read_as_zero(raw):
+    """float() accepts these, and NaN != NaN breaks the round-trip comparison for a whole chunk."""
     assert build_site.to_amount(raw) == 0.0
+
+
+@pytest.mark.parametrize("raw, expected", [("$1,234.50", 1234.5), ("1e3", 1000.0), ("-$5.00", -5.0),
+                                           ("0", 0.0), ("$99999999999.99", 99999999999.99)])
+def test_a_finite_amount_is_untouched_by_that_guard(raw, expected):
+    assert build_site.to_amount(raw) == expected
 
 
 # --- which rows count as one ----------------------------------------------------------------
@@ -414,18 +417,10 @@ def test_a_row_a_resumed_scrape_wrote_twice_is_published_once(site, capsys):
     assert "duplicate rows: 1 dropped" in capsys.readouterr().out
 
 
-def test_a_nan_amount_is_never_published(site):
-    """NaN != NaN, so the rows rebuilt from the decoded files never equal the reference rows and
-    verify_payload stops the build. Either that, or (build-04's fix) the amount is read as 0.0;
-    what must not happen is a NaN in the payload."""
+def test_a_nan_amount_is_published_as_zero_and_does_not_stop_the_build(site):
     site.write(state=[row(amount="NaN"), row("1454300", dn=2)])
-    try:
-        outdir = site.build()
-    except SystemExit as stop:
-        assert "differ after decoding" in str(stop)
-        return
-    amounts = ne_format.read_payload(outdir)[0]["amount"]
-    assert all(a == a for a in amounts)
+    amounts = list(ne_format.read_payload(site.build())[0]["amount"])
+    assert amounts == [0.0, 4920.0]
 
 
 # --- a payload that does not read back is not published ----------------------------------------

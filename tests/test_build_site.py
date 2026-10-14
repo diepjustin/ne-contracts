@@ -652,3 +652,75 @@ def test_a_twin_is_only_dropped_for_a_row_that_is_published(tmp_path):
     second = dict(zip(header, _row("7", "Expired", "$2.00", "dn7")))
     assert build_site.twin_key(first) in keys
     assert build_site.twin_key(second) not in keys
+
+
+# --- "Last updated" ---------------------------------------------------------
+#
+# The state dataset's stamp froze on 24 Sep 2026 while the other two advanced,
+# and the page went on showing the oldest of the three -- which is the rule, and
+# it was right. Nothing pinned it. Turning min() into max(), or dropping the
+# guard for a dataset with no stamp, left every test green and would have made
+# the page overstate its freshness (or crash the build) without anyone seeing.
+
+DATASETS = ("contract", "purchase-order", "state")
+FRESH = "2026-10-12T03:07:01+00:00"
+
+
+def _stamps(tmp_path, monkeypatch, content):
+    """Point build_site at a scrape_meta.json holding `content` (None: no file)."""
+    path = tmp_path / "scrape_meta.json"
+    if content is not None:
+        path.write_text(content if isinstance(content, str) else json.dumps(content),
+                        encoding="utf-8")
+    monkeypatch.setattr(build_site, "SCRAPE_META", str(path))
+
+
+def test_the_stamp_covers_exactly_the_datasets_the_scraper_stamps():
+    import scrape
+
+    assert set(build_site.DATA) == set(DATASETS)
+    assert set(scrape.DATASETS) == set(DATASETS)
+
+
+def test_the_stalest_stamp_wins(monkeypatch, tmp_path):
+    """Contract and purchase-order stamped on 12 Oct, state stuck on 24 Sep: the
+    page must say 24 Sep, so a stale dataset stays visible."""
+    _stamps(tmp_path, monkeypatch, {"contract": FRESH,
+                                    "purchase-order": "2026-10-12T03:09:30+00:00",
+                                    "state": "2026-09-24T03:07:01+00:00"})
+    assert build_site.scraped_at() == "2026-09-24T03:07:01+00:00"
+
+
+def test_the_stalest_stamp_wins_whichever_dataset_it_is(monkeypatch, tmp_path):
+    for stale in DATASETS:
+        _stamps(tmp_path, monkeypatch, {k: (("2026-09-24T03:07:01+00:00") if k == stale else FRESH)
+                                        for k in DATASETS})
+        assert build_site.scraped_at() == "2026-09-24T03:07:01+00:00", stale
+
+
+@pytest.mark.parametrize("missing", DATASETS)
+def test_a_dataset_with_no_stamp_means_no_stamp_at_all(monkeypatch, tmp_path, missing):
+    """Data from before scrape_meta.json existed has no stamp for some type; the
+    page then falls back rather than quote the other two as if they covered it."""
+    _stamps(tmp_path, monkeypatch, {k: FRESH for k in DATASETS if k != missing})
+    assert build_site.scraped_at() is None
+
+
+@pytest.mark.parametrize("content", [None, "", "{not json"])
+def test_a_missing_or_unreadable_stamp_file_means_no_stamp(monkeypatch, tmp_path, content):
+    _stamps(tmp_path, monkeypatch, content)
+    assert build_site.scraped_at() is None
+
+
+def test_mixed_naive_and_aware_stamps_mean_no_stamp_rather_than_a_crash(monkeypatch, tmp_path):
+    """min() cannot order a naive time against an aware one: TypeError. The build
+    must fall back, not stop."""
+    _stamps(tmp_path, monkeypatch, {"contract": FRESH, "purchase-order": "2026-10-12T03:07:01",
+                                    "state": FRESH})
+    assert build_site.scraped_at() is None
+
+
+def test_an_unparseable_stamp_means_no_stamp(monkeypatch, tmp_path):
+    _stamps(tmp_path, monkeypatch, {"contract": FRESH, "purchase-order": "last night",
+                                    "state": FRESH})
+    assert build_site.scraped_at() is None

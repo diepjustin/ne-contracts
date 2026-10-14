@@ -318,8 +318,11 @@ def thousand(odd=0, size=24):
     """1,000 distinct rows, the first `odd` of them with a DN token of `size` bytes.
 
     A longer token is the working case: write_token_blocks keeps the first 16
-    bytes and the whole token travels in meta.dnExceptions. A shorter one is not
-    (see test_a_dn_token_shorter_than_16_bytes...).
+    bytes and the whole token travels in meta.dnExceptions. A shorter one is not:
+    it is written unpadded, so the block comes up short and verify_payload stops
+    the build with a bare ValueError from read_token_blocks (fail-closed;
+    build-04 item c). It is deliberately not pinned here, because the reviewers
+    disagreed on whether the fix is to pad it or to refuse it with a message.
     """
     rows = []
     for i in range(1000):

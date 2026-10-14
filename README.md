@@ -940,6 +940,18 @@ version of this had the whole thing on the branch, and it took the nightly down 
 days with `refusing --daily: data/nu_contracts.csv does not exist` — the seed was intact
 the whole time, just permanently out of scope.
 
+### A night that did not finish
+
+A dataset's scrape time is recorded only when every entity in it was read, so a night that
+does not finish — an entity refused, a deadline, a crash after the other datasets were done —
+leaves that time where it was and exits 0, and left alone the job ends green while the
+page's "Last updated" date stops moving (as it did from 24 Sep 2026). The last step of
+`daily.yml`, `scripts/check_scrape_stamps.py`, compares each dataset's recorded time with
+the moment the run began and turns the run red, with an `::error` line for each dataset that
+has not finished, if any is older. It runs after the deploy dispatch, the cache save and the
+release, so it blocks none of them: a red final step beside green ones means data is stale,
+not that anything was lost.
+
 ### Downstream consumers
 
 `ne-connect` (`diepjustin/ne-connect`, the hub that brings this together with campaign-

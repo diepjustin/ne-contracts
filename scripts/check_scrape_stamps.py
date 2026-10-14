@@ -20,27 +20,14 @@ threshold has to sit between a normal night (stamps minutes old) and a missed on
 hours), and the cron's own lateness (a fire can slip hours) eats that margin; "earlier than
 this run began" has no margin to eat. A missed night is caught the first time it happens.
 
-Meant to be the LAST step of daily.yml, after the deploy dispatch, the cache save and the
-release, so it can colour the run red without blocking any of them -- the red run is what
-sends GitHub's failed-scheduled-run email. Nothing calls it yet: wiring it takes two small
-edits to daily.yml that are not made.
-
-  1. In the gate step, record when the run started, beside the outputs it already writes:
-
-         echo "started=$(date -u +%Y-%m-%dT%H:%M:%S+00:00)" >> "$GITHUB_OUTPUT"
-
-  2. A last step, passing that through `env` and never interpolating it into the command line:
-
-         - name: Check that every dataset finished tonight
-           if: always() && steps.gate.outputs.proceed == 'true'
-           env:
-             RUN_STARTED: ${{ steps.gate.outputs.started }}
-           run: python3 scripts/check_scrape_stamps.py --since "$RUN_STARTED"
-
-Without the first edit --since arrives empty and the step fails every night, loudly. The
-condition deliberately names no step id, so there is no id to forget to add and no way for
-the alarm to be switched off by a mismatch. `always()` means it also reports on a night an
-earlier step already failed, which only repeats what is already red.
+It is the LAST step of daily.yml, after the deploy dispatch, the cache save and the release,
+so it can colour the run red without blocking any of them -- the red run is what sends
+GitHub's failed-scheduled-run email. The gate step records when the run began (`started`,
+UTC), and this step takes it through `env`, never by interpolating it into the command line,
+with `if: always() && steps.gate.outputs.proceed == 'true'`. The condition names no step id, so
+there is none to forget to add; `always()` means it also reports on a night an earlier step
+already failed, which only repeats what is already red. If the gate step stopped recording
+`started`, --since would arrive empty and this would fail every night, loudly.
 
 Standard library only, so it runs before or without `pip install`, and it never raises: bad
 input is reported as a problem, and a failure of the check itself is reported and exits 1.

@@ -627,21 +627,26 @@ def set_aside_unreadable(path, error, keep_copy=True):
     The loaders that call this start fresh on an unreadable file rather than fail
     a scrape that has just succeeded -- the right call, but done silently it also
     drops whatever the file held: the other datasets' stamps (so the page's "Last
-    updated" can fall back to the build date and hide a stale dataset), or a diff
-    report's unreviewed flips. The warning is a GitHub annotation, so it lands on
-    the run's summary page; the copy, named <file>.corrupt and overwritten by the
-    next incident, keeps the evidence. Progress files are cheap to rebuild and
-    take the warning only.
+    updated" can fall back to the build date and hide a stale dataset), a diff
+    report's unreviewed flips, or the full scrape's checkpoint (the only record of
+    which CSV rows are legitimate). The warning is a GitHub annotation, so it lands
+    on the run's summary page; the copy, named <file>.corrupt and overwritten by the
+    next incident, keeps the evidence. --daily's own progress file is same-day
+    resume state, cheap to rebuild, and takes the warning only.
+
+    The copy is made first and only then claimed: if it cannot be made, the
+    annotation says so rather than promising a file that is not there.
     """
     reason = " ".join(str(error).split())
-    kept = f" A copy is kept as {path}.corrupt." if keep_copy else ""
-    print(f"::warning title=Unreadable state file::{path} could not be read ({reason}); "
-          f"starting it fresh.{kept}")
+    kept = ""
     if keep_copy:
         try:
             shutil.copyfile(path, path + ".corrupt")
-        except OSError:
-            pass
+            kept = f" A copy is kept as {path}.corrupt."
+        except OSError as e:
+            kept = f" A copy could not be kept ({' '.join(f'{type(e).__name__}: {e}'.split())})."
+    print(f"::warning title=Unreadable state file::{path} could not be read ({reason}); "
+          f"starting it fresh.{kept}")
 
 
 def record_scrape_time(dataset):
@@ -686,7 +691,7 @@ def load_progress(path):
         with open(path, encoding="utf-8") as f:
             raw = json.load(f)
     except (OSError, ValueError) as e:
-        set_aside_unreadable(path, e, keep_copy=False)
+        set_aside_unreadable(path, e)
         return set(), {}  # unreadable or corrupt: treat as a fresh start
 
     if isinstance(raw, list):  # written before page tracking existed

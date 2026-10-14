@@ -130,19 +130,36 @@ def test_a_readable_diff_report_is_quiet(report, capsys):
     assert capsys.readouterr().out == ""
 
 
-# --- the progress files: warned about, not kept ---------------------------------------------
+# --- the progress files: the full scrape's is kept, --daily's is not --------------------------
 
-def test_a_corrupt_full_scrape_checkpoint_says_it_is_starting_over(tmp_path, capsys):
-    """Starting a 20-hour sweep from scratch because a file was unreadable should
-    never be a surprise in the log."""
+def test_a_corrupt_full_scrape_checkpoint_says_it_is_starting_over_and_keeps_a_copy(tmp_path, capsys):
+    """It is the only record of which CSV rows are legitimate, and the first checkpoint
+    overwrites it: a copy is what a person gets to look at."""
     path = tmp_path / "contract_scrape_progress.json"
     path.write_text('{"done": [["A", "Act', encoding="utf-8")
 
     assert scrape.load_progress(str(path)) == (set(), {})
 
     [warning] = warnings_in(capsys.readouterr().out)
-    assert str(path) in warning and ".corrupt" not in warning
-    assert not (tmp_path / "contract_scrape_progress.json.corrupt").exists()
+    assert str(path) in warning and "starting it fresh" in warning
+    assert f"A copy is kept as {path}.corrupt." in warning
+    assert (tmp_path / "contract_scrape_progress.json.corrupt").read_text(encoding="utf-8") == '{"done": [["A", "Act'
+
+
+def test_a_copy_that_cannot_be_made_is_not_claimed(tmp_path, monkeypatch, capsys):
+    path = tmp_path / "state.json"
+    path.write_text("x", encoding="utf-8")
+
+    def refuse(src, dst):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(scrape.shutil, "copyfile", refuse)
+    scrape.set_aside_unreadable(str(path), "bad")
+
+    [warning] = capsys.readouterr().out.splitlines()
+    assert "A copy is kept" not in warning
+    assert "A copy could not be kept (PermissionError: [Errno 13] Permission denied)." in warning
+    assert not (tmp_path / "state.json.corrupt").exists()
 
 
 def test_a_corrupt_daily_progress_file_says_so(tmp_path, capsys):

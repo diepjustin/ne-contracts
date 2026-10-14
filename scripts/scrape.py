@@ -13,6 +13,7 @@ import threading
 import time
 import csv
 import os
+import shutil
 
 BASE_URL = "https://statecontracts.nebraska.gov"
 SEARCH_URL = f"{BASE_URL}/Search"
@@ -616,6 +617,29 @@ def local_timestamp():
     return datetime.datetime.now().astimezone().isoformat(timespec="seconds")
 
 
+def set_aside_unreadable(path, error, keep_copy=True):
+    """Say that a state file could not be read, and keep a copy for a person.
+
+    The loaders that call this start fresh on an unreadable file rather than fail
+    a scrape that has just succeeded -- the right call, but done silently it also
+    drops whatever the file held: the other datasets' stamps (so the page's "Last
+    updated" can fall back to the build date and hide a stale dataset), or a diff
+    report's unreviewed flips. The warning is a GitHub annotation, so it lands on
+    the run's summary page; the copy, named <file>.corrupt and overwritten by the
+    next incident, keeps the evidence. Progress files are cheap to rebuild and
+    take the warning only.
+    """
+    reason = " ".join(str(error).split())
+    kept = f" A copy is kept as {path}.corrupt." if keep_copy else ""
+    print(f"::warning title=Unreadable state file::{path} could not be read ({reason}); "
+          f"starting it fresh.{kept}")
+    if keep_copy:
+        try:
+            shutil.copyfile(path, path + ".corrupt")
+        except OSError:
+            pass
+
+
 def record_scrape_time(dataset):
     """Stamp this dataset's completion time, preserving stamps for other datasets."""
     stamps = {}
@@ -623,13 +647,20 @@ def record_scrape_time(dataset):
         try:
             with open(SCRAPE_META, encoding="utf-8") as f:
                 stamps = json.load(f)
-        except (OSError, ValueError):
+            if not isinstance(stamps, dict):
+                raise ValueError(f"expected an object, found {type(stamps).__name__}")
+        except (OSError, ValueError) as e:
+            set_aside_unreadable(SCRAPE_META, e)
             stamps = {}  # unreadable or corrupt: start fresh rather than fail the scrape
 
     stamps[dataset] = local_timestamp()
 
-    with open(SCRAPE_META, "w", encoding="utf-8") as f:
+    # Beside and renamed over, like every other state file here, so a kill
+    # mid-write cannot leave empty the one file "Last updated" is read from.
+    tmp = SCRAPE_META + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump(stamps, f, indent=2, sort_keys=True)
+    os.replace(tmp, SCRAPE_META)
     return stamps[dataset]
 
 
@@ -650,7 +681,8 @@ def load_progress(path):
     try:
         with open(path, encoding="utf-8") as f:
             raw = json.load(f)
-    except (OSError, ValueError):
+    except (OSError, ValueError) as e:
+        set_aside_unreadable(path, e, keep_copy=False)
         return set(), {}  # unreadable or corrupt: treat as a fresh start
 
     if isinstance(raw, list):  # written before page tracking existed
@@ -992,7 +1024,10 @@ def append_daily_diff_report(dataset, entity_report, stamp, complete=True):
         try:
             with open(DAILY_DIFF_REPORT, encoding="utf-8") as f:
                 entries = json.load(f)
-        except (OSError, ValueError):
+            if not isinstance(entries, list):
+                raise ValueError(f"expected a list, found {type(entries).__name__}")
+        except (OSError, ValueError) as e:
+            set_aside_unreadable(DAILY_DIFF_REPORT, e)
             entries = []  # unreadable or corrupt: start the report fresh
 
     night = stamp[:10]  # local date, the same day load_daily_progress counts in
@@ -1033,7 +1068,8 @@ def load_daily_progress(path):
     try:
         with open(path, encoding="utf-8") as f:
             raw = json.load(f)
-    except (OSError, ValueError):
+    except (OSError, ValueError) as e:
+        set_aside_unreadable(path, e, keep_copy=False)
         return set()
     if raw.get("date") != datetime.date.today().isoformat():
         return set()

@@ -202,3 +202,121 @@ def test_a_wrong_length_token_fails_the_build(tmp_path):
     """Never widen every record for an outlier, and never write a short one."""
     with pytest.raises(ValueError, match="expected"):
         ne_format.pack_documents([{"token": b"short", "name": "D", "size": "1Mb"}])
+
+
+# --- the deferred blocks share a shape, and each has its own writer ------------------------
+#
+# Descriptions, AI summaries and document lists are three copies of one layout (a
+# u16 length per row, then the payload), written and read by three pairs of
+# functions. The AI pair and the document pair had no test of their own, and a
+# slip in either shows another row's text beside a row's money.
+
+BLOCK_FAMILIES = [
+    pytest.param(ne_format.write_desc_blocks, ne_format.read_desc_blocks, ne_format.desc_path,
+                 id="descriptions"),
+    pytest.param(ne_format.write_ai_blocks, ne_format.read_ai_blocks, ne_format.ai_path,
+                 id="AI summaries"),
+    pytest.param(ne_format.write_xdoc_blocks, ne_format.read_xdoc_blocks, ne_format.xdoc_path,
+                 id="document lists"),
+]
+
+
+@pytest.mark.parametrize("write, read, path", BLOCK_FAMILIES)
+def test_blocks_round_trip_across_a_boundary_with_edges(tmp_path, write, read, path):
+    n = ne_format.BLOCK_ROWS * 2 + 3
+    rows = {0: b"first", ne_format.BLOCK_ROWS - 1: b"end of block 0",
+            ne_format.BLOCK_ROWS: b"start of block 1", n - 1: b"very last",
+            7: "unicode: – é 中".encode("utf-8"), 9: b"x" * 65535}
+    write(str(tmp_path), rows, n)
+    got = read(str(tmp_path), n)
+
+    assert len(got) == n and ne_format.block_count(n) == 3
+    for row in range(n):
+        assert got[row] == rows.get(row, b""), row
+    for block in range(3):
+        assert os.path.exists(path(str(tmp_path), block))
+
+
+@pytest.mark.parametrize("write, read, path", BLOCK_FAMILIES)
+def test_a_row_over_u16_is_rejected_at_write_time(tmp_path, write, read, path):
+    with pytest.raises(ValueError, match="u16"):
+        write(str(tmp_path), {0: b"x" * 65536}, 1)
+
+
+@pytest.mark.parametrize("write, read, path", BLOCK_FAMILIES)
+def test_a_truncated_block_is_rejected(tmp_path, write, read, path):
+    write(str(tmp_path), {0: b"hello"}, 2)
+    data = open(path(str(tmp_path), 0), "rb").read()
+    open(path(str(tmp_path), 0), "wb").write(data[:-2])
+    with pytest.raises(ValueError):
+        read(str(tmp_path), 2)
+
+
+@pytest.mark.parametrize("write, read, path", BLOCK_FAMILIES)
+def test_bytes_past_the_last_row_are_rejected(tmp_path, write, read, path):
+    write(str(tmp_path), {0: b"hello"}, 2)
+    with open(path(str(tmp_path), 0), "ab") as f:
+        f.write(b"junk")
+    with pytest.raises(ValueError, match="past the last row"):
+        read(str(tmp_path), 2)
+
+
+@pytest.mark.parametrize("write, read, path", BLOCK_FAMILIES)
+def test_a_block_shorter_than_its_own_header_is_rejected(tmp_path, write, read, path):
+    write(str(tmp_path), {}, 2)
+    open(path(str(tmp_path), 0), "wb").write(b"\x00\x00\x00")
+    with pytest.raises(ValueError, match="header alone"):
+        read(str(tmp_path), 2)
+
+
+# --- one byte per row: which parser, which model, which document -------------------------------
+
+SOURCE_FAMILIES = [
+    pytest.param(ne_format.write_desc_sources, ne_format.read_desc_sources, ne_format.DESC_SRC,
+                 id="description sources"),
+    pytest.param(ne_format.write_ai_sources, ne_format.read_ai_sources, ne_format.AI_SRC,
+                 id="AI models"),
+    pytest.param(ne_format.write_desc_documents, ne_format.read_desc_documents, ne_format.DESC_DOC,
+                 id="description documents"),
+]
+
+
+@pytest.mark.parametrize("write, read, name", SOURCE_FAMILIES)
+def test_source_bytes_round_trip_and_default_to_zero(tmp_path, write, read, name):
+    write(str(tmp_path), {0: 1, 4: 2}, 5)
+    assert list(read(str(tmp_path), 5)) == [1, 0, 0, 0, 2]
+    assert os.path.getsize(os.path.join(str(tmp_path), name)) == 5
+
+
+@pytest.mark.parametrize("write, read, name", SOURCE_FAMILIES)
+def test_a_build_without_the_file_reads_as_none_not_as_no_rows(tmp_path, write, read, name):
+    """The page treats a missing file as 'nothing is known', not 'no row has one'."""
+    assert read(str(tmp_path), 3) is None
+
+
+@pytest.mark.parametrize("write, read, name", SOURCE_FAMILIES)
+def test_a_source_file_of_the_wrong_length_is_rejected(tmp_path, write, read, name):
+    write(str(tmp_path), {0: 1}, 4)
+    with pytest.raises(ValueError, match="expected 5"):
+        read(str(tmp_path), 5)
+
+
+def test_a_description_document_position_past_254_reads_as_unknown(tmp_path):
+    """255 marks no document, which is also the honest reading of a position it cannot hold."""
+    ne_format.write_desc_documents(str(tmp_path), {0: 3, 1: 254, 2: 255, 3: 900}, 4)
+    assert list(ne_format.read_desc_documents(str(tmp_path), 4)) == [3, 254, 255, 255]
+    assert ne_format.DESC_DOC_UNKNOWN == 255
+
+
+# --- vendor groups ------------------------------------------------------------------------------
+
+def test_vendor_groups_round_trip_including_ungrouped(tmp_path):
+    groups = [0, -1, 2, 2, -1, 1]
+    ne_format.write_vendor_groups(str(tmp_path), groups)
+    assert list(ne_format.read_vendor_groups(str(tmp_path), len(groups))) == groups
+
+
+def test_a_vendor_group_file_for_a_different_vendor_count_is_rejected(tmp_path):
+    ne_format.write_vendor_groups(str(tmp_path), [0, 1, 2])
+    with pytest.raises(ValueError, match="expected 16"):
+        ne_format.read_vendor_groups(str(tmp_path), 4)

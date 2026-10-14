@@ -750,6 +750,16 @@ def repair_csv_tail(csv_path):
     return size - keep
 
 
+def csv_has_records(csv_path):
+    """True if the CSV exists and holds at least one row below its header."""
+    try:
+        with open(csv_path, encoding="utf-8", errors="replace", newline="") as f:
+            next(f, None)  # the header
+            return any(line.strip() for line in f)
+    except FileNotFoundError:
+        return False
+
+
 def drop_unfinished_rows(csv_path, keep):
     """Strip rows belonging to combos we have no position for.
 
@@ -1367,6 +1377,21 @@ def main():
         for (e, s), page in sorted(partial.items()):
             print(f"PARTIAL={e} | {s} | through page {page}")
         return
+
+    # A progress file that vouches for finished work the CSV does not hold means
+    # data/ was not restored: the progress files are tracked in git and the CSVs
+    # are not, so this is exactly what a fresh clone looks like. Carrying on would
+    # scrape only what the file says is left, write it under a fresh header, and
+    # stamp the dataset complete -- an empty one, as of now.
+    if (done or partial) and not csv_has_records(output_csv):
+        print(f"ERROR: {progress_path} records {len(done) + len(partial):,} combo(s) as finished "
+              f"or under way, but {output_csv} "
+              f"{'does not exist' if not os.path.exists(output_csv) else 'has no records'}. "
+              "That is what a fresh clone looks like (the progress files are tracked in git, "
+              "the CSVs are not). Nothing was scraped. Restore data/ first (README: \"Getting "
+              "the data back\"), or pass --fresh to collect everything again (20+ hours).",
+              file=sys.stderr)
+        sys.exit(1)
 
     print(f"{len(todo):,} (entity, status) combos remaining of {len(all_combos):,}")
 

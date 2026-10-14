@@ -197,13 +197,14 @@ def daily(monkeypatch, tmp_path, search):
     (tmp_path / "data").mkdir()
     monkeypatch.setattr(scrape, "document_service_healthy", lambda: True)
 
-    def run(known, pages, statuses=None):
+    def run(known, pages, statuses=None, tail=""):
         csv_path = tmp_path / "data" / "nu_contracts.csv"
         with open(csv_path, "w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
             writer.writerow(scrape.CSV_HEADER)
             for i in known:
                 writer.writerow(csv_row(i, (statuses or {}).get(i, "Active")))
+            f.write(tail)       # what a killed write leaves: text with no newline
         session = search(pages)
         monkeypatch.setattr(scrape, "build_session", lambda: session)
         scrape.run_daily(types.SimpleNamespace(dataset="contract", entity=[ENTITY], hours=None))
@@ -360,3 +361,28 @@ def test_entity_drift_reports_added_removed_and_changed(capsys):
 def test_entity_drift_with_identical_lists_reports_none(capsys):
     assert check_entity_drift.diff("state", {"A": "1"}, {"A": "1"}) is False
     assert "no drift" in capsys.readouterr().out
+
+
+# --- a killed write must not poison the next append --------------------------------------
+
+def test_a_torn_csv_tail_is_cut_before_the_next_record_is_appended(daily, search, capsys):
+    """The job was killed mid-row. Appending straight after it would glue the next
+    record onto the stump -- one row of fifteen-odd fields that build_site.py
+    cannot read. D9's row was the one cut; it is listed tonight, so it comes
+    back as a whole row of its own, beside the new D5."""
+    stump = ",".join(csv_row(9)[:6])[:40]
+    rows = daily(range(5), [([rec(i) for i in (0, 1, 2, 3, 4, 5, 9)], 1)], tail=stump)
+
+    assert {len(r) for r in rows} == {11}, "every row is a whole row"
+    assert [r[0] for r in rows] == ["D0", "D1", "D2", "D3", "D4", "D5", "D9"]
+    assert status_of(rows, 5) == ["Active"] and status_of(rows, 9) == ["Active"]
+    assert "ends mid-row" in capsys.readouterr().out
+    assert stamp_written(daily.tmp)
+
+
+def test_both_entry_points_repair_the_tail_before_they_append():
+    """The wiring, pinned at the source: --daily and the full scrape both append."""
+    import inspect
+
+    assert "repair_csv_tail(output_csv)" in inspect.getsource(scrape.run_daily)
+    assert "repair_csv_tail(output_csv)" in inspect.getsource(scrape.main)

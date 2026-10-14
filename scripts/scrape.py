@@ -671,6 +671,53 @@ def save_progress(path, done, partial):
     os.replace(tmp, path)  # atomic, so a kill mid-write can't corrupt the checkpoint
 
 
+# How far back from the end of a CSV repair_csv_tail looks for the last newline.
+# A row is a few hundred bytes; the file is hundreds of megabytes.
+CSV_TAIL_WINDOW = 1 << 20
+
+
+def repair_csv_tail(csv_path):
+    """Cut a half-written final row off the CSV, so the next append starts a new row.
+
+    A job killed mid-write -- a runner lost, a SIGKILL -- leaves a last line with
+    no newline. Both entry points append, so the next record would be glued onto
+    that stump: one row of fifteen-odd fields that build_site.py cannot read. It
+    exits on an unexpected view URL shape or raises on the Status for nearly every
+    place the cut can fall, and the data cache and the hub-data release carry the
+    row forward, so the nightly site build would fail every night until someone
+    repaired the cached CSV by hand. The JSONL logs have always been repaired the
+    same way on load; the CSV append path was not.
+
+    Always cut, never keep: a stump can look like a whole row (cut just after the
+    Detail URL it has eleven fields and an empty View URL), and an empty View URL
+    says the record has no document -- a claim the state never made. A cut record
+    is simply fetched again, because it is no longer known.
+
+    Returns the number of bytes removed.
+    """
+    if not os.path.exists(csv_path):
+        return 0
+    with open(csv_path, "rb+") as f:
+        size = f.seek(0, os.SEEK_END)
+        if size == 0:
+            return 0
+        f.seek(size - 1)
+        if f.read(1) == b"\n":
+            return 0
+        window = min(size, CSV_TAIL_WINDOW)
+        f.seek(size - window)
+        newline = f.read(window).rfind(b"\n")
+        if newline < 0 and window < size:
+            print(f"    Warning: the last {window:,} bytes of {csv_path} hold no newline, which is "
+                  "not a half-written row. Leaving the file for a person to look at.")
+            return 0
+        keep = size - window + newline + 1 if newline >= 0 else 0
+        f.truncate(keep)
+    print(f"    Note: {csv_path} ends mid-row; cutting {size - keep:,} bytes of a partial row. "
+          "That record is simply fetched again.")
+    return size - keep
+
+
 def drop_unfinished_rows(csv_path, keep):
     """Strip rows belonging to combos we have no position for.
 
@@ -1068,6 +1115,10 @@ def run_daily(args):
 
     os.makedirs("data", exist_ok=True)
 
+    # Before the baseline is read and before anything is appended, so a record
+    # whose row was cut short counts as unknown tonight and is fetched again.
+    repair_csv_tail(output_csv)
+
     loaded = load_known_active(output_csv)
     known_active, baseline = loaded if loaded else (None, None)
     if known_active is None:
@@ -1283,6 +1334,7 @@ def main():
 
     print(f"{len(todo):,} (entity, status) combos remaining of {len(all_combos):,}")
 
+    repair_csv_tail(output_csv)
     dropped = drop_unfinished_rows(output_csv, done | set(partial))
     if dropped:
         print(f"Discarded {dropped:,} rows from a combo cut off before its first checkpoint.")

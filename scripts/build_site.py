@@ -1364,19 +1364,27 @@ def load_ai_summaries(view_tokens):
 
     matched = unmatched = skipped = 0
     unknown_models = collections.Counter()
-    with open(AI_SUMMARIES_JSONL, encoding="utf-8") as f:
-        lines = f.read().splitlines()
-    for number, line in enumerate(lines, 1):
-        if not line.strip():
+    # Bytes, split on b"\n" alone, each line decoded on its own -- the way
+    # scrape.load_documents reads its log. str.splitlines() would also break at U+0085,
+    # U+2028 and U+2029, which json.dumps(ensure_ascii=False), as generate_ai_summaries
+    # writes, leaves raw inside a string: a perfectly valid record cut in two. And a
+    # strict decode of the whole file raises for one cut inside a multi-byte character,
+    # which is just how a copy taken mid-write ends; per line, that is one bad line.
+    with open(AI_SUMMARIES_JSONL, "rb") as f:
+        blobs = f.read().split(b"\n")
+    last = max((n for n, blob in enumerate(blobs, 1) if blob.strip()), default=0)
+    for number, blob in enumerate(blobs, 1):
+        if not blob.strip():
             continue
         try:
-            record = json.loads(line)
-        except json.JSONDecodeError as e:
+            record = json.loads(blob.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as e:
+            problem = e.msg if isinstance(e, json.JSONDecodeError) else f"not UTF-8: {e.reason}"
             # The asset is cut from a file a job appends to, so it can be taken
             # mid-write: a torn last line is expected, and scrape.load_documents
             # treats it the same way. Anything after a bad line cannot be trusted.
-            if any(later.strip() for later in lines[number:]):
-                sys.exit(f"{AI_SUMMARIES_JSONL} line {number} is not valid JSON ({e.msg}), and "
+            if number != last:
+                sys.exit(f"{AI_SUMMARIES_JSONL} line {number} is not valid JSON ({problem}), and "
                          "more lines follow it; the entries after it cannot be trusted.")
             print(f"note: {AI_SUMMARIES_JSONL} ends mid-write; ignoring its last line "
                   f"(line {number})")

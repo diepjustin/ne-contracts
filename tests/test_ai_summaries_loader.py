@@ -71,6 +71,55 @@ def test_a_torn_line_followed_by_a_blank_one_is_still_the_last_line(monkeypatch,
     assert set(summaries) == {0}
 
 
+def jx(record):
+    """As generate_ai_summaries writes a line: json.dumps with non-ASCII left raw."""
+    return json.dumps(record, ensure_ascii=False)
+
+
+def load_bytes(monkeypatch, tmp_path, data):
+    path = tmp_path / "ai_summaries.jsonl"
+    path.write_bytes(data)
+    monkeypatch.setattr(build_site, "AI_SUMMARIES_JSONL", str(path))
+    return build_site.load_ai_summaries(TOKENS)
+
+
+@pytest.mark.parametrize("separator", ["\u2028", "\u2029", "\u0085"], ids=["U+2028", "U+2029", "U+0085"])
+def test_a_summary_holding_a_unicode_line_break_is_one_record_not_two(monkeypatch, tmp_path, separator):
+    """json.dumps(ensure_ascii=False) leaves these raw inside a string, and str.splitlines() treats
+    each as the end of a line: it cut a valid record in two and stopped the build for a good file."""
+    text = f"A roofing{separator}contract."
+    line = jx(rec("tokA", summary=text))
+    assert separator in line
+    summaries, _ = load(monkeypatch, tmp_path, [line, jx(rec("tokB"))])
+    assert summaries[0] == text.encode("utf-8") and set(summaries) == {0, 1}
+
+
+def test_a_file_cut_inside_a_multibyte_character_ends_in_a_torn_line_like_any_other(monkeypatch, tmp_path, capsys):
+    full = jx(rec("tokB", summary="Caf\u00e9 contract")).encode("utf-8")
+    torn = full[:full.index("\u00e9".encode("utf-8")) + 1]           # the first byte of the e-acute, no more
+    summaries, _ = load_bytes(monkeypatch, tmp_path, (jx(rec("tokA")) + "\n").encode("utf-8") + torn)
+    assert set(summaries) == {0}
+    assert "ends mid-write; ignoring its last line (line 2)" in capsys.readouterr().out
+
+
+def test_bytes_that_are_not_utf8_before_more_lines_stop_the_build_not_become_replacement_characters(monkeypatch, tmp_path):
+    data = (jx(rec("tokA")) + "\n").encode("utf-8") + b'{"tok": "tokB", "summary": "caf\xe9"}\n' \
+        + (jx(rec("tokC")) + "\n").encode("utf-8")
+    with pytest.raises(SystemExit) as stopped:
+        load_bytes(monkeypatch, tmp_path, data)
+    assert "line 2" in str(stopped.value) and "not UTF-8" in str(stopped.value)
+
+
+def test_crlf_line_endings_and_a_bare_final_record_load(monkeypatch, tmp_path):
+    data = (jx(rec("tokA")) + "\r\n" + jx(rec("tokB"))).encode("utf-8")
+    assert set(load_bytes(monkeypatch, tmp_path, data)[0]) == {0, 1}
+
+
+def test_an_empty_file_loads_nothing(monkeypatch, tmp_path):
+    assert load_bytes(monkeypatch, tmp_path, b"") == ({}, {})
+    assert load_bytes(monkeypatch, tmp_path, b"\n\n  \n") == ({}, {})
+
+
 def test_corruption_with_more_lines_after_it_stops_the_build(monkeypatch, tmp_path):
     """Skipping it would publish whatever follows a line nobody can vouch for."""
     with pytest.raises(SystemExit) as stopped:

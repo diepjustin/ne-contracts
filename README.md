@@ -940,6 +940,38 @@ version of this had the whole thing on the branch, and it took the nightly down 
 days with `refusing --daily: data/nu_contracts.csv does not exist` — the seed was intact
 the whole time, just permanently out of scope.
 
+### Downstream consumers
+
+`ne-connect` (`diepjustin/ne-connect`, the hub that brings this together with campaign-
+finance, lobbying and FEC data) reads two things from this repository, and neither can
+change on this side alone.
+
+- **The nightly data release.** `daily.yml` cuts a release tagged
+  `ne-contracts-hub-data-YYYY-MM-DD`, the America/Chicago date, carrying four gzipped
+  assets: `nu_contracts.csv.gz`, `nu_purchase_orders.csv.gz`, `state_agencies.csv.gz` and
+  `scrape_meta.json.gz`. The CSVs keep the eleven columns listed under "Running it". A
+  same-day re-run replaces that day's release, and only the newest three are kept.
+  ne-connect's nightly picks the newest by **tag name**, never by `createdAt` (the date
+  of the commit a tag points at, which ties across nights), and downloads `*.gz`. Its
+  `ingest/sources.py` `CONTRACT_FILES` names the same three CSVs, and its
+  `build/check_freshness.py` reads the Central date from the tag, warning at 3 days and
+  failing at 7.
+- **The vendor shards.** `pages.yml` runs `scripts/export_vendor_rows.py`, which writes
+  `d/rows/<A-Z or _>.json`: one file per vendor-name initial (upper-cased; any other first
+  character goes to `_`), each `{"VENDOR": [[document number, type, entity, amount, begin
+  date, end date, status, detail URL], ...]}`, keyed by the exact `Vendor` string and
+  covering all three CSVs. ne-connect's `contractShardKey()` (in its `build/build_site.py`)
+  computes the same key to decide which shard to fetch from this site's `d/rows/`. The
+  shard to watch is `A.json`, because one very large vendor sits in it;
+  `export_vendor_rows.py` warns only past 90 MB, within 10 MB of GitHub's 100 MB push
+  limit, which `d/` never meets because it is gitignored and only deployed.
+
+Changing a column, an asset name, the tag prefix or the shard rule is therefore a change
+in two repositories. `tests/test_export_vendor_rows.py` pins the file tuple and the shard
+key for that reason, each with a comment naming where ne-connect keeps its copy;
+ne-connect's `docs/SCHEMA.md` ("Cross-fetch") describes the consumer side, though it
+predates `state_agencies.csv`.
+
 ---
 
 ## Guard rails

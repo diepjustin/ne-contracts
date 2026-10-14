@@ -191,3 +191,51 @@ def test_main_clears_stale_shards_from_a_previous_run(tmp_path, monkeypatch):
     export_vendor_rows.main()
 
     assert not (out_dir / "Z.json").exists()
+
+
+# --- the contract with ne-connect ------------------------------------------------------------
+#
+# Two things here are mirrored by a copy in the ne-connect repository, and a change to either
+# side alone breaks the other without an error on this side:
+#
+#   ne-connect/ingest/sources.py    CONTRACT_FILES       (the same three CSVs)
+#   ne-connect/build/build_site.py  contractShardKey()   (a JavaScript twin of shard_key)
+#
+# So they are pinned exactly. Changing one of these tests is the reminder to change the other
+# repository in the same sitting; see README.md, "Downstream consumers".
+
+def test_the_files_exported_are_exactly_the_three_ne_connect_totals_read():
+    assert export_vendor_rows.CONTRACT_FILES == (
+        "nu_contracts.csv", "nu_purchase_orders.csv", "state_agencies.csv")
+
+
+@pytest.mark.parametrize("vendor, key", [
+    ("AMAZON CAPITAL SERVICES", "A"),
+    ("amazon capital services", "A"),            # upper-cased
+    ("  acme co", "A"),                          # leading space is stripped first
+    ("\tZED INC", "Z"),                          # a tab is too, and Z is a real shard
+    (" ACME CO", "A"),                      # so is a no-break space (JavaScript's trim does the same)
+    ("Zed", "Z"),
+    ("3M COMPANY", "_"),                         # a digit
+    ("1st Choice Printing", "_"),
+    ("-DASH CO", "_"),                           # punctuation
+    ("'S GRAVENHAGE", "_"),
+    ("(PARENTHESIS) INC", "_"),
+    ("", "_"),
+    ("   ", "_"),                                # nothing left after the strip
+    (None, "_"),
+    ("ÉCOLE", "_"),                         # an accented capital sorts after Z
+    ("école", "_"),                         # and so does its lower case once upper-cased
+    ("ßeta", "SS"),                         # a quirk, deliberately pinned: ss is what upper() makes of the
+                                                 # sharp s, and ne-connect's toUpperCase() makes the same two
+                                                 # letters, so both sides ask for a shard called SS. Fixing it on
+                                                 # one side alone would send that vendor to a file that is not there.
+])
+def test_shard_key_table(vendor, key):
+    assert export_vendor_rows.shard_key(vendor) == key
+
+
+def test_every_ascii_letter_is_its_own_shard():
+    import string
+    keys = {export_vendor_rows.shard_key(letter.lower() + "x") for letter in string.ascii_uppercase}
+    assert keys == set(string.ascii_uppercase)

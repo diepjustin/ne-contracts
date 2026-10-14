@@ -1342,6 +1342,7 @@ def main():
     is_state = args.dataset == "state"
 
     entities = STATE_ENTITIES if is_state else HIGHER_ED_ENTITIES
+    dataset_entities = entities   # "complete" means all of these, whatever subset this run is given
 
     if args.entity:
         unknown = [e for e in args.entity if e not in entities]
@@ -1440,12 +1441,24 @@ def main():
                 partial.pop(key, None)
             save_progress(progress_path, done, partial)
 
-    remaining = len([c for c in all_combos if (c[0], c[2]) not in done])
-    if remaining:
-        print(f"\nStopped with {remaining:,} combos remaining. Re-run to resume.")
-    else:
+    # "Complete" is a fact about the whole dataset, not about the entities this run was
+    # asked for, and the stamp says when it was last pulled: --entity X finishing X is not
+    # the dataset finishing, and a run that found every combo already done pulled nothing.
+    # Either used to record the time as now, so a debugging run or a re-run on a restored
+    # dataset made stale data read as freshly scraped -- the inverse of the 24 Sep 2026
+    # incident, where fresh data read as stale.
+    remaining_here = len([c for c in all_combos if (c[0], c[2]) not in done])
+    remaining = len([c for c in combos(dataset_entities) if (c[0], c[2]) not in done])
+    if remaining_here:
+        print(f"\nStopped with {remaining_here:,} combos remaining. Re-run to resume.")
+    elif remaining:
+        print(f"\nThis run's combos are done, but {remaining:,} of the whole dataset's are still "
+              "to do, so its scrape time is left as it was.")
+    elif todo:
         stamp = record_scrape_time(args.dataset)
         print(f"\nAll combos complete. Scrape time recorded: {stamp}")
+    else:
+        print("\nNothing to do: every combo was already complete, so the scrape time is left as it was.")
 
     print(f"Records this run: {grand_total:,}")
     print(f"Saved to: {output_csv}")

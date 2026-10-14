@@ -11,6 +11,7 @@ all replaced.
 
 import os
 import sys
+import types
 
 import pytest
 
@@ -23,6 +24,7 @@ DATASET = "contract"
 CSV = scrape.DATASETS[DATASET][2]
 PROGRESS = scrape.progress_file(DATASET)
 ENTITY = sorted(scrape.HIGHER_ED_ENTITIES)[0]
+OTHER_ENTITY = sorted(scrape.HIGHER_ED_ENTITIES)[1]
 
 
 def row(entity=ENTITY, status="Expired"):
@@ -117,17 +119,52 @@ def test_a_restored_dataset_is_left_alone(run):
     assert open(CSV, "rb").read() == before
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "Known, not fixed here: with every combo done a full run fetches nothing and still "
-    "records the time as now, so a restored dataset reads as freshly scraped. Closest "
-    "audit finding is scraper-03 (--entity runs stamp the whole dataset); this case "
-    "needs its own rule, e.g. stamp only when the run scraped something. When it is "
-    "fixed this test passes, strict=True fails it, and the marker should go."))
-def test_a_run_that_scraped_nothing_does_not_stamp_the_dataset_fresh(run):
+def test_a_run_that_scraped_nothing_does_not_stamp_the_dataset_fresh(run, capsys):
+    """Every combo already done, so there was nothing to pull: the recorded time is the last
+    run's, and 'Last updated' must not claim more."""
     finish_every_combo()
     write_csv(row())
     run()
     assert run.calls["stamped"] == []
+    assert "Nothing to do" in capsys.readouterr().out
+
+
+def test_a_full_run_that_finishes_the_dataset_stamps_it_once(run, capsys):
+    run()
+    assert run.calls["stamped"] == [DATASET]
+    assert len(run.calls["scraped"]) == 2 * len(scrape.HIGHER_ED_ENTITIES)
+    assert "All combos complete" in capsys.readouterr().out
+
+
+def finish_every_entity_but(*names):
+    done = {(n, s) for n, _, s in scrape.combos(scrape.HIGHER_ED_ENTITIES) if n not in names}
+    scrape.save_progress(PROGRESS, done, {})
+
+
+def test_one_entity_finishing_is_not_the_dataset_finishing(run, capsys):
+    """scraper-03: `--entity X` completing X used to stamp the whole dataset as just scraped."""
+    finish_every_entity_but(ENTITY, OTHER_ENTITY)
+    write_csv(row(entity=sorted(scrape.HIGHER_ED_ENTITIES)[2]))
+    run("--entity", ENTITY)
+    assert run.calls["scraped"] == [(ENTITY, "Active"), (ENTITY, "Expired")]
+    assert run.calls["stamped"] == []
+    out = capsys.readouterr().out
+    assert "2 of the whole dataset's are still to do" in out and "left as it was" in out
+
+
+def test_the_entity_that_finishes_the_dataset_does_stamp_it(run):
+    finish_every_entity_but(ENTITY)
+    write_csv(row(entity=OTHER_ENTITY))
+    run("--entity", ENTITY)
+    assert run.calls["stamped"] == [DATASET]
+
+
+def test_a_deadline_still_says_how_many_are_left_and_does_not_stamp(run, monkeypatch, capsys):
+    clock = iter([0.0] + [10_000.0] * 100)      # past the deadline from the first look
+    monkeypatch.setattr(scrape, "time", types.SimpleNamespace(time=lambda: next(clock), sleep=lambda _s: None))
+    run("--hours", "0.001")
+    assert run.calls["stamped"] == []
+    assert "combos remaining. Re-run to resume." in capsys.readouterr().out
 
 
 def test_a_first_run_has_nothing_to_refuse(run):

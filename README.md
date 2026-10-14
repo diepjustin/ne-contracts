@@ -370,10 +370,10 @@ clone says every combo is already complete, and `scrape.py` refuses to run in th
 rather than write a header-only CSV and stamp it complete. To collect everything from
 scratch instead, pass `--fresh` — 20+ hours.
 
-Once `data/` is restored, bring it up to date with `--daily`, not with a full scrape: with
-every combo already done a full run has nothing to fetch and still records the time as
-now, so "Last updated" would claim a freshness the data does not have. Restore
-`scrape_meta.json` with the CSVs for the same reason.
+Once `data/` is restored, bring it up to date with `--daily`; a full scrape of a dataset
+whose combos are all done has nothing to fetch and leaves its recorded time alone (and
+`--entity X` finishing X does not stamp the whole dataset either). Restore
+`scrape_meta.json` with the CSVs so that time matches the data.
 
 ```bash
 cd ne-contracts

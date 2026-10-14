@@ -328,13 +328,15 @@ Where a summary goes:
 
 What to know before trusting one (measured 13 Oct 2026):
 
-- 19.1% of the summaries that have text (19,878 of 104,174) summarise a one-line state
-  placeholder page — "Document Cancelled" or "PO has been deleted." — so they say nothing
-  about the contract, and some call the document blank or incomplete. Nothing filters
-  them out.
+- About one in five summarises a one-line state placeholder page — "Document Cancelled"
+  or "PO has been deleted." — so it says nothing about the contract, and some call the
+  document blank or incomplete: 19.1% of the generated summaries that have text (19,878
+  of 104,174), and about 22% of the boxes the site shows (18,933 of 84,527 match a
+  placeholder summary exactly). Nothing filters them out.
 - About 0.7% of the other summaries state a dollar amount, date or number that is not in
-  the OCR text. Hand-checking a sample found more than half of those wrong or
-  unsupported, some amounts off by 10× to 1,000× and some years invented.
+  the OCR text. Of 26 such cases checked by hand, 15 were wrong or unsupported — some
+  amounts off by 10× to 1,000×, some years invented — 6 were true but not literal, and 5
+  were false alarms.
 - About three quarters of all OCR'd characters (74.6%) are never sent: the model sees the
   first 4,000 characters of each document, and 48.7% of documents are longer.
 
@@ -349,8 +351,8 @@ that fails does not stop the ones after it, and the script always exits 0, so la
 last exit status never shows a failure; read `logs/ocr_catchup.log`.
 `scripts/run_ocr_recapture.sh` was a one-time backlog job. The first OCR pass kept 6 pages
 and 4,000 characters per document; on 17 Sep 2026 the caps went to 200 and 100,000 after a
-corpus-wide check found 24,344 documents (22.4%) had run past the page cap, and the
-cut-short documents were OCR'd again (the file as it stood before is
+corpus-wide check found 24,344 documents (22.4%) had run past the page cap, and a
+recapture run redid 23,504 documents (the file as it stood before is
 `data/ocr_pilot.jsonl.bak-before-full-page-recapture`). Which documents to redo was chosen
 by hand and is not scripted, so running `run_ocr_recapture.sh` on a fresh `data/` would
 OCR everything.
@@ -367,6 +369,11 @@ passes on 3.9 and on 3.12.
 clone says every combo is already complete, and `scrape.py` refuses to run in that state
 rather than write a header-only CSV and stamp it complete. To collect everything from
 scratch instead, pass `--fresh` — 20+ hours.
+
+Once `data/` is restored, bring it up to date with `--daily`, not with a full scrape: with
+every combo already done a full run has nothing to fetch and still records the time as
+now, so "Last updated" would claim a freshness the data does not have. Restore
+`scrape_meta.json` with the CSVs for the same reason.
 
 ```bash
 cd ne-contracts
@@ -530,10 +537,11 @@ have a home to fetch them from. Neither is in git.
 ```bash
 # CSVs (363 MB, ~20h of scraping) — cached by the nightly workflow.
 gh workflow run rescue-cache.yml --ref main   # then download its artifact
-# ...or the newest hub-data release's copy (check the date in its tag first):
+# ...or the newest hub-data release's copy (check the date in its tag first). It carries
+# scrape_meta.json too; restore it with the CSVs so the stamps match the data.
 tag=$(gh release list --json tagName --jq '[.[] | select(.tagName | startswith("ne-contracts-hub-data-"))] | sort_by(.tagName) | last | .tagName')
-gh release download "$tag" --pattern '*.csv.gz' -D data
-(cd data && gunzip nu_contracts.csv.gz nu_purchase_orders.csv.gz state_agencies.csv.gz)
+gh release download "$tag" -D data
+(cd data && gunzip -f nu_contracts.csv.gz nu_purchase_orders.csv.gz state_agencies.csv.gz scrape_meta.json.gz)
 
 # Document text and descriptions (1.5 GB, ~36h of downloading) — a Release, because
 # nothing else keeps them. doc_text.jsonl is the one that matters; scope.jsonl

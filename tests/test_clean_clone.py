@@ -113,8 +113,21 @@ def test_a_restored_dataset_is_left_alone(run):
     write_csv(row())
     before = open(CSV, "rb").read()
     run()
-    assert run.calls == {"scraped": [], "stamped": [DATASET]}
+    assert run.calls["scraped"] == []
     assert open(CSV, "rb").read() == before
+
+
+@pytest.mark.xfail(strict=True, reason=(
+    "Known, not fixed here: with every combo done a full run fetches nothing and still "
+    "records the time as now, so a restored dataset reads as freshly scraped. Closest "
+    "audit finding is scraper-03 (--entity runs stamp the whole dataset); this case "
+    "needs its own rule, e.g. stamp only when the run scraped something. When it is "
+    "fixed this test passes, strict=True fails it, and the marker should go."))
+def test_a_run_that_scraped_nothing_does_not_stamp_the_dataset_fresh(run):
+    finish_every_combo()
+    write_csv(row())
+    run()
+    assert run.calls["stamped"] == []
 
 
 def test_a_first_run_has_nothing_to_refuse(run):

@@ -14,6 +14,7 @@ import time
 import csv
 import os
 import shutil
+from urllib.parse import parse_qs, urlsplit
 
 BASE_URL = "https://statecontracts.nebraska.gov"
 SEARCH_URL = f"{BASE_URL}/Search"
@@ -376,14 +377,17 @@ def parse_results_page(soup):
     tfoot = table.find("tfoot")
     if tfoot:
         for link in tfoot.find_all("a"):
-            href = link.get("href", "")
-            if "page=" in href:
-                try:
-                    page_num = int(href.split("page=")[-1])
-                    if last_page is None or page_num > last_page:
-                        last_page = page_num
-                except ValueError:
-                    pass
+            # The query string's own page parameter, wherever it sits in it. This
+            # used to be int(href.split("page=")[-1]), which is right only while
+            # page= is the last thing in the link: '?page=217&sort=BeginDate' made
+            # the int() raise, was swallowed, and the whole pager read as absent --
+            # one page, finished, silently. The state's links are bare today.
+            try:
+                page_num = int(parse_qs(urlsplit(link.get("href", "")).query).get("page", [""])[-1])
+            except ValueError:
+                continue    # not a page link, or not a number
+            if last_page is None or page_num > last_page:
+                last_page = page_num
 
     return records, last_page
 

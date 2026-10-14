@@ -177,15 +177,24 @@ def test_no_footer_and_no_page_links_both_mean_a_single_page():
     assert parse(page([result_row(1)], foot=pager()))[1] is None
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "The page number is read as int(href.split('page=')[-1]), so a link that carries another "
-    "parameter after it ('?page=217&sort=BeginDate') raises inside the parser's own try and the "
-    "whole pager reads as None -- one page, silently. The state's links are bare today. The "
-    "Expired-sweep plan (g1-source-drift-expired-corpus-01) needs sorted links and fixes this with "
-    "parse_qs; when it lands this passes, strict=True fails it, and the marker should go."))
-def test_a_page_parameter_that_is_not_the_last_one_is_still_read():
-    foot = pager("/Search/SearchResults?page=217&sort=BeginDate&sortdir=DESC")
-    assert parse(page([result_row(1)], foot=foot))[1] == 217
+@pytest.mark.parametrize("href, expected", [
+    ("/Search/SearchResults?page=217&sort=BeginDate&sortdir=DESC", 217),   # page= is not last
+    ("/Search/SearchResults?sort=BeginDate&sortdir=DESC&page=217", 217),   # page= is last
+    ("/Search/SearchResults?sort=BeginDate&page=8&sortdir=DESC", 8),       # page= is in the middle
+    ("/Search/SearchResults?page=3&page=9", 9),                            # repeated: the last one, as before
+    ("/Search/SearchResults?page=217#top", 217),                           # a fragment is not part of it
+    ("https://statecontracts.nebraska.gov/Search/SearchResults?page=12", 12),
+])
+def test_the_page_parameter_is_read_wherever_it_sits_in_the_link(href, expected):
+    assert parse(page([result_row(1)], foot=pager(href)))[1] == expected
+
+
+@pytest.mark.parametrize("href", ["/Search/SearchResults?xpage=9", "/Search/SearchResults?pagenum=9",
+                                  "/Search/SearchResults#page=9", "/Search/page=9", "javascript:void(0)",
+                                  "http://[not-a-host/", "/Search/SearchResults?page=%32x"])
+def test_only_a_parameter_named_page_counts(href):
+    """The old test was a substring match on 'page=', which read all of the first five as pages."""
+    assert parse(page([result_row(1)], foot=pager(href, "/Search/SearchResults?page=4")))[1] == 4
 
 
 # --- pages that have no results ------------------------------------------------------------------------

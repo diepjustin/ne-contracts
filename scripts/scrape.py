@@ -1222,6 +1222,32 @@ def refuse_flips(known, seen):
     return None
 
 
+# The same question asked of the whole dataset. refuse_flips judges one entity at a time, and
+# an entity with fewer than ALL_GONE_FLOOR active records is allowed to lose all of them --
+# a small body's last contract ending is real. So on a night the state answers empty for
+# everything, the large entities are refused and the small ones (17 of them, 29 records, in
+# the 28 Sep 2026 release) flip to Expired with nothing to say the night was bad; nothing
+# restores them, because --daily only ever flips Active -> Expired. More than half of a
+# dataset's active records vanishing in one night is not contracts ending: in the local 17 Sep
+# 2026 snapshot, apart from the open-ended 2099 placeholder date, no end date is shared by more
+# than 3% of a dataset's active records, and under 0.1% are still Active past their end date.
+# So past that point nothing is flipped for any entity. That also holds back the others'
+# endings when one entity holding over half of a dataset is refused on its own (the University
+# of Nebraska Lincoln holds 52% of the contracts and 61% of the purchase orders); the night is
+# unfinished anyway, and those flips come the next night, once the state answers.
+DATASET_BREAKER_FLOOR = 50      # known-active records in the entities finished tonight, below which a share means little
+DATASET_BREAKER_SHARE = 0.5
+
+
+def dataset_breaker(known, vanished):
+    """Why tonight's disappearances, across every entity read, cannot be trusted, or None."""
+    if known >= DATASET_BREAKER_FLOOR and vanished > known * DATASET_BREAKER_SHARE:
+        return (f"{vanished:,} of {known:,} active records ({vanished / known:.0%}) vanished across "
+                "the dataset in one night -- the state is failing, not reporting endings. Flipping "
+                "nothing tonight, for any entity, small ones included. Will re-check next run.")
+    return None
+
+
 def run_daily(args):
     """Scrape only Status=Active for one dataset and diff against what the
     existing CSV already knows is Active -- see README.md, "Daily updates"
@@ -1276,6 +1302,7 @@ def run_daily(args):
     flips = {}    # entity_name -> set(detail_url) flipped to Expired
     report = {}   # entity_name -> counts dict
     amended = 0   # watched fields seen to have moved, written to changes.jsonl
+    scanned_known = scanned_vanished = 0   # every entity read tonight, refused ones too
 
     with open(output_csv, "a", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
@@ -1314,6 +1341,9 @@ def run_daily(args):
                 print(f"  {entity_name}: not finished this run, will re-scan from the top later.")
                 continue
 
+            scanned_known += len(known)
+            scanned_vanished += len(known - seen)
+
             # A refused entity is re-scanned next run, and nothing of it is
             # patched or reported tonight.
             refusal = refuse_flips(known, seen)
@@ -1335,6 +1365,18 @@ def run_daily(args):
 
     if amended:
         print(f"Recorded {amended:,} field change(s) to {CHANGES_JSONL}.")
+
+    distrust = dataset_breaker(scanned_known, scanned_vanished)
+    if distrust:
+        print(f"::error title=Daily scrape: the state looks like it is answering empty::"
+              f"{args.dataset}: {distrust}")
+        # Every entity whose flips and report entry are dropped is not done: left in done_today
+        # it would be skipped by a same-day re-run, which could then finish the night and stamp
+        # it complete over flips that were never made.
+        done_today.difference_update(flips)
+        save_daily_progress(progress_path, done_today)
+        flips.clear()
+        report.clear()
 
     all_flip_urls = {u for s in flips.values() for u in s}
     if all_flip_urls:

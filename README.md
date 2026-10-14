@@ -469,12 +469,24 @@ without it, one outage expired all 44,063 active records in a single green run (
 last contract ending is a real ending — refusing it held the state dataset open for four
 nights.
 
-That floor has a price. A night the state answers empty for everything now flips every
-state entity with one to four active records to `Expired` — 17 of them, 29 records, in
-the 28 Sep 2026 release — while the larger ones are refused. The night does not finish,
-so the stamp stays put and the log names the refusals, but the guard rail below skips
-entities under five, so those small flips pass it. Nothing restores those rows in the
+That floor had a price. On a night the state answered empty for everything, every state
+entity with one to four active records was flipped to `Expired` — 17 of them, 29 records,
+in the 28 Sep 2026 release — while the larger ones were refused. The night did not finish,
+so the stamp stayed put and the log named the refusals, but the guard rail below skips
+entities under five, so those small flips passed it. Nothing restores such rows in the
 CSV: `--daily` only ever flips Active to Expired.
+
+So the scrape also judges the dataset as a whole. Across every entity it finished tonight,
+the refused ones included, if the CSV held 50 or more active records and the state no
+longer lists more than half of them, it flips nothing for any entity, small ones included,
+prints an `::error` line, and leaves the night unfinished: the stamp stays put and the
+last step of `daily.yml` turns the run red (see "A night that did not finish"). Ordinary
+endings are nowhere near that line: in the local 17 Sep 2026 snapshot, apart from the 2099
+open-ended placeholder date, no end date is shared by more than 3% of a dataset's active
+records. The line also holds back the other entities' endings for a night when one entity
+that holds most of a dataset is refused on its own — in that snapshot the University of
+Nebraska Lincoln holds 52% of the active contracts and 61% of the active purchase orders —
+and those are flipped the next night, once the state answers.
 
 **A record that comes back is appended, and its Expired row stays.** A record flipped to
 `Expired` — after a night it was missed, or after an empty night like the one above — is

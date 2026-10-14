@@ -218,6 +218,94 @@ def test_a_same_day_rerun_reports_each_entity_once(monkeypatch, tmp_path):
     assert stamped(tmp_path)
 
 
+# --- the dataset-wide circuit breaker -----------------------------------------
+#
+# refuse_flips judges one entity at a time and lets an entity of fewer than five active
+# records lose all of them. On a night the state answers empty for everything, the large
+# entities are refused and the small ones flip to Expired -- 17 of them, 29 records, on the
+# 28 Sep 2026 release -- with nothing to mark the night bad, and nothing restores them.
+
+def test_an_outage_night_flips_nothing_for_any_entity(monkeypatch, tmp_path, capsys):
+    rows = [row(n) for n in range(60)] + [row(900 + n, OTHER) for n in range(3)]
+    out = night(monkeypatch, tmp_path, rows, {})          # the state answers empty for both
+
+    assert all(r[8] == "Active" for r in out), "the small entity's three records must not flip either"
+    assert not stamped(tmp_path)
+    assert report(tmp_path) == [], "nothing flipped, so the guard rail has nothing to see"
+    printed = capsys.readouterr().out
+    assert "::error title=Daily scrape: the state looks like it is answering empty::contract:" in printed
+    assert "63 of 63 active records (100%) vanished across the dataset" in printed
+    assert "small ones included" in printed
+
+
+def test_without_an_outage_the_small_entity_still_flips(monkeypatch, tmp_path, capsys):
+    """The same three records, on a night the large entity answers normally."""
+    rows = [row(n) for n in range(60)] + [row(900 + n, OTHER) for n in range(3)]
+    out = night(monkeypatch, tmp_path, rows, {CAMPUS: [listed(n) for n in range(60)]})
+
+    assert all(status_of(out, 900 + n) == ["Expired"] for n in range(3))
+    assert stamped(tmp_path)
+    assert "answering empty" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("big, small, trips", [
+    (45, 4, False),    # 49 known active: under the floor, a share of so few means nothing
+    (46, 4, True),     # 50 known active, all gone
+])
+def test_the_floor_is_fifty_known_active_records(monkeypatch, tmp_path, big, small, trips):
+    rows = [row(n) for n in range(big)] + [row(900 + n, OTHER) for n in range(small)]
+    out = night(monkeypatch, tmp_path, rows, {})
+    flipped = [status_of(out, 900 + n) == ["Expired"] for n in range(small)]
+    assert flipped == [not trips] * small      # the small entity's whole stock flips, or none of it does
+
+
+@pytest.mark.parametrize("gone_in_campus, trips", [
+    (30, False),   # 50 of 100 vanished: exactly half is not more than half...
+    (31, True),    # ...51 of 100 is. CAMPUS is then refused on its own account (31 of 60), and OTHER's flips go too
+])
+def test_more_than_half_is_the_line_across_the_dataset(monkeypatch, tmp_path, gone_in_campus, trips):
+    rows = [row(n) for n in range(60)] + [row(900 + n, OTHER) for n in range(40)]
+    search = {CAMPUS: [listed(n) for n in range(gone_in_campus, 60)],
+              OTHER: [listed(900 + n, OTHER) for n in range(20, 40)]}        # 20 of OTHER's 40 gone
+    out = night(monkeypatch, tmp_path, rows, search)
+
+    other_flipped = sum(status_of(out, 900 + n) == ["Expired"] for n in range(40))
+    assert other_flipped == (0 if trips else 20)
+    assert stamped(tmp_path) is (not trips)
+
+
+def test_a_dropped_entity_is_scanned_again_by_a_same_day_rerun_not_skipped_as_done(monkeypatch, tmp_path):
+    """Left in the day's progress file it would be skipped, and the rerun could finish the night and
+    stamp it complete over flips that were never made."""
+    rows = [row(n) for n in range(60)] + [row(900 + n, OTHER) for n in range(3)]
+    night(monkeypatch, tmp_path, rows, {})                                    # the outage
+
+    search = {CAMPUS: [listed(n) for n in range(60)], OTHER: [listed(900, OTHER), listed(901, OTHER)]}
+    out = night(monkeypatch, tmp_path, None, search)                          # the state is back
+
+    assert status_of(out, 902) == ["Expired"], "OTHER was read again and its ending applied"
+    assert status_of(out, 900) == ["Active"] and status_of(out, 901) == ["Active"]
+    assert stamped(tmp_path)
+    [entry] = report(tmp_path)
+    assert entry["complete"] is True and entry["entities"][OTHER]["flipped_to_expired"] == 1
+
+
+def test_the_breaker_does_not_exit_and_the_night_stays_open_for_the_freshness_check(monkeypatch, tmp_path):
+    """Like a refused entity, it holds the night open rather than failing the step; the last
+    step of daily.yml (check_scrape_stamps.py) is what turns the run red."""
+    rows = [row(n) for n in range(60)] + [row(900 + n, OTHER) for n in range(3)]
+    night(monkeypatch, tmp_path, rows, {})            # returns normally: no SystemExit
+    assert not stamped(tmp_path)
+
+
+@pytest.mark.parametrize("known, vanished, trips", [
+    (49, 49, False), (50, 50, True), (50, 25, False), (50, 26, True),
+    (1000, 500, False), (1000, 501, True), (0, 0, False), (100, 0, False),
+])
+def test_dataset_breaker_boundaries(known, vanished, trips):
+    assert (scrape.dataset_breaker(known, vanished) is not None) is trips
+
+
 # --- the refusal's boundaries -------------------------------------------------
 #
 # Pinned from both sides because each is one character in scrape.refuse_flips:

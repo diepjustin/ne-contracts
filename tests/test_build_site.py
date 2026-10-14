@@ -724,3 +724,39 @@ def test_an_unparseable_stamp_means_no_stamp(monkeypatch, tmp_path):
     _stamps(tmp_path, monkeypatch, {"contract": FRESH, "purchase-order": "last night",
                                     "state": FRESH})
     assert build_site.scraped_at() is None
+
+
+# One case per column of the twin key. The key is every CSV column but Status,
+# and each column is a separate way for a pair to be two real records: an
+# Expired row may be dropped only when it matches its Active row in all ten.
+# The names are spelled out here, not read from build_site.TWIN_COLUMNS: a
+# change that dropped a column from the key would otherwise drop its own test.
+
+CSV_COLUMNS = ["Document Number", "Document Type", "Entity Code", "Entity Name", "Vendor",
+               "Amount", "Begin Date", "End Date", "Status", "Detail URL", "View URL"]
+
+
+@pytest.mark.parametrize("column,other", [
+    ("Document Number", "1454300"),
+    ("Document Type", "O9"),
+    ("Entity Code", "028"),
+    ("Entity Name", "Aeronautics, Department of"),
+    ("Vendor", "OTHER PAVING"),
+    ("Amount", "$4,921.00"),
+    ("Begin Date", "08/14/2026"),
+    ("End Date", "01/01/2100"),
+    ("Detail URL", DETAIL.format(dn="dn-other")),
+    ("View URL", VIEW.format(tok="t-other")),
+])
+def test_a_pair_differing_in_this_column_alone_is_kept(monkeypatch, tmp_path, column, other):
+    active = _row("1454299", "Active", "$4,920.00", "dn1")
+    expired = _row("1454299", "Expired", "$4,920.00", "dn1")
+    expired[CSV_COLUMNS.index(column)] = other
+
+    payload = _build(monkeypatch, tmp_path, [expired, active])
+
+    assert payload["meta"]["count"] == 2, f"an Expired row that differs in {column} was dropped"
+
+
+def test_the_twin_rule_covers_every_column_but_status():
+    assert list(build_site.TWIN_COLUMNS) == [c for c in CSV_COLUMNS if c != "Status"]

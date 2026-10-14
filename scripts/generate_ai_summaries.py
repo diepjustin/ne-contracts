@@ -160,7 +160,15 @@ def load_checkpoint():
                   "of a partial line. That document is simply retried.")
             os.truncate(OUT_JSONL, start)
             break
-        store[rec["tok"]] = rec
+        tok = rec.get("tok")
+        if not tok:
+            # A worker that died leaves a record with no token ({"crash": ...} or
+            # {"error": ...}). Indexing it raised KeyError, and every later run
+            # died the same way until someone edited the file by hand.
+            print(f"    Warning: {OUT_JSONL} line {i + 1} has no token (a crashed worker's "
+                  "record); skipping it.")
+            continue
+        store[tok] = rec
     return store
 
 

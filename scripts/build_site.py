@@ -1332,19 +1332,47 @@ def load_ai_summaries(view_tokens):
         return summaries, sources
 
     matched = unmatched = skipped = 0
+    unknown_models = collections.Counter()
     with open(AI_SUMMARIES_JSONL, encoding="utf-8") as f:
-        for line in f:
+        lines = f.read().splitlines()
+    for number, line in enumerate(lines, 1):
+        if not line.strip():
+            continue
+        try:
             record = json.loads(line)
-            if record.get("unclear") or not record.get("summary"):
-                skipped += 1
-                continue
-            row = row_of.get(record["tok"])
-            if row is None:
-                unmatched += 1
-                continue
-            summaries[row] = record["summary"].encode("utf-8")
-            sources[row] = AI_MODEL_CODE.get(record.get("model") or "", 0)
-            matched += 1
+        except json.JSONDecodeError as e:
+            # The asset is cut from a file a job appends to, so it can be taken
+            # mid-write: a torn last line is expected, and scrape.load_documents
+            # treats it the same way. Anything after a bad line cannot be trusted.
+            if any(later.strip() for later in lines[number:]):
+                sys.exit(f"{AI_SUMMARIES_JSONL} line {number} is not valid JSON ({e.msg}), and "
+                         "more lines follow it; the entries after it cannot be trusted.")
+            print(f"note: {AI_SUMMARIES_JSONL} ends mid-write; ignoring its last line "
+                  f"(line {number})")
+            break
+        if record.get("unclear") or not record.get("summary"):
+            skipped += 1
+            continue
+        row = row_of.get(record["tok"])
+        if row is None:
+            unmatched += 1
+            continue
+        model = record.get("model") or ""
+        if model not in AI_MODEL_CODE:
+            unknown_models[model or "(missing)"] += 1
+            continue
+        summaries[row] = record["summary"].encode("utf-8")
+        sources[row] = AI_MODEL_CODE[model]
+        matched += 1
+
+    if unknown_models:
+        # Fail here, naming the cause. A row published with source 0 beside its
+        # text fails verify_ai_summaries later with "text and source disagree",
+        # which says nothing about a model being absent from AI_MODELS.
+        sys.exit("AI summaries from a model this build does not list: "
+                 + ", ".join(f"{m!r} ({n:,} rows)" for m, n in unknown_models.most_common())
+                 + ". Add it to AI_MODELS in scripts/build_site.py - append only, because "
+                 "the position is the code stored in aisrc.bin.")
 
     print(f"AI summaries  : {matched:,} joined to rows"
           + (f", {unmatched:,} unmatched" if unmatched else "")

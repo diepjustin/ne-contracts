@@ -1,0 +1,51 @@
+name: CI
+
+# Why this exists: branch protection on main requires a status check named "build", and the
+# only job with that name is pages.yml's, which runs on a push to main -- after a change has
+# landed -- so no pull request could ever satisfy it, and nothing tested a change before it
+# merged. This runs the same tests and page lint as pages.yml's build job on every pull
+# request to main, and nothing else: no cache, no release, no deploy, no secrets.
+#
+# Deliberately not `pull_request_target` (it runs with the base repo's token and secrets, and
+# this repo is public), and deliberately not also `push`, which would report the same check
+# twice on a PR's head commit. pages.yml is left alone: its `build` job feeds its `deploy` job,
+# and giving it a pull_request trigger would run the deploy and the cache prune on PR refs.
+# The job id must stay `build` with no `name:`, or the required context stops being produced;
+# tests/test_ci_workflow.py fails if it does.
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Tests
+        run: python3 -m pytest tests/ -q
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+
+      - name: Lint the page
+        run: python3 scripts/lint_page.py

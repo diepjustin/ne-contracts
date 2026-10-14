@@ -245,11 +245,20 @@ jobs:
             echo "::warning::nothing to release -- skipping"
           fi
 
+      # Sorted by tag name, never createdAt. A release's createdAt is the date
+      # of the commit its tag points at, not when it was published, so every
+      # release cut from an unchanged main ties -- and the list returns ties
+      # newest-first, which `reverse` turned into newest-last, so `.[3:]`
+      # deleted the release this run had just made. 09-25, 09-26 and 09-27
+      # 2026 were all published and deleted within the same run, and
+      # ne-connect built from the 09-24 release for three nights. The tag
+      # carries its own Central date (YYYY-MM-DD), so it sorts correctly as
+      # text -- the same key ne-connect already uses to pick the newest.
       - name: Delete old hub-data releases (keep newest 3)
         if: always() && steps.cachecheck.outputs.ok == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release list --repo diepjustin/ne-contracts --json tagName,createdAt --limit 100 \
-            | jq -r '[.[] | select(.tagName | startswith("ne-contracts-hub-data-"))] | sort_by(.createdAt) | reverse | .[3:] | .[].tagName' \
+          gh release list --repo diepjustin/ne-contracts --json tagName --limit 100 \
+            | jq -r '[.[] | select(.tagName | startswith("ne-contracts-hub-data-"))] | sort_by(.tagName) | reverse | .[3:] | .[].tagName' \
             | xargs -r -n1 -I{} gh release delete {} --repo diepjustin/ne-contracts --yes

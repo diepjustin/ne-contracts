@@ -466,18 +466,29 @@ def main():
                     vendors[name] = len(vendors)
                 vi = vendors[name]
 
-                dn = ""
-                ui = 0  # index into the (A, D, N) table; unused when no detail URL
+                # Every row is addressed by its Detail URL: scrape.py keys records on it,
+                # and the page builds each row's document-list link from the payload's
+                # A/D/N/DT/V and the row's DN token, with no notion of a row that has none.
+                # So a row without one cannot be published, and neither can one whose URL
+                # has no DN -- an empty token would be indistinguishable from "not an
+                # exception" in verify_payload and the page. Both used to die much later,
+                # in verification, with 'DN token round trip failed' and no hint why.
                 detail = r["Detail URL"]
-                if detail:
-                    q = parse_qs(urlparse(detail).query)
-                    dn = q.get("DN", [""])[0]
-                    ui = adn_idx((q.get("A", [""])[0], q.get("D", [""])[0], q.get("N", [""])[0]))
-                    const_DT.setdefault(ti, q.get("DT", [""])[0])
-                    v = q.get("V", [""])[0]
-                    if vi in vendor_tokens and vendor_tokens[vi] != v:
-                        sys.exit(f"vendor {name!r} maps to two V tokens — assumption broken")
-                    vendor_tokens[vi] = v
+                if not detail:
+                    sys.exit(f"{path}: document {r['Document Number']!r} at {ent!r} has no Detail URL. "
+                             "Every row is addressed by it, so a row without one cannot be "
+                             "published; find the record in the CSV and decide what it should be.")
+                q = parse_qs(urlparse(detail).query)
+                dn = q.get("DN", [""])[0]
+                if not dn:
+                    sys.exit(f"{path}: document {r['Document Number']!r} at {ent!r} has a Detail URL "
+                             f"with no DN token, so its link cannot be rebuilt: {detail[:120]}")
+                ui = adn_idx((q.get("A", [""])[0], q.get("D", [""])[0], q.get("N", [""])[0]))
+                const_DT.setdefault(ti, q.get("DT", [""])[0])
+                v = q.get("V", [""])[0]
+                if vi in vendor_tokens and vendor_tokens[vi] != v:
+                    sys.exit(f"vendor {name!r} maps to two V tokens — assumption broken")
+                vendor_tokens[vi] = v
 
                 view = r["View URL"]
                 if view and not view.startswith(VIEW_BASE):

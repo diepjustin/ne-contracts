@@ -93,10 +93,13 @@ class Site:
         with open(self.root / "scripts" / "vendor_groups.json", "w", encoding="utf-8") as f:
             json.dump(mapping, f)
 
+    def run(self, *flags):
+        self.monkeypatch.setattr(sys, "argv", ["build_site.py", *flags])
+        build_site.main()
+
     def build(self):
         """build_site.main() with no flags; returns the folder it published into."""
-        self.monkeypatch.setattr(sys, "argv", ["build_site.py"])
-        build_site.main()
+        self.run()
         with open(self.root / "manifest.json", encoding="utf-8") as f:
             return str(self.root / json.load(f)["dir"])
 
@@ -345,15 +348,37 @@ def test_more_than_a_thousandth_stops_the_build(site):
         site.build()
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "build-04: a row with no Detail URL has an empty DN, which goes into meta.dnExceptions as '' "
-    "and is then read back with `exceptions.get(str(i)) or ...`, where '' is falsy. The build "
-    "dies in verify_payload with 'DN token round trip failed'. Nothing in the data has one today. "
-    "The fix tests membership (build_site.py verify_payload, and index.html's matching `||`); "
-    "when it lands this passes, strict=True fails it, and the marker should go."))
-def test_a_row_with_no_detail_url_builds_and_verifies(site):
-    site.write(state=thousand() + [row("DL-1", url="", view_seed=None)])
-    assert ne_format.read_payload(site.build())[4]["count"] == 1001
+def test_a_row_with_no_detail_url_is_refused_by_name_and_nothing_is_written(site):
+    """get_documents('') answers [] ('read cleanly, offers none'), so scrape.py can write such
+    a row. Every row is addressed by its Detail URL, and the page has no notion of one without,
+    so the build stops -- as it always did, but at the row, saying which, instead of in
+    verify_payload with 'DN token round trip failed' and no hint why."""
+    site.write(state=[row("1454299"), row("DL-1", url="", view_seed=None)])
+    with pytest.raises(SystemExit) as stop:
+        site.build()
+    message = str(stop.value)
+    assert "state.csv" in message and "'DL-1'" in message and STATE_ENTITY in message
+    assert "has no Detail URL" in message
+    assert not os.path.exists(site.root / "manifest.json") and not os.path.exists(site.root / "d")
+
+
+@pytest.mark.parametrize("url", [detail(""), detail("").replace("&DN=", "&XN="),
+                                 build_site.DETAIL_BASE + "?A=a1&D=d1&N=n1&DT=dt1"],
+                         ids=["empty DN", "no DN parameter", "no DN and no V"])
+def test_a_detail_url_with_no_dn_token_is_refused_by_name(site, url):
+    site.write(state=[row("DN-0", url=url, view_seed=None)])
+    with pytest.raises(SystemExit) as stop:
+        site.build()
+    assert "'DN-0'" in str(stop.value) and "no DN token" in str(stop.value)
+    assert url[:60] in str(stop.value), "the message shows the URL it is about"
+    assert not os.path.exists(site.root / "manifest.json")
+
+
+def test_the_refusal_comes_before_the_legacy_json_path_too(site, tmp_path):
+    site.write(state=[row("DL-1", url="", view_seed=None)])
+    with pytest.raises(SystemExit, match="has no Detail URL"):
+        site.run("--emit-json", str(tmp_path / "payload.json"))
+    assert not os.path.exists(tmp_path / "payload.json")
 
 
 def distinct_adn(count):

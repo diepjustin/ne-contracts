@@ -99,6 +99,13 @@ PAGE_DELAY = 0.3
 # Generous, because a few searches genuinely are this slow (see scrape_entity).
 SEARCH_TIMEOUT = 300
 
+# The search form is a plain page, not a computed result set, and answers in
+# well under a second. requests has no default timeout, so without one a
+# half-open connection here waits forever -- and get_token runs before every
+# search and every re-search, so it is the one place a hung server could hold
+# the whole job rather than a single request.
+TOKEN_TIMEOUT = 60
+
 # Detail-fetch latency is the early warning that we are asking too much: if the
 # site starts straining, responses slow down before they start failing. Each
 # combo reports its median so a run that drifts upward is visible in the log
@@ -147,7 +154,7 @@ def detail_session():
 
 
 def get_token(session):
-    resp = session.get(SEARCH_URL)
+    resp = session.get(SEARCH_URL, timeout=TOKEN_TIMEOUT)
     resp.raise_for_status()
     soup = BeautifulSoup(resp.text, "html.parser")
     token = soup.find("input", {"name": "__RequestVerificationToken"})

@@ -760,3 +760,70 @@ def test_a_pair_differing_in_this_column_alone_is_kept(monkeypatch, tmp_path, co
 
 def test_the_twin_rule_covers_every_column_but_status():
     assert list(build_site.TWIN_COLUMNS) == [c for c in CSV_COLUMNS if c != "Status"]
+
+
+# --- the branches of the carry that decide a row's source -----------------------
+#
+# Each of these pins one line of carry_descriptions_forward / load_descriptions
+# that the tests above leave unguarded: a mutant that changes it still passes.
+
+def test_a_better_ranked_document_displaces_a_carried_description(monkeypatch, tmp_path):
+    """Carried from the fifth document; scope.jsonl reads the third. The third
+    ranks better (1 + 2 against 1 + 4), so it replaces the carried text and
+    takes its place -- which is what a fresh build would have published."""
+    _previous_build(tmp_path, [CW8847[0]], {0: b"FROM THE FIFTH"}, {0: COVER_SHEET}, {0: 4},
+                    lists={0: CW8847})
+    third = [{"tok": CW8847[2], "doc": "CW8847", "source": "cover_sheet",
+              "description": "FROM THE THIRD"}]
+    descriptions, _sources, documents = _carry(
+        monkeypatch, tmp_path, [CW8847[0]], [_record(CW8847)], third)
+    assert (descriptions[0], documents[0]) == (b"FROM THE THIRD", 2)
+
+
+def test_the_same_document_read_again_overlays_its_carried_description(monkeypatch, tmp_path):
+    """Equal rank is the same document, read more recently: scope.jsonl wins, or
+    a corrected parse could never replace the text a night carried forward."""
+    _previous_build(tmp_path, [CW8847[0]], {0: b"OLD TEXT"}, {0: COVER_SHEET}, {0: 2},
+                    lists={0: CW8847})
+    reread = [{"tok": CW8847[2], "doc": "CW8847", "source": "cover_sheet",
+               "description": "NEW TEXT"}]
+    descriptions, _sources, documents = _carry(
+        monkeypatch, tmp_path, [CW8847[0]], [_record(CW8847)], reread)
+    assert (descriptions[0], documents[0]) == (b"NEW TEXT", 2)
+
+
+def test_two_rows_sharing_a_view_url_keep_their_text_but_only_one_claims_the_document(
+        monkeypatch, tmp_path):
+    """39 rows on 29 Sep 2026 share a View URL with another row. The token is
+    listed for one of them only, so the other keeps its text and claims no
+    document: marking position 0 on both would print "description read from
+    this one" beside a document that belongs to the other row."""
+    shared = _tok(7)
+    _previous_build(tmp_path, [shared, shared], {0: b"SHARED ROW TEXT", 1: b"SHARED ROW TEXT"},
+                    {0: COVER_SHEET, 1: COVER_SHEET}, {0: 0, 1: 0}, lists={})
+    descriptions, _sources, documents = _carry(
+        monkeypatch, tmp_path, [shared, shared], [], [])
+    assert descriptions == {0: b"SHARED ROW TEXT", 1: b"SHARED ROW TEXT"}
+    assert documents == {0: NO_DOCUMENT, 1: 0}
+
+
+def test_a_stored_position_past_the_documents_listed_today_is_not_a_claim(monkeypatch, tmp_path):
+    """The previous build said position 4; its list now has three documents (one
+    was withdrawn). Indexing it would raise, and guessing would name a document
+    that is not the source. The text stays; the document is unknown."""
+    _previous_build(tmp_path, [CW8847[0]], {0: b"SOME CARRIED TEXT"}, {0: COVER_SHEET}, {0: 4},
+                    lists={0: CW8847[:3]})
+    descriptions, _sources, documents = _carry(
+        monkeypatch, tmp_path, [CW8847[0]], [_record(CW8847[:3])], [])
+    assert descriptions[0] == b"SOME CARRIED TEXT"
+    assert documents[0] == NO_DOCUMENT
+
+
+def test_a_single_document_row_with_a_nonzero_stored_position_is_not_placed(monkeypatch, tmp_path):
+    """A row with one document ships no list, and its only document is position
+    0 and nothing else. A stored 3 beside no list is contradictory, so it claims
+    nothing -- not the row's own document."""
+    _previous_build(tmp_path, [_tok(9)], {0: b"ORDINARY ROW"}, {0: COVER_SHEET}, {0: 3}, lists={})
+    descriptions, _sources, documents = _carry(monkeypatch, tmp_path, [_tok(9)], [], [])
+    assert descriptions[0] == b"ORDINARY ROW"
+    assert documents[0] == NO_DOCUMENT

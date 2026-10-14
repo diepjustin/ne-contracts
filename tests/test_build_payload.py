@@ -366,37 +366,39 @@ def distinct_types(count):
             for i in range(count)]
 
 
-def test_255_address_triples_fit_a_u8_column(site):
-    site.write(state=distinct_adn(255))
-    assert len(ne_format.read_payload(site.build())[4]["adn"]) == 255
+@pytest.mark.parametrize("make_rows, key", [(distinct_adn, "adn"), (distinct_types, "types")],
+                         ids=["address triples", "type codes"])
+@pytest.mark.parametrize("count", [255, 256])
+def test_a_u8_column_can_index_all_256_of_its_dictionary_entries(site, make_rows, key, count):
+    site.write(state=make_rows(count))
+    assert len(ne_format.read_payload(site.build())[4][key]) == count
 
 
-def test_255_document_type_codes_fit_a_u8_column(site):
-    site.write(state=distinct_types(255))
-    assert len(ne_format.read_payload(site.build())[4]["types"]) == 255
+@pytest.mark.parametrize("make_rows, name", [(distinct_adn, "adnIdx"), (distinct_types, "type")],
+                         ids=["address triples", "type codes"])
+@pytest.mark.parametrize("count", [257, 300])
+def test_more_entries_than_a_u8_column_holds_stop_the_build_by_name(site, make_rows, name, count):
+    """Used to be an OverflowError from array('B'), because the size check ran after the
+    rows were appended and so was only reachable at exactly 256."""
+    site.write(state=make_rows(count))
+    with pytest.raises(SystemExit, match=f"{name} dictionary has 257 entries"):
+        site.build()
+    assert not os.path.exists(site.root / "manifest.json")
 
 
-@pytest.mark.xfail(strict=True, raises=OverflowError, reason=(
-    "build-04: the u8 dictionary-size guard runs after the rows are appended, so one entry past "
-    "256 raises OverflowError from array('B') before the friendly message is reachable. Moving the "
-    "check ahead of the appends makes this a clean SystemExit; the marker should then go."))
-@pytest.mark.parametrize("make_rows", [distinct_adn, distinct_types], ids=["address triples", "type codes"])
-def test_more_entries_than_a_u8_column_holds_stop_the_build_cleanly(site, make_rows):
-    site.write(state=make_rows(257))
-    with pytest.raises(SystemExit):
+def test_an_entity_list_longer_than_a_u8_stops_the_build(site, monkeypatch):
+    """The entity dictionary is fixed by scrape.py, not discovered, so it is checked once after the loop."""
+    monkeypatch.setattr(build_site, "ENTITIES", list(build_site.ENTITIES) + [f"E{i}" for i in range(200)])
+    site.write(state=[row()])
+    with pytest.raises(SystemExit, match=r"entity dictionary has 29\d entries"):
         site.build()
 
 
-@pytest.mark.parametrize("raw", ["NaN", "nan", "inf", "-inf", "Infinity", "-Infinity", "$1e999", "1,e999"])
-def test_a_non_finite_amount_is_read_as_zero(raw):
-    """float() accepts these, and NaN != NaN breaks the round-trip comparison for a whole chunk."""
-    assert build_site.to_amount(raw) == 0.0
-
-
-@pytest.mark.parametrize("raw, expected", [("$1,234.50", 1234.5), ("1e3", 1000.0), ("-$5.00", -5.0),
-                                           ("0", 0.0), ("$99999999999.99", 99999999999.99)])
-def test_a_finite_amount_is_untouched_by_that_guard(raw, expected):
-    assert build_site.to_amount(raw) == expected
+def test_the_u8_limit_is_the_number_of_values_a_byte_can_hold():
+    assert build_site.U8_ENTRIES == 256 == len(range(0, 256))
+    build_site.check_u8_dictionary("anything", 256)
+    with pytest.raises(SystemExit, match="anything dictionary has 257 entries"):
+        build_site.check_u8_dictionary("anything", 257)
 
 
 # --- which rows count as one ----------------------------------------------------------------

@@ -126,6 +126,17 @@ def load_document_counts(detail_urls, view_tokens):
                             "clamped": clamped}
 
 
+# A u8 column holds the values 0..255, so a dictionary it indexes can have 256 entries.
+U8_ENTRIES = 256
+
+
+def check_u8_dictionary(name, size):
+    """Stop the build, by name, when a dictionary has outgrown the u8 column that indexes it."""
+    if size > U8_ENTRIES:
+        sys.exit(f"{name} dictionary has {size} entries — the column is a u8 "
+                 f"(at most {U8_ENTRIES}); widen it")
+
+
 def load_entities():
     """Every entity the scraper knows about, alphabetized.
 
@@ -380,6 +391,7 @@ def main():
 
     def adn_idx(triple):
         if triple not in adn_index:
+            check_u8_dictionary("adnIdx", len(adn) + 1)
             adn_index[triple] = len(adn)
             adn.append(list(triple))
         return adn_index[triple]
@@ -389,6 +401,7 @@ def main():
 
     def type_idx(code):
         if code not in type_index:
+            check_u8_dictionary("type", len(types) + 1)
             type_index[code] = len(types)
             types.append(code)
         return type_index[code]
@@ -499,11 +512,12 @@ def main():
     n = len(docs)
 
     # The u8 columns index dictionaries that are small today but not bounded by
-    # anything except the state's own data. Fail here rather than silently
-    # wrapping a value and mislabelling every affected row.
+    # anything except the state's own data. adn_idx and type_idx check as each
+    # entry is added, so the message below is reachable before array('B') raises
+    # OverflowError on the first row past the limit; this pass is for the entity
+    # dictionary, which is fixed by scrape.py rather than discovered from the data.
     for name, size in (("entity", len(ENTITIES)), ("type", len(types)), ("adnIdx", len(adn))):
-        if size > 255:
-            sys.exit(f"{name} dictionary has {size} entries — the column is a u8; widen it")
+        check_u8_dictionary(name, size)
 
     # Which documents each row publishes, joined on from the backfill's log.
     # Unasked rows stay DOC_COUNT_UNKNOWN, so a half-finished backfill claims

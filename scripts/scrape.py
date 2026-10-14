@@ -717,6 +717,28 @@ def save_progress(path, done, partial):
 CSV_TAIL_WINDOW = 1 << 20
 
 
+# How much of a file is counted for quote characters at a time.
+QUOTE_COUNT_CHUNK = 1 << 24
+
+
+def odd_quotes_before(f, upto):
+    """True if the first `upto` bytes of the open binary file hold an odd number of quote characters.
+
+    csv.writer doubles every quote it escapes, so the rows of a whole file hold an even number:
+    an odd one means the last field is still open.
+    """
+    f.seek(0)
+    odd, left = False, upto
+    while left > 0:
+        chunk = f.read(min(QUOTE_COUNT_CHUNK, left))
+        if not chunk:
+            break
+        left -= len(chunk)
+        if chunk.count(b'"') % 2:
+            odd = not odd
+    return odd
+
+
 def repair_csv_tail(csv_path):
     """Cut a half-written final row off the CSV, so the next append starts a new row.
 
@@ -735,6 +757,16 @@ def repair_csv_tail(csv_path):
     is simply fetched again, because it is no longer known.
 
     Returns the number of bytes removed.
+
+    Two cases it cannot repair stop the run (SystemExit) with the file untouched,
+    instead of being guessed at. A megabyte with no newline in it is not a
+    half-written row. And a file that, after the cut, would still end inside a
+    quoted field -- an odd number of quote characters -- which is what a kill leaves
+    in a field that contains a line break, and a search for the last newline cannot
+    tell that line break from the end of a row: it would cut inside the field, or
+    leave the open quote, and the next row appended would be swallowed by it. No
+    field in the 744,100 rows of 14 Oct 2026 holds a line break, so this has not
+    happened; if it does it is loud here, not a garbled row in the nightly build.
     """
     if not os.path.exists(csv_path):
         return 0
@@ -742,20 +774,28 @@ def repair_csv_tail(csv_path):
         size = f.seek(0, os.SEEK_END)
         if size == 0:
             return 0
+        keep = size
         f.seek(size - 1)
-        if f.read(1) == b"\n":
-            return 0
-        window = min(size, CSV_TAIL_WINDOW)
-        f.seek(size - window)
-        newline = f.read(window).rfind(b"\n")
-        if newline < 0 and window < size:
-            print(f"    Warning: the last {window:,} bytes of {csv_path} hold no newline, which is "
-                  "not a half-written row. Leaving the file for a person to look at.")
-            return 0
-        keep = size - window + newline + 1 if newline >= 0 else 0
-        f.truncate(keep)
-    print(f"    Note: {csv_path} ends mid-row; cutting {size - keep:,} bytes of a partial row. "
-          "That record is simply fetched again.")
+        if f.read(1) != b"\n":
+            window = min(size, CSV_TAIL_WINDOW)
+            f.seek(size - window)
+            newline = f.read(window).rfind(b"\n")
+            if newline < 0 and window < size:
+                sys.exit(f"ERROR: the last {window:,} bytes of {csv_path} hold no newline, which is "
+                         "not a half-written row. Nothing was changed; the file needs a person to "
+                         "look at it.")
+            keep = size - window + newline + 1 if newline >= 0 else 0
+        if odd_quotes_before(f, keep):
+            sys.exit(f"ERROR: {csv_path} would still end inside a quoted field after repair (it has "
+                     "an odd number of quote characters), so the next row appended would be "
+                     "swallowed by it. A kill in a field with a line break in it leaves this, and "
+                     "the repair cannot tell that line break from the end of a row. Nothing was "
+                     "changed; the file needs a person to look at it.")
+        if keep < size:
+            f.truncate(keep)
+    if keep < size:
+        print(f"    Note: {csv_path} ends mid-row; cutting {size - keep:,} bytes of a partial row. "
+              "That record is simply fetched again.")
     return size - keep
 
 
@@ -769,13 +809,33 @@ def csv_has_records(csv_path):
         return False
 
 
-def drop_unfinished_rows(csv_path, keep):
+class UnaccountedRows(ValueError):
+    """More rows belong to combos with no recorded position than a cut-off scrape can leave."""
+
+    def __init__(self, count):
+        super().__init__(f"{count:,} rows")
+        self.count = count
+
+
+# A scrape that is cut off leaves at most the page in flight unaccounted for -- 25 rows
+# today. A thousand is ample slack for a larger page and still a sliver of a dataset. More
+# than that means the progress file does not describe the CSV (unreadable, emptied, from
+# another checkout), and dropping "unfinished" rows would delete the dataset.
+MAX_UNACCOUNTED_ROWS = 1000
+
+
+def drop_unfinished_rows(csv_path, keep, limit=None):
     """Strip rows belonging to combos we have no position for.
 
     A combo that is finished, or that has a recorded page position, has its
     rows accounted for and keeps them. Anything else was cut off before the
     first page was checkpointed, so its rows would be re-scraped and
     duplicated -- those are dropped.
+
+    With `limit`, more than that many such rows raises UnaccountedRows and
+    changes nothing. The file is rewritten beside itself and renamed over, so
+    a kill mid-rewrite cannot leave a truncated CSV that every later check
+    would accept.
     """
     if not os.path.exists(csv_path):
         return 0
@@ -789,12 +849,23 @@ def drop_unfinished_rows(csv_path, keep):
     # Entity Name is column 3, Status is column 8 -- see the header written in main().
     kept = [r for r in body if len(r) > 8 and (r[3], r[8]) in keep]
     dropped = len(body) - len(kept)
+    if limit is not None and dropped > limit:
+        raise UnaccountedRows(dropped)
 
     if dropped:
-        with open(csv_path, "w", newline="", encoding="utf-8") as f:
-            writer = csv.writer(f)
-            writer.writerow(header)
-            writer.writerows(kept)
+        tmp = csv_path + ".tmp"
+        try:
+            with open(tmp, "w", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f)
+                writer.writerow(header)
+                writer.writerows(kept)
+            os.replace(tmp, csv_path)
+        except BaseException:
+            try:
+                os.remove(tmp)      # a half-written copy is of no use to anyone
+            except OSError:
+                pass
+            raise
     return dropped
 
 
@@ -1388,25 +1459,40 @@ def main():
             print(f"PARTIAL={e} | {s} | through page {page}")
         return
 
+    # Repair a torn tail before judging what the CSV holds: a header and one killed row
+    # would otherwise count as a record, and be cut to nothing a moment later.
+    repair_csv_tail(output_csv)
+
     # A progress file that vouches for finished work the CSV does not hold means
     # data/ was not restored: the progress files are tracked in git and the CSVs
     # are not, so this is exactly what a fresh clone looks like. Carrying on would
     # scrape only what the file says is left, write it under a fresh header, and
-    # stamp the dataset complete -- an empty one, as of now.
+    # stamp the dataset complete -- an empty one, as of now. (If the finished
+    # combos genuinely had no records, --fresh is the way past it.)
     if (done or partial) and not csv_has_records(output_csv):
         print(f"ERROR: {progress_path} records {len(done) + len(partial):,} combo(s) as finished "
               f"or under way, but {output_csv} "
               f"{'does not exist' if not os.path.exists(output_csv) else 'has no records'}. "
               "That is what a fresh clone looks like (the progress files are tracked in git, "
               "the CSVs are not). Nothing was scraped. Restore data/ first (README: \"Getting "
-              "the data back\"), or pass --fresh to collect everything again (20+ hours).",
+              "the data back\"), or pass --fresh to collect everything again (20+ hours) -- "
+              "which is also the way past it if those combos really had no records.",
               file=sys.stderr)
         sys.exit(1)
 
     print(f"{len(todo):,} (entity, status) combos remaining of {len(all_combos):,}")
 
-    repair_csv_tail(output_csv)
-    dropped = drop_unfinished_rows(output_csv, done | set(partial))
+    try:
+        dropped = drop_unfinished_rows(output_csv, done | set(partial), limit=MAX_UNACCOUNTED_ROWS)
+    except UnaccountedRows as e:
+        print(f"ERROR: {output_csv} holds {e.count:,} rows for combos that {progress_path} has no "
+              "record of. A scrape that was cut off leaves at most the page in flight (25 rows), "
+              "so this is not a cut-off: the progress file is probably unreadable, empty or from "
+              "another checkout, and dropping these rows would delete the dataset. Nothing was "
+              "changed. Restore the checkpoint (git checkout it; a copy of an unreadable one is "
+              "kept beside it as .corrupt), or pass --fresh to discard the CSV and start over.",
+              file=sys.stderr)
+        sys.exit(1)
     if dropped:
         print(f"Discarded {dropped:,} rows from a combo cut off before its first checkpoint.")
 

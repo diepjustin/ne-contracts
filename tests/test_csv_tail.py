@@ -80,12 +80,68 @@ def test_a_stump_longer_than_the_look_back_window_is_still_found(monkeypatch, tm
     assert path.read_bytes() == WHOLE * 50
 
 
-def test_no_newline_anywhere_in_the_window_is_left_for_a_person(monkeypatch, tmp_path, capsys):
-    """A megabyte without a newline is not a half-written row; cutting it could
-    destroy good data, so it is reported and left."""
+def test_no_newline_anywhere_in_the_window_stops_the_run_and_leaves_the_file(monkeypatch, tmp_path):
+    """A megabyte without a newline is not a half-written row; cutting it could destroy
+    good data, and appending after it would glue a row onto junk. It used to warn and
+    carry on appending."""
     monkeypatch.setattr(scrape, "CSV_TAIL_WINDOW", 16)
     data = WHOLE + b"y" * 40
     path = write(tmp_path / "rows.csv", data)
-    assert scrape.repair_csv_tail(str(path)) == 0
+    with pytest.raises(SystemExit, match="hold no newline"):
+        scrape.repair_csv_tail(str(path))
     assert path.read_bytes() == data
-    assert "Leaving the file for a person" in capsys.readouterr().out
+
+
+# --- a field with a line break in it ------------------------------------------------------------
+#
+# A newline inside a quoted field is not the end of a row, but a search for the last newline
+# cannot tell. The file is checked for an open quote instead: csv.writer doubles every quote it
+# escapes, so a whole file holds an even number of them.
+
+QUOTED = b'a,b,c\r\n1,"two\r\nlines",3\r\n4,5,6\r\n'
+
+
+def test_a_whole_file_with_a_line_break_inside_a_field_is_left_alone(tmp_path):
+    path = write(tmp_path / "rows.csv", QUOTED)
+    assert scrape.repair_csv_tail(str(path)) == 0
+    assert path.read_bytes() == QUOTED
+
+
+def test_escaped_quotes_inside_a_field_keep_the_count_even(tmp_path):
+    whole = b'a,b,c\r\n1,"5"" pipe, 3"" fitting",3\r\n'
+    path = write(tmp_path / "rows.csv", whole)
+    assert scrape.repair_csv_tail(str(path)) == 0
+
+
+def test_a_stump_cut_inside_a_quoted_field_is_still_cut(tmp_path):
+    """No line break in the field: the last newline is the end of the last whole row."""
+    stump = b'7,"ACME, IN'
+    path = write(tmp_path / "rows.csv", WHOLE + stump)
+    assert scrape.repair_csv_tail(str(path)) == len(stump)
+    assert path.read_bytes() == WHOLE
+
+
+@pytest.mark.parametrize("cut", [len(b'a,b,c\r\n1,"two\r\n'),            # right after the line break
+                                 len(b'a,b,c\r\n1,"two\r\nli')],          # a little later in the field
+                         ids=["right after the line break", "later in the field"])
+def test_a_kill_inside_a_field_that_holds_a_line_break_stops_the_run_and_changes_nothing(tmp_path, cut):
+    data = QUOTED[:cut]
+    path = write(tmp_path / "rows.csv", data)
+    with pytest.raises(SystemExit, match="inside a quoted field"):
+        scrape.repair_csv_tail(str(path))
+    assert path.read_bytes() == data
+
+
+def test_a_row_after_a_whole_quoted_field_is_cut_normally(tmp_path):
+    path = write(tmp_path / "rows.csv", QUOTED + b"7,8")
+    assert scrape.repair_csv_tail(str(path)) == 3
+    assert path.read_bytes() == QUOTED
+
+
+def test_the_quote_count_carries_across_the_chunks_it_is_read_in(monkeypatch, tmp_path):
+    monkeypatch.setattr(scrape, "QUOTE_COUNT_CHUNK", 5)
+    path = write(tmp_path / "rows.csv", QUOTED + b"7,8")
+    assert scrape.repair_csv_tail(str(path)) == 3
+    open_field = write(tmp_path / "open.csv", QUOTED[:len(b'a,b,c\r\n1,"two\r\n')])
+    with pytest.raises(SystemExit, match="inside a quoted field"):
+        scrape.repair_csv_tail(str(open_field))

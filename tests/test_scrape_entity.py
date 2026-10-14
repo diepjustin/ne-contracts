@@ -297,6 +297,57 @@ def test_drop_unfinished_rows_leaves_an_untouched_file_alone(tmp_path):
     assert scrape.drop_unfinished_rows(str(tmp_path / "missing.csv"), set()) == 0
 
 
+def write_rows(path, rows):
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        csv.writer(f, lineterminator="\n").writerows([scrape.CSV_HEADER] + rows)
+    return path
+
+
+def test_more_unaccounted_rows_than_a_cut_off_scrape_can_leave_are_refused_and_nothing_changes(tmp_path):
+    """The progress file is what vouches for the rows. If it says nothing about 1,001 of them,
+    the file is wrong, not the CSV: dropping them would delete the dataset."""
+    path = write_rows(tmp_path / "rows.csv", [csv_row(i, "Active", "A") for i in range(1001)])
+    before = path.read_bytes()
+    with pytest.raises(scrape.UnaccountedRows) as stopped:
+        scrape.drop_unfinished_rows(str(path), set(), limit=1000)
+    assert stopped.value.count == 1001
+    assert path.read_bytes() == before and not (tmp_path / "rows.csv.tmp").exists()
+
+
+def test_exactly_the_limit_is_still_a_cut_off_scrape(tmp_path):
+    path = write_rows(tmp_path / "rows.csv", [csv_row(i, "Active", "A") for i in range(1000)])
+    assert scrape.drop_unfinished_rows(str(path), set(), limit=1000) == 1000
+
+
+def test_the_limit_is_what_main_passes_and_it_is_about_a_page():
+    assert scrape.MAX_UNACCOUNTED_ROWS == 1000
+
+
+def test_a_kill_during_the_rewrite_leaves_the_original_csv_whole(tmp_path, monkeypatch):
+    """It used to open the CSV for writing in place, so an interrupted rewrite left a
+    truncated file that every later check would accept."""
+    path = write_rows(tmp_path / "rows.csv", [csv_row(i, "Active", "A") for i in range(4)]
+                      + [csv_row(9, "Active", "B")])
+    before = path.read_bytes()
+    real_writer = csv.writer
+
+    class Dies:
+        def __init__(self, f):
+            self.inner = real_writer(f)
+
+        def writerow(self, row):
+            self.inner.writerow(row)
+
+        def writerows(self, rows):
+            raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(scrape.csv, "writer", lambda f: Dies(f))
+    with pytest.raises(OSError):
+        scrape.drop_unfinished_rows(str(path), {("A", "Active")})
+    assert path.read_bytes() == before
+    assert not (tmp_path / "rows.csv.tmp").exists(), "the half-written copy is removed"
+
+
 def test_progress_round_trips_with_page_positions(tmp_path):
     path = str(tmp_path / "progress.json")
     scrape.save_progress(path, {("A", "Active"), ("B", "Expired")}, {("C", "Active"): 17})

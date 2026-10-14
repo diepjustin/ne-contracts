@@ -101,11 +101,69 @@ def test_a_header_only_csv_is_refused_too(run, capsys):
     assert run.calls == {"scraped": [], "stamped": []}
 
 
+def test_a_killed_first_row_does_not_count_as_a_record(run, capsys):
+    """The tail is repaired before the CSV is judged: a header and a row cut short would
+    otherwise pass as 'has records', be cut to nothing a moment later, and leave every
+    combo marked finished over an empty file."""
+    finish_every_combo()
+    with open(CSV, "wb") as f:
+        f.write((",".join(scrape.CSV_HEADER) + "\r\nD1,CN,051,Chado").encode())
+    assert "has no records" in refused(run, capsys)
+    assert run.calls == {"scraped": [], "stamped": []}
+
+
+def test_the_refusal_says_what_to_do_when_the_combos_really_had_no_records(run, capsys):
+    finish_every_combo()
+    assert "if those combos really had no records" in refused(run, capsys)
+
+
 def test_a_run_that_was_under_way_is_refused_when_its_rows_are_gone(run, capsys):
     """Progress that only has a page position is still progress the CSV cannot back."""
     scrape.save_progress(PROGRESS, set(), {(ENTITY, "Active"): 12})
     refused(run, capsys)
     assert run.calls["scraped"] == []
+
+
+# --- a progress file that does not describe the CSV --------------------------------------
+#
+# The other way round. The checkpoint is what vouches for the rows in the CSV; with none, every
+# row looks like it belongs to a combo that was cut off before its first page, and
+# drop_unfinished_rows used to delete them all so they would be scraped again -- 20 hours of
+# work, from a checkpoint that was only unreadable.
+
+def populated(count, status="Expired"):
+    write_csv(*[row(status=status) for _ in range(count)])
+
+
+@pytest.mark.parametrize("content", ["{not json", "", "[]", '{"done": []}'],
+                         ids=["unreadable", "empty file", "an empty list", "nothing done"])
+def test_a_checkpoint_that_says_nothing_does_not_get_a_populated_csv_deleted(run, capsys, content):
+    populated(scrape.MAX_UNACCOUNTED_ROWS + 1)
+    with open(PROGRESS, "w", encoding="utf-8") as f:
+        f.write(content)
+    before = open(CSV, "rb").read()
+
+    err = refused(run, capsys)
+
+    assert "1,001 rows for combos that" in err and "not a cut-off" in err and "--fresh" in err
+    assert open(CSV, "rb").read() == before
+    assert run.calls == {"scraped": [], "stamped": []}
+
+
+def test_an_unreadable_checkpoint_leaves_a_copy_for_a_person(run, capsys):
+    populated(scrape.MAX_UNACCOUNTED_ROWS + 1)
+    with open(PROGRESS, "w", encoding="utf-8") as f:
+        f.write("<<<<<<< HEAD")
+    refused(run, capsys)
+    assert open(PROGRESS + ".corrupt", encoding="utf-8").read() == "<<<<<<< HEAD"
+
+
+def test_a_page_in_flight_is_still_dropped_and_scraped_again(run, capsys):
+    """What drop_unfinished_rows is for: the rows of a page that was written but never checkpointed."""
+    populated(25)
+    run("--entity", ENTITY)
+    assert "Discarded 25 rows" in capsys.readouterr().out
+    assert run.calls["scraped"] == [(ENTITY, "Active"), (ENTITY, "Expired")]
 
 
 # --- what it must leave alone ----------------------------------------------------------

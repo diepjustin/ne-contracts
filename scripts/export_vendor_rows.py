@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import csv
 import json
+import math
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -75,9 +76,15 @@ csv.field_size_limit(sys.maxsize)
 
 def to_amount(raw: str) -> float:
     try:
-        return round(float((raw or "").replace("$", "").replace(",", "").strip()), 2)
+        value = round(float((raw or "").replace("$", "").replace(",", "").strip()), 2)
     except ValueError:
         return 0.0
+    # float() accepts "NaN" and "inf", and json.dumps writes those as bare NaN /
+    # Infinity, which JSON.parse in ne-connect rejects. Its fetch's
+    # .catch(() => ({})) then turns that into an empty shard, so every vendor under
+    # that letter would show no itemized rows, with no error anywhere. Same rule as
+    # build_site.to_amount: anything that is not a finite number is 0.0.
+    return value if math.isfinite(value) else 0.0
 
 
 def shard_key(vendor: str) -> str:

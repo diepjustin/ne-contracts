@@ -4,6 +4,8 @@ import json
 import os
 import sys
 
+import pytest
+
 SCRIPTS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts")
 sys.path.insert(0, SCRIPTS)
 
@@ -113,6 +115,37 @@ def test_main_writes_a_shard_from_state_agency_rows_alone(tmp_path, monkeypatch)
 
 def test_unparseable_amount_defaults_to_zero():
     assert export_vendor_rows.to_amount("not a number") == 0.0
+
+
+@pytest.mark.parametrize("raw", ["NaN", "nan", "inf", "-inf", "Infinity", "-Infinity", "$1e999"])
+def test_a_non_finite_amount_defaults_to_zero_too(raw):
+    assert export_vendor_rows.to_amount(raw) == 0.0
+
+
+@pytest.mark.parametrize("raw, expected", [("$1,234.50", 1234.5), ("", 0.0), (None, 0.0), ("-$5.00", -5.0)])
+def test_ordinary_amounts_are_untouched(raw, expected):
+    assert export_vendor_rows.to_amount(raw) == expected
+
+
+def test_a_shard_with_a_non_finite_amount_is_still_strict_json(tmp_path, monkeypatch):
+    """json.dumps writes NaN and Infinity as bare words, which JSON.parse rejects; ne-connect's
+    fetch then swallows the error and the whole shard comes up empty."""
+    rows = (
+        "1,CN,050,Some College,ACME CO,NaN,01/06/2014,01/06/2030,Active,https://example.gov/1,\n"
+        "2,CN,050,Some College,ACME CO,inf,01/06/2014,01/06/2030,Active,https://example.gov/2,\n"
+        "3,CN,050,Some College,ACME CO,$7.00,01/06/2014,01/06/2030,Active,https://example.gov/3,\n"
+    )
+    monkeypatch.setattr(export_vendor_rows, "DATA_DIR", _write_contracts(tmp_path, rows).parent)
+    out_dir = tmp_path / "d" / "rows"
+    monkeypatch.setattr(export_vendor_rows, "OUT_DIR", out_dir)
+
+    assert export_vendor_rows.main() == 0
+
+    def refuse(constant):
+        raise ValueError(f"not strict JSON: {constant}")
+
+    shard = json.loads((out_dir / "A.json").read_text(encoding="utf-8"), parse_constant=refuse)
+    assert [row[3] for row in shard["ACME CO"]] == [0.0, 0.0, 7.0]
 
 
 def test_shard_key_uppercases_the_first_letter():

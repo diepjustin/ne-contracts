@@ -765,8 +765,9 @@ def repair_csv_tail(csv_path):
     in a field that contains a line break, and a search for the last newline cannot
     tell that line break from the end of a row: it would cut inside the field, or
     leave the open quote, and the next row appended would be swallowed by it. No
-    field in the 744,100 rows of 14 Oct 2026 holds a line break, so this has not
-    happened; if it does it is loud here, not a garbled row in the nightly build.
+    field in the 744,100 rows of the local CSVs (a 17 Sep 2026 snapshot, scanned on
+    14 Oct; the production copy in the Actions cache was not) holds a line break, so
+    this has not been seen; if it is, it is loud here, not a garbled row in the build.
     """
     if not os.path.exists(csv_path):
         return 0

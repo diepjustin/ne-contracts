@@ -67,14 +67,19 @@ DEFAULT_WORKERS = 4
 
 CHECKPOINT_EVERY = 20
 
-# Matches extract_text.STORE_CHARS exactly -- ocr_pilot.py never captures more
-# than this per document in the first place, so anything lower than 4000 was
-# discarding OCR text already paid for and sitting on disk for free. Raised
-# from 3000 on 2026-09-17 after a production regression across 4,620 records
-# found real, measurable per-character cost, but also found 59.5% of
-# documents already exceeded 3000 chars -- meaning over half the corpus was
-# being summarized from a partial view for no reason, not for speed either
-# (the discarded chars were never re-OCR'd or re-fetched, just thrown away).
+# How much of a document's OCR text reaches the model. It matched
+# extract_text.STORE_CHARS (4000) when this was written, because ocr_pilot.py
+# never captured more than that per document. Since 2026-09-17 it captures up to
+# DEFAULT_STORE_CHARS (100,000) characters and 200 pages, so this is now a
+# separate and much smaller cap: of the 105,460 OCR'd documents 48.7% are longer
+# than it, and about three quarters of all OCR'd characters lie beyond it and are
+# never sent. Raised from 3000 on 2026-09-17 after a production regression across
+# 4,620 records found real, measurable per-character cost.
+#
+# Raising it again needs options.num_ctx set explicitly too: Ollama's default
+# context is derived from the VRAM it finds (4096 tokens here), a prompt at this
+# cap averages about 820 tokens, and noisy OCR tokenises densely. Whether longer
+# input makes better summaries has not been measured.
 MAX_INPUT_CHARS = 4000
 
 # The model returns this literal token rather than guessing when the OCR
@@ -160,7 +165,15 @@ def load_checkpoint():
                   "of a partial line. That document is simply retried.")
             os.truncate(OUT_JSONL, start)
             break
-        store[rec["tok"]] = rec
+        tok = rec.get("tok")
+        if not tok:
+            # A worker that died leaves a record with no token ({"crash": ...} or
+            # {"error": ...}). Indexing it raised KeyError, and every later run
+            # died the same way until someone edited the file by hand.
+            print(f"    Warning: {OUT_JSONL} line {i + 1} has no token (a crashed worker's "
+                  "record); skipping it.")
+            continue
+        store[tok] = rec
     return store
 
 

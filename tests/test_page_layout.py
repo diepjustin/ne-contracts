@@ -171,3 +171,29 @@ def test_the_evaluator_reads_media_queries_the_way_a_browser_does():
     assert not matches("(prefers-color-scheme: dark)", 1280, 800)
     assert matches("(min-width: 600px) and (max-width: 900px)", 700, 500)
     assert not matches("(min-width: 600px) and (max-width: 900px)", 901, 500)
+
+
+def test_sticky_never_returns_in_the_narrow_band_where_the_bar_is_tallest():
+    """Between 601 and 720px wide the bar wraps to 596-732px on a phone and the
+    page's own breakpoint is what keeps it unpinned. The check above walks the
+    bands from 721px up; this one walks the band beneath, against the shortest
+    bar measured there (596px), so lowering the breakpoint below 720px fails
+    here even if no named device sits in the gap. A range stepped by 5 from
+    601 never reaches 720, the edge itself, so it is added by hand."""
+    html = read_page()
+    parsed = page_rules(html)
+    floor = min_table_h(html)
+    worst_case_bar = 596
+    for width in list(range(601, 721, 5)) + [720]:
+        for height in range(300, 1400, 5):
+            if computed("position", ".controls", width, height, parsed) != "sticky":
+                continue
+            top = int(computed("top", ".controls", width, height, parsed)[:-len("px")])
+            assert height >= top + worst_case_bar + floor, (
+                "sticky at %dx%d, where even the shortest narrow-band bar leaves the table %dpx"
+                % (width, height, height - top - worst_case_bar))
+
+
+def test_the_breakpoint_edge_itself_is_unpinned():
+    assert computed("position", ".controls", 720, 1000) == "static"
+    assert computed("position", ".controls", 721, 1000) == "sticky"

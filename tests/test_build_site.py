@@ -652,3 +652,178 @@ def test_a_twin_is_only_dropped_for_a_row_that_is_published(tmp_path):
     second = dict(zip(header, _row("7", "Expired", "$2.00", "dn7")))
     assert build_site.twin_key(first) in keys
     assert build_site.twin_key(second) not in keys
+
+
+# --- "Last updated" ---------------------------------------------------------
+#
+# The state dataset's stamp froze on 24 Sep 2026 while the other two advanced,
+# and the page went on showing the oldest of the three -- which is the rule, and
+# it was right. Nothing pinned it. Turning min() into max(), or dropping the
+# guard for a dataset with no stamp, left every test green and would have made
+# the page overstate its freshness (or crash the build) without anyone seeing.
+
+DATASETS = ("contract", "purchase-order", "state")
+FRESH = "2026-10-12T03:07:01+00:00"
+
+
+def _stamps(tmp_path, monkeypatch, content):
+    """Point build_site at a scrape_meta.json holding `content` (None: no file)."""
+    path = tmp_path / "scrape_meta.json"
+    if content is not None:
+        path.write_text(content if isinstance(content, str) else json.dumps(content),
+                        encoding="utf-8")
+    monkeypatch.setattr(build_site, "SCRAPE_META", str(path))
+
+
+def test_the_stamp_covers_exactly_the_datasets_the_scraper_stamps():
+    import scrape
+
+    assert set(build_site.DATA) == set(DATASETS)
+    assert set(scrape.DATASETS) == set(DATASETS)
+
+
+def test_the_stalest_stamp_wins(monkeypatch, tmp_path):
+    """Contract and purchase-order stamped on 12 Oct, state stuck on 24 Sep: the
+    page must say 24 Sep, so a stale dataset stays visible."""
+    _stamps(tmp_path, monkeypatch, {"contract": FRESH,
+                                    "purchase-order": "2026-10-12T03:09:30+00:00",
+                                    "state": "2026-09-24T03:07:01+00:00"})
+    assert build_site.scraped_at() == "2026-09-24T03:07:01+00:00"
+
+
+def test_the_stalest_stamp_wins_whichever_dataset_it_is(monkeypatch, tmp_path):
+    for stale in DATASETS:
+        _stamps(tmp_path, monkeypatch, {k: (("2026-09-24T03:07:01+00:00") if k == stale else FRESH)
+                                        for k in DATASETS})
+        assert build_site.scraped_at() == "2026-09-24T03:07:01+00:00", stale
+
+
+@pytest.mark.parametrize("missing", DATASETS)
+def test_a_dataset_with_no_stamp_means_no_stamp_at_all(monkeypatch, tmp_path, missing):
+    """Data from before scrape_meta.json existed has no stamp for some type; the
+    page then falls back rather than quote the other two as if they covered it."""
+    _stamps(tmp_path, monkeypatch, {k: FRESH for k in DATASETS if k != missing})
+    assert build_site.scraped_at() is None
+
+
+@pytest.mark.parametrize("content", [None, "", "{not json"])
+def test_a_missing_or_unreadable_stamp_file_means_no_stamp(monkeypatch, tmp_path, content):
+    _stamps(tmp_path, monkeypatch, content)
+    assert build_site.scraped_at() is None
+
+
+def test_mixed_naive_and_aware_stamps_mean_no_stamp_rather_than_a_crash(monkeypatch, tmp_path):
+    """min() cannot order a naive time against an aware one: TypeError. The build
+    must fall back, not stop."""
+    _stamps(tmp_path, monkeypatch, {"contract": FRESH, "purchase-order": "2026-10-12T03:07:01",
+                                    "state": FRESH})
+    assert build_site.scraped_at() is None
+
+
+def test_an_unparseable_stamp_means_no_stamp(monkeypatch, tmp_path):
+    _stamps(tmp_path, monkeypatch, {"contract": FRESH, "purchase-order": "last night",
+                                    "state": FRESH})
+    assert build_site.scraped_at() is None
+
+
+# One case per column of the twin key. The key is every CSV column but Status,
+# and each column is a separate way for a pair to be two real records: an
+# Expired row may be dropped only when it matches its Active row in all ten.
+# The names are spelled out here, not read from build_site.TWIN_COLUMNS: a
+# change that dropped a column from the key would otherwise drop its own test.
+
+CSV_COLUMNS = ["Document Number", "Document Type", "Entity Code", "Entity Name", "Vendor",
+               "Amount", "Begin Date", "End Date", "Status", "Detail URL", "View URL"]
+
+
+@pytest.mark.parametrize("column,other", [
+    ("Document Number", "1454300"),
+    ("Document Type", "O9"),
+    ("Entity Code", "028"),
+    ("Entity Name", "Aeronautics, Department of"),
+    ("Vendor", "OTHER PAVING"),
+    ("Amount", "$4,921.00"),
+    ("Begin Date", "08/14/2026"),
+    ("End Date", "01/01/2100"),
+    ("Detail URL", DETAIL.format(dn="dn-other")),
+    ("View URL", VIEW.format(tok="t-other")),
+])
+def test_a_pair_differing_in_this_column_alone_is_kept(monkeypatch, tmp_path, column, other):
+    active = _row("1454299", "Active", "$4,920.00", "dn1")
+    expired = _row("1454299", "Expired", "$4,920.00", "dn1")
+    expired[CSV_COLUMNS.index(column)] = other
+
+    payload = _build(monkeypatch, tmp_path, [expired, active])
+
+    assert payload["meta"]["count"] == 2, f"an Expired row that differs in {column} was dropped"
+
+
+def test_the_twin_rule_covers_every_column_but_status():
+    assert list(build_site.TWIN_COLUMNS) == [c for c in CSV_COLUMNS if c != "Status"]
+
+
+# --- the branches of the carry that decide a row's source -----------------------
+#
+# Each of these pins one line of carry_descriptions_forward / load_descriptions
+# that the tests above leave unguarded: a mutant that changes it still passes.
+
+def test_a_better_ranked_document_displaces_a_carried_description(monkeypatch, tmp_path):
+    """Carried from the fifth document; scope.jsonl reads the third. The third
+    ranks better (1 + 2 against 1 + 4), so it replaces the carried text and
+    takes its place -- which is what a fresh build would have published."""
+    _previous_build(tmp_path, [CW8847[0]], {0: b"FROM THE FIFTH"}, {0: COVER_SHEET}, {0: 4},
+                    lists={0: CW8847})
+    third = [{"tok": CW8847[2], "doc": "CW8847", "source": "cover_sheet",
+              "description": "FROM THE THIRD"}]
+    descriptions, _sources, documents = _carry(
+        monkeypatch, tmp_path, [CW8847[0]], [_record(CW8847)], third)
+    assert (descriptions[0], documents[0]) == (b"FROM THE THIRD", 2)
+
+
+def test_the_same_document_read_again_overlays_its_carried_description(monkeypatch, tmp_path):
+    """Equal rank is the same document, read more recently: scope.jsonl wins, or
+    a corrected parse could never replace the text a night carried forward."""
+    _previous_build(tmp_path, [CW8847[0]], {0: b"OLD TEXT"}, {0: COVER_SHEET}, {0: 2},
+                    lists={0: CW8847})
+    reread = [{"tok": CW8847[2], "doc": "CW8847", "source": "cover_sheet",
+               "description": "NEW TEXT"}]
+    descriptions, _sources, documents = _carry(
+        monkeypatch, tmp_path, [CW8847[0]], [_record(CW8847)], reread)
+    assert (descriptions[0], documents[0]) == (b"NEW TEXT", 2)
+
+
+def test_two_rows_sharing_a_view_url_keep_their_text_but_only_one_claims_the_document(
+        monkeypatch, tmp_path):
+    """39 rows on 29 Sep 2026 share a View URL with another row. The token is
+    listed for one of them only, so the other keeps its text and claims no
+    document: marking position 0 on both would print "description read from
+    this one" beside a document that belongs to the other row."""
+    shared = _tok(7)
+    _previous_build(tmp_path, [shared, shared], {0: b"SHARED ROW TEXT", 1: b"SHARED ROW TEXT"},
+                    {0: COVER_SHEET, 1: COVER_SHEET}, {0: 0, 1: 0}, lists={})
+    descriptions, _sources, documents = _carry(
+        monkeypatch, tmp_path, [shared, shared], [], [])
+    assert descriptions == {0: b"SHARED ROW TEXT", 1: b"SHARED ROW TEXT"}
+    assert documents == {0: NO_DOCUMENT, 1: 0}
+
+
+def test_a_stored_position_past_the_documents_listed_today_is_not_a_claim(monkeypatch, tmp_path):
+    """The previous build said position 4; its list now has three documents (one
+    was withdrawn). Indexing it would raise, and guessing would name a document
+    that is not the source. The text stays; the document is unknown."""
+    _previous_build(tmp_path, [CW8847[0]], {0: b"SOME CARRIED TEXT"}, {0: COVER_SHEET}, {0: 4},
+                    lists={0: CW8847[:3]})
+    descriptions, _sources, documents = _carry(
+        monkeypatch, tmp_path, [CW8847[0]], [_record(CW8847[:3])], [])
+    assert descriptions[0] == b"SOME CARRIED TEXT"
+    assert documents[0] == NO_DOCUMENT
+
+
+def test_a_single_document_row_with_a_nonzero_stored_position_is_not_placed(monkeypatch, tmp_path):
+    """A row with one document ships no list, and its only document is position
+    0 and nothing else. A stored 3 beside no list is contradictory, so it claims
+    nothing -- not the row's own document."""
+    _previous_build(tmp_path, [_tok(9)], {0: b"ORDINARY ROW"}, {0: COVER_SHEET}, {0: 3}, lists={})
+    descriptions, _sources, documents = _carry(monkeypatch, tmp_path, [_tok(9)], [], [])
+    assert descriptions[0] == b"ORDINARY ROW"
+    assert documents[0] == NO_DOCUMENT

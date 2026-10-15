@@ -4,6 +4,8 @@ import json
 import os
 import sys
 
+import pytest
+
 SCRIPTS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts")
 sys.path.insert(0, SCRIPTS)
 
@@ -115,6 +117,37 @@ def test_unparseable_amount_defaults_to_zero():
     assert export_vendor_rows.to_amount("not a number") == 0.0
 
 
+@pytest.mark.parametrize("raw", ["NaN", "nan", "inf", "-inf", "Infinity", "-Infinity", "$1e999"])
+def test_a_non_finite_amount_defaults_to_zero_too(raw):
+    assert export_vendor_rows.to_amount(raw) == 0.0
+
+
+@pytest.mark.parametrize("raw, expected", [("$1,234.50", 1234.5), ("", 0.0), (None, 0.0), ("-$5.00", -5.0)])
+def test_ordinary_amounts_are_untouched(raw, expected):
+    assert export_vendor_rows.to_amount(raw) == expected
+
+
+def test_a_shard_with_a_non_finite_amount_is_still_strict_json(tmp_path, monkeypatch):
+    """json.dumps writes NaN and Infinity as bare words, which JSON.parse rejects; ne-connect's
+    fetch then swallows the error and the whole shard comes up empty."""
+    rows = (
+        "1,CN,050,Some College,ACME CO,NaN,01/06/2014,01/06/2030,Active,https://example.gov/1,\n"
+        "2,CN,050,Some College,ACME CO,inf,01/06/2014,01/06/2030,Active,https://example.gov/2,\n"
+        "3,CN,050,Some College,ACME CO,$7.00,01/06/2014,01/06/2030,Active,https://example.gov/3,\n"
+    )
+    monkeypatch.setattr(export_vendor_rows, "DATA_DIR", _write_contracts(tmp_path, rows).parent)
+    out_dir = tmp_path / "d" / "rows"
+    monkeypatch.setattr(export_vendor_rows, "OUT_DIR", out_dir)
+
+    assert export_vendor_rows.main() == 0
+
+    def refuse(constant):
+        raise ValueError(f"not strict JSON: {constant}")
+
+    shard = json.loads((out_dir / "A.json").read_text(encoding="utf-8"), parse_constant=refuse)
+    assert [row[3] for row in shard["ACME CO"]] == [0.0, 0.0, 7.0]
+
+
 def test_shard_key_uppercases_the_first_letter():
     assert export_vendor_rows.shard_key("amazon capital services") == "A"
 
@@ -158,3 +191,51 @@ def test_main_clears_stale_shards_from_a_previous_run(tmp_path, monkeypatch):
     export_vendor_rows.main()
 
     assert not (out_dir / "Z.json").exists()
+
+
+# --- the contract with ne-connect ------------------------------------------------------------
+#
+# Two things here are mirrored by a copy in the ne-connect repository, and a change to either
+# side alone breaks the other without an error on this side:
+#
+#   ne-connect/ingest/sources.py    CONTRACT_FILES       (the same three CSVs)
+#   ne-connect/build/build_site.py  contractShardKey()   (a JavaScript twin of shard_key)
+#
+# So they are pinned exactly. Changing one of these tests is the reminder to change the other
+# repository in the same sitting; see README.md, "Downstream consumers".
+
+def test_the_files_exported_are_exactly_the_three_ne_connect_totals_read():
+    assert export_vendor_rows.CONTRACT_FILES == (
+        "nu_contracts.csv", "nu_purchase_orders.csv", "state_agencies.csv")
+
+
+@pytest.mark.parametrize("vendor, key", [
+    ("AMAZON CAPITAL SERVICES", "A"),
+    ("amazon capital services", "A"),            # upper-cased
+    ("  acme co", "A"),                          # leading space is stripped first
+    ("\tZED INC", "Z"),                          # a tab is too, and Z is a real shard
+    (" ACME CO", "A"),                      # so is a no-break space (JavaScript's trim does the same)
+    ("Zed", "Z"),
+    ("3M COMPANY", "_"),                         # a digit
+    ("1st Choice Printing", "_"),
+    ("-DASH CO", "_"),                           # punctuation
+    ("'S GRAVENHAGE", "_"),
+    ("(PARENTHESIS) INC", "_"),
+    ("", "_"),
+    ("   ", "_"),                                # nothing left after the strip
+    (None, "_"),
+    ("ÉCOLE", "_"),                         # an accented capital sorts after Z
+    ("école", "_"),                         # and so does its lower case once upper-cased
+    ("ßeta", "SS"),                         # a quirk, deliberately pinned: ss is what upper() makes of the
+                                                 # sharp s, and ne-connect's toUpperCase() makes the same two
+                                                 # letters, so both sides ask for a shard called SS. Fixing it on
+                                                 # one side alone would send that vendor to a file that is not there.
+])
+def test_shard_key_table(vendor, key):
+    assert export_vendor_rows.shard_key(vendor) == key
+
+
+def test_every_ascii_letter_is_its_own_shard():
+    import string
+    keys = {export_vendor_rows.shard_key(letter.lower() + "x") for letter in string.ascii_uppercase}
+    assert keys == set(string.ascii_uppercase)

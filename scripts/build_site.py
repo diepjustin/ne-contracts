@@ -33,6 +33,7 @@ import csv
 import datetime
 import json
 import gzip
+import math
 import os
 import random
 import re
@@ -125,6 +126,17 @@ def load_document_counts(detail_urls, view_tokens):
                             "clamped": clamped}
 
 
+# A u8 column holds the values 0..255, so a dictionary it indexes can have 256 entries.
+U8_ENTRIES = 256
+
+
+def check_u8_dictionary(name, size):
+    """Stop the build, by name, when a dictionary has outgrown the u8 column that indexes it."""
+    if size > U8_ENTRIES:
+        sys.exit(f"{name} dictionary has {size} entries — the column is a u8 "
+                 f"(at most {U8_ENTRIES}); widen it")
+
+
 def load_entities():
     """Every entity the scraper knows about, alphabetized.
 
@@ -215,9 +227,14 @@ def to_ymd(mdy):
 
 def to_amount(raw):
     try:
-        return round(float(raw.replace("$", "").replace(",", "").strip()), 2)
+        value = round(float(raw.replace("$", "").replace(",", "").strip()), 2)
     except ValueError:
         return 0.0
+    # float() accepts "NaN" and "inf". NaN != NaN, so a single one makes the
+    # round-trip comparison report a whole 100,000-row chunk as differing, and
+    # an infinite amount is not a figure anyone should be shown: both read as
+    # unparseable, like any other text that is not a number.
+    return value if math.isfinite(value) else 0.0
 
 
 def scraped_at():
@@ -374,6 +391,7 @@ def main():
 
     def adn_idx(triple):
         if triple not in adn_index:
+            check_u8_dictionary("adnIdx", len(adn) + 1)
             adn_index[triple] = len(adn)
             adn.append(list(triple))
         return adn_index[triple]
@@ -383,6 +401,7 @@ def main():
 
     def type_idx(code):
         if code not in type_index:
+            check_u8_dictionary("type", len(types) + 1)
             type_index[code] = len(types)
             types.append(code)
         return type_index[code]
@@ -447,18 +466,29 @@ def main():
                     vendors[name] = len(vendors)
                 vi = vendors[name]
 
-                dn = ""
-                ui = 0  # index into the (A, D, N) table; unused when no detail URL
+                # Every row is addressed by its Detail URL: scrape.py keys records on it,
+                # and the page builds each row's document-list link from the payload's
+                # A/D/N/DT/V and the row's DN token, with no notion of a row that has none.
+                # So a row without one cannot be published, and neither can one whose URL
+                # has no DN -- an empty token would be indistinguishable from "not an
+                # exception" in verify_payload and the page. Both used to die much later,
+                # in verification, with 'DN token round trip failed' and no hint why.
                 detail = r["Detail URL"]
-                if detail:
-                    q = parse_qs(urlparse(detail).query)
-                    dn = q.get("DN", [""])[0]
-                    ui = adn_idx((q.get("A", [""])[0], q.get("D", [""])[0], q.get("N", [""])[0]))
-                    const_DT.setdefault(ti, q.get("DT", [""])[0])
-                    v = q.get("V", [""])[0]
-                    if vi in vendor_tokens and vendor_tokens[vi] != v:
-                        sys.exit(f"vendor {name!r} maps to two V tokens — assumption broken")
-                    vendor_tokens[vi] = v
+                if not detail:
+                    sys.exit(f"{path}: document {r['Document Number']!r} at {ent!r} has no Detail URL. "
+                             "Every row is addressed by it, so a row without one cannot be "
+                             "published; find the record in the CSV and decide what it should be.")
+                q = parse_qs(urlparse(detail).query)
+                dn = q.get("DN", [""])[0]
+                if not dn:
+                    sys.exit(f"{path}: document {r['Document Number']!r} at {ent!r} has a Detail URL "
+                             f"with no DN token, so its link cannot be rebuilt: {detail[:120]}")
+                ui = adn_idx((q.get("A", [""])[0], q.get("D", [""])[0], q.get("N", [""])[0]))
+                const_DT.setdefault(ti, q.get("DT", [""])[0])
+                v = q.get("V", [""])[0]
+                if vi in vendor_tokens and vendor_tokens[vi] != v:
+                    sys.exit(f"vendor {name!r} maps to two V tokens — assumption broken")
+                vendor_tokens[vi] = v
 
                 view = r["View URL"]
                 if view and not view.startswith(VIEW_BASE):
@@ -493,11 +523,12 @@ def main():
     n = len(docs)
 
     # The u8 columns index dictionaries that are small today but not bounded by
-    # anything except the state's own data. Fail here rather than silently
-    # wrapping a value and mislabelling every affected row.
+    # anything except the state's own data. adn_idx and type_idx check as each
+    # entry is added, so the message below is reachable before array('B') raises
+    # OverflowError on the first row past the limit; this pass is for the entity
+    # dictionary, which is fixed by scrape.py rather than discovered from the data.
     for name, size in (("entity", len(ENTITIES)), ("type", len(types)), ("adnIdx", len(adn))):
-        if size > 255:
-            sys.exit(f"{name} dictionary has {size} entries — the column is a u8; widen it")
+        check_u8_dictionary(name, size)
 
     # Which documents each row publishes, joined on from the backfill's log.
     # Unasked rows stay DOC_COUNT_UNKNOWN, so a half-finished backfill claims
@@ -1332,19 +1363,55 @@ def load_ai_summaries(view_tokens):
         return summaries, sources
 
     matched = unmatched = skipped = 0
-    with open(AI_SUMMARIES_JSONL, encoding="utf-8") as f:
-        for line in f:
-            record = json.loads(line)
-            if record.get("unclear") or not record.get("summary"):
-                skipped += 1
-                continue
-            row = row_of.get(record["tok"])
-            if row is None:
-                unmatched += 1
-                continue
-            summaries[row] = record["summary"].encode("utf-8")
-            sources[row] = AI_MODEL_CODE.get(record.get("model") or "", 0)
-            matched += 1
+    unknown_models = collections.Counter()
+    # Bytes, split on b"\n" alone, each line decoded on its own -- the way
+    # scrape.load_documents reads its log. str.splitlines() would also break at U+0085,
+    # U+2028 and U+2029, which json.dumps(ensure_ascii=False), as generate_ai_summaries
+    # writes, leaves raw inside a string: a perfectly valid record cut in two. And a
+    # strict decode of the whole file raises for one cut inside a multi-byte character,
+    # which is just how a copy taken mid-write ends; per line, that is one bad line.
+    with open(AI_SUMMARIES_JSONL, "rb") as f:
+        blobs = f.read().split(b"\n")
+    last = max((n for n, blob in enumerate(blobs, 1) if blob.strip()), default=0)
+    for number, blob in enumerate(blobs, 1):
+        if not blob.strip():
+            continue
+        try:
+            record = json.loads(blob.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as e:
+            problem = e.msg if isinstance(e, json.JSONDecodeError) else f"not UTF-8: {e.reason}"
+            # The asset is cut from a file a job appends to, so it can be taken
+            # mid-write: a torn last line is expected, and scrape.load_documents
+            # treats it the same way. Anything after a bad line cannot be trusted.
+            if number != last:
+                sys.exit(f"{AI_SUMMARIES_JSONL} line {number} is not valid JSON ({problem}), and "
+                         "more lines follow it; the entries after it cannot be trusted.")
+            print(f"note: {AI_SUMMARIES_JSONL} ends mid-write; ignoring its last line "
+                  f"(line {number})")
+            break
+        if record.get("unclear") or not record.get("summary"):
+            skipped += 1
+            continue
+        row = row_of.get(record["tok"])
+        if row is None:
+            unmatched += 1
+            continue
+        model = record.get("model") or ""
+        if model not in AI_MODEL_CODE:
+            unknown_models[model or "(missing)"] += 1
+            continue
+        summaries[row] = record["summary"].encode("utf-8")
+        sources[row] = AI_MODEL_CODE[model]
+        matched += 1
+
+    if unknown_models:
+        # Fail here, naming the cause. A row published with source 0 beside its
+        # text fails verify_ai_summaries later with "text and source disagree",
+        # which says nothing about a model being absent from AI_MODELS.
+        sys.exit("AI summaries from a model this build does not list: "
+                 + ", ".join(f"{m!r} ({n:,} rows)" for m, n in unknown_models.most_common())
+                 + ". Add it to AI_MODELS in scripts/build_site.py - append only, because "
+                 "the position is the code stored in aisrc.bin.")
 
     print(f"AI summaries  : {matched:,} joined to rows"
           + (f", {unmatched:,} unmatched" if unmatched else "")

@@ -216,3 +216,277 @@ def test_a_same_day_rerun_reports_each_entity_once(monkeypatch, tmp_path):
     assert entry["entities"][CAMPUS]["flipped_to_expired"] == 1
     assert entry["totals"]["previously_active"] == 15
     assert stamped(tmp_path)
+
+
+# --- the dataset-wide circuit breaker -----------------------------------------
+#
+# refuse_flips judges one entity at a time and lets an entity of fewer than five active
+# records lose all of them. On a night the state answers empty for everything, the large
+# entities are refused and the small ones flip to Expired -- 17 of them, 29 records, on the
+# 28 Sep 2026 release -- with nothing to mark the night bad, and nothing restores them.
+
+def test_an_outage_night_flips_nothing_for_any_entity(monkeypatch, tmp_path, capsys):
+    rows = [row(n) for n in range(60)] + [row(900 + n, OTHER) for n in range(3)]
+    out = night(monkeypatch, tmp_path, rows, {})          # the state answers empty for both
+
+    assert all(r[8] == "Active" for r in out), "the small entity's three records must not flip either"
+    assert not stamped(tmp_path)
+    assert report(tmp_path) == [], "nothing flipped, so the guard rail has nothing to see"
+    printed = capsys.readouterr().out
+    assert "::error title=Daily scrape: the state looks like it is answering empty::contract:" in printed
+    assert "63 of 63 active records (100%) vanished across the dataset" in printed
+    assert "small ones included" in printed
+
+
+def test_without_an_outage_the_small_entity_still_flips(monkeypatch, tmp_path, capsys):
+    """The same three records, on a night the large entity answers normally."""
+    rows = [row(n) for n in range(60)] + [row(900 + n, OTHER) for n in range(3)]
+    out = night(monkeypatch, tmp_path, rows, {CAMPUS: [listed(n) for n in range(60)]})
+
+    assert all(status_of(out, 900 + n) == ["Expired"] for n in range(3))
+    assert stamped(tmp_path)
+    assert "answering empty" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("big, small, trips", [
+    (45, 4, False),    # 49 known active: under the floor, a share of so few means nothing
+    (46, 4, True),     # 50 known active, all gone
+])
+def test_the_floor_is_fifty_known_active_records(monkeypatch, tmp_path, big, small, trips):
+    rows = [row(n) for n in range(big)] + [row(900 + n, OTHER) for n in range(small)]
+    out = night(monkeypatch, tmp_path, rows, {})
+    flipped = [status_of(out, 900 + n) == ["Expired"] for n in range(small)]
+    assert flipped == [not trips] * small      # the small entity's whole stock flips, or none of it does
+
+
+@pytest.mark.parametrize("gone_in_campus, trips", [
+    (30, False),   # 50 of 100 vanished: exactly half is not more than half...
+    (31, True),    # ...51 of 100 is. CAMPUS is then refused on its own account (31 of 60), and OTHER's flips go too
+])
+def test_more_than_half_is_the_line_across_the_dataset(monkeypatch, tmp_path, gone_in_campus, trips):
+    rows = [row(n) for n in range(60)] + [row(900 + n, OTHER) for n in range(40)]
+    search = {CAMPUS: [listed(n) for n in range(gone_in_campus, 60)],
+              OTHER: [listed(900 + n, OTHER) for n in range(20, 40)]}        # 20 of OTHER's 40 gone
+    out = night(monkeypatch, tmp_path, rows, search)
+
+    other_flipped = sum(status_of(out, 900 + n) == ["Expired"] for n in range(40))
+    assert other_flipped == (0 if trips else 20)
+    assert stamped(tmp_path) is (not trips)
+
+
+def test_a_dropped_entity_is_scanned_again_by_a_same_day_rerun_not_skipped_as_done(monkeypatch, tmp_path):
+    """Left in the day's progress file it would be skipped, and the rerun could finish the night and
+    stamp it complete over flips that were never made."""
+    rows = [row(n) for n in range(60)] + [row(900 + n, OTHER) for n in range(3)]
+    night(monkeypatch, tmp_path, rows, {})                                    # the outage
+
+    search = {CAMPUS: [listed(n) for n in range(60)], OTHER: [listed(900, OTHER), listed(901, OTHER)]}
+    out = night(monkeypatch, tmp_path, None, search)                          # the state is back
+
+    assert status_of(out, 902) == ["Expired"], "OTHER was read again and its ending applied"
+    assert status_of(out, 900) == ["Active"] and status_of(out, 901) == ["Active"]
+    assert stamped(tmp_path)
+    [entry] = report(tmp_path)
+    assert entry["complete"] is True and entry["entities"][OTHER]["flipped_to_expired"] == 1
+
+
+def test_the_breaker_does_not_exit_and_the_night_stays_open_for_the_freshness_check(monkeypatch, tmp_path):
+    """Like a refused entity, it holds the night open rather than failing the step; the last
+    step of daily.yml (check_scrape_stamps.py) is what turns the run red."""
+    rows = [row(n) for n in range(60)] + [row(900 + n, OTHER) for n in range(3)]
+    night(monkeypatch, tmp_path, rows, {})            # returns normally: no SystemExit
+    assert not stamped(tmp_path)
+
+
+@pytest.mark.parametrize("known, vanished, trips", [
+    (49, 49, False), (50, 50, True), (50, 25, False), (50, 26, True),
+    (1000, 500, False), (1000, 501, True), (0, 0, False), (100, 0, False),
+])
+def test_dataset_breaker_boundaries(known, vanished, trips):
+    assert (scrape.dataset_breaker(known, vanished) is not None) is trips
+
+
+# --- the refusal's boundaries -------------------------------------------------
+#
+# Pinned from both sides because each is one character in scrape.refuse_flips:
+# ">= 20" against "> 20", and "> 0.5" against ">= 0.5". `seen` is what the
+# search still lists, so what vanished is known minus seen.
+
+@pytest.mark.parametrize("known,seen,refused", [
+    (20, 9, True),     # 11 of 20 gone: over half
+    (20, 10, False),   # exactly half is not "more than half"
+    (21, 10, True),    # 11 of 21 gone
+    (21, 11, False),   # 10 of 21 gone
+    (19, 8, False),    # under 20 known, the proportional rule does not apply...
+    (19, 3, False),    # ...however much has gone: the band the guard rail alone watches
+    (19, 0, True),     # ...except all of it, which the floor catches
+])
+def test_the_proportional_refusal_boundaries(known, seen, refused):
+    assert bool(scrape.refuse_flips(urls(*range(known)), urls(*range(seen)))) is refused
+
+
+# --- the daily progress file ----------------------------------------------------
+#
+# It exists so a same-day retry skips entities already done tonight. A file from
+# an earlier day must read as empty, or every entity "done" yesterday is skipped
+# tonight and its flips are never computed -- the night finishes green without
+# having looked at it. Nothing pinned the date check: inverting it, or dropping
+# it, left every test passing.
+
+def _progress(path, day, entities):
+    path.write_text(json.dumps({"date": day.isoformat(), "done_entities": sorted(entities)}),
+                    encoding="utf-8")
+
+
+def test_progress_saved_today_loads_back_unchanged(tmp_path):
+    path = str(tmp_path / "progress.json")
+    scrape.save_daily_progress(path, {CAMPUS, OTHER})
+    assert scrape.load_daily_progress(path) == {CAMPUS, OTHER}
+
+
+def test_progress_from_yesterday_is_ignored(tmp_path):
+    import datetime
+
+    path = tmp_path / "progress.json"
+    _progress(path, datetime.date.today() - datetime.timedelta(days=1), {CAMPUS})
+    assert scrape.load_daily_progress(str(path)) == set()
+
+
+def test_progress_dated_today_is_resumed(tmp_path):
+    import datetime
+
+    path = tmp_path / "progress.json"
+    _progress(path, datetime.date.today(), {CAMPUS})
+    assert scrape.load_daily_progress(str(path)) == {CAMPUS}
+
+
+@pytest.mark.parametrize("content", ['{"date": "2026-', "", "not json at all"])
+def test_a_truncated_progress_file_is_a_fresh_start(tmp_path, content):
+    path = tmp_path / "progress.json"
+    path.write_text(content, encoding="utf-8")
+    assert scrape.load_daily_progress(str(path)) == set()
+
+
+def test_a_missing_progress_file_is_a_fresh_start(tmp_path):
+    assert scrape.load_daily_progress(str(tmp_path / "nope.json")) == set()
+
+
+def test_yesterdays_progress_does_not_suppress_tonights_scan(monkeypatch, tmp_path):
+    """The consequence, end to end: both entities were 'done' yesterday. Tonight
+    CHADRON lists 9 of its 10 records, so one must flip -- which can only happen
+    if the stale file did not make the run skip it."""
+    import datetime
+
+    (tmp_path / "data").mkdir()
+    _progress(tmp_path / "data" / "contract_daily_progress.json",
+              datetime.date.today() - datetime.timedelta(days=1), {CAMPUS, OTHER})
+    rows = [row(n) for n in range(10)] + [row(99, OTHER)]
+    out = night(monkeypatch, tmp_path, rows,
+                {CAMPUS: [listed(n) for n in range(9)], OTHER: [listed(99, OTHER)]})
+
+    assert status_of(out, 9) == ["Expired"]
+    assert stamped(tmp_path)
+
+
+def test_todays_progress_makes_a_retry_skip_the_entities_already_done(monkeypatch, tmp_path):
+    """And the other half: a same-day retry must not re-scan what already
+    finished. CHADRON is marked done tonight, so its missing record is not
+    flipped by this run even though the search no longer lists it."""
+    import datetime
+
+    (tmp_path / "data").mkdir()
+    _progress(tmp_path / "data" / "contract_daily_progress.json", datetime.date.today(), {CAMPUS})
+    rows = [row(n) for n in range(10)] + [row(99, OTHER)]
+    out = night(monkeypatch, tmp_path, rows,
+                {CAMPUS: [listed(n) for n in range(9)], OTHER: [listed(99, OTHER)]})
+
+    assert status_of(out, 9) == ["Active"]
+
+
+# --- the scrape time ----------------------------------------------------------------
+
+def test_recording_one_datasets_time_keeps_the_others(monkeypatch, tmp_path):
+    (tmp_path / "data").mkdir()
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "data" / "scrape_meta.json").write_text(
+        json.dumps({"purchase-order": "2026-10-12T03:08:00+00:00", "state": "2026-09-24T03:07:01+00:00"}),
+        encoding="utf-8")
+
+    stamp = scrape.record_scrape_time("contract")
+
+    stamps = json.loads((tmp_path / "data" / "scrape_meta.json").read_text(encoding="utf-8"))
+    assert stamps["contract"] == stamp
+    assert stamps["purchase-order"] == "2026-10-12T03:08:00+00:00"
+    assert stamps["state"] == "2026-09-24T03:07:01+00:00", "a stale dataset's stamp must survive another's"
+
+
+def test_recording_a_time_survives_an_unreadable_meta_file(monkeypatch, tmp_path):
+    """Start fresh rather than fail a scrape that has just succeeded."""
+    (tmp_path / "data").mkdir()
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "data" / "scrape_meta.json").write_text('{"contract": "2026-', encoding="utf-8")
+
+    stamp = scrape.record_scrape_time("state")
+
+    assert json.loads((tmp_path / "data" / "scrape_meta.json").read_text(encoding="utf-8")) == {"state": stamp}
+
+
+# --- merging a night's report ----------------------------------------------------------
+
+def _counts(still, flipped, previous=10):
+    return {"previously_active": previous, "still_active": still, "newly_active": 0,
+            "flipped_to_expired": flipped}
+
+
+def _report_at(monkeypatch, tmp_path):
+    path = tmp_path / "daily_diff_report.json"
+    monkeypatch.setattr(scrape, "DAILY_DIFF_REPORT", str(path))
+    return path
+
+
+def test_a_rerun_the_same_night_keeps_an_entitys_first_counts(monkeypatch, tmp_path):
+    """Those carry the real flips: a re-scan after the patch would report none."""
+    path = _report_at(monkeypatch, tmp_path)
+    scrape.append_daily_diff_report("contract", {CAMPUS: _counts(4, 6)}, "2026-10-01T23:00:00-05:00", complete=False)
+    scrape.append_daily_diff_report("contract", {CAMPUS: _counts(10, 0)}, "2026-10-01T23:30:00-05:00", complete=False)
+
+    [entry] = json.loads(path.read_text(encoding="utf-8"))
+    assert entry["entities"][CAMPUS] == _counts(4, 6)
+    assert entry["timestamp"] == "2026-10-01T23:30:00-05:00"
+    assert entry["totals"]["flipped_to_expired"] == 6
+
+
+def test_a_rerun_adds_the_entities_it_newly_finished(monkeypatch, tmp_path):
+    path = _report_at(monkeypatch, tmp_path)
+    scrape.append_daily_diff_report("contract", {CAMPUS: _counts(4, 6)}, "2026-10-01T23:00:00-05:00", complete=False)
+    scrape.append_daily_diff_report("contract", {OTHER: _counts(10, 0)}, "2026-10-01T23:30:00-05:00", complete=True)
+
+    [entry] = json.loads(path.read_text(encoding="utf-8"))
+    assert set(entry["entities"]) == {CAMPUS, OTHER}
+    assert entry["complete"] is True
+    assert entry["totals"]["previously_active"] == 20
+
+
+def test_two_nights_are_never_merged(monkeypatch, tmp_path):
+    path = _report_at(monkeypatch, tmp_path)
+    scrape.append_daily_diff_report("contract", {CAMPUS: _counts(4, 6)}, "2026-10-01T23:00:00-05:00", complete=False)
+    scrape.append_daily_diff_report("contract", {CAMPUS: _counts(4, 6)}, "2026-10-02T23:00:00-05:00", complete=False)
+
+    assert len(json.loads(path.read_text(encoding="utf-8"))) == 2
+
+
+def test_two_datasets_are_never_merged(monkeypatch, tmp_path):
+    path = _report_at(monkeypatch, tmp_path)
+    scrape.append_daily_diff_report("contract", {CAMPUS: _counts(4, 6)}, "2026-10-01T23:00:00-05:00", complete=False)
+    scrape.append_daily_diff_report("state", {CAMPUS: _counts(4, 6)}, "2026-10-01T23:10:00-05:00", complete=False)
+
+    entries = json.loads(path.read_text(encoding="utf-8"))
+    assert sorted(e["dataset"] for e in entries) == ["contract", "state"]
+
+
+def test_a_finished_night_is_never_merged_into_a_later_unfinished_one(monkeypatch, tmp_path):
+    path = _report_at(monkeypatch, tmp_path)
+    scrape.append_daily_diff_report("contract", {CAMPUS: _counts(10, 0)}, "2026-10-01T23:00:00-05:00", complete=True)
+    scrape.append_daily_diff_report("contract", {OTHER: _counts(4, 6)}, "2026-10-01T23:40:00-05:00", complete=False)
+
+    assert len(json.loads(path.read_text(encoding="utf-8"))) == 2

@@ -3,12 +3,12 @@
 scripts/extract_text.py already tells you which documents have no text layer
 (status "scanned" in data/doc_text.jsonl) -- these are born-digital PDFs pypdf
 and pdfminer both read as empty. The only way to reach them is OCR, which is a
-separate and much heavier job, and README.md's "Open work" section scopes the
-right first step before committing to it: run a small known sample through a
-candidate engine and measure, on real documents, whether the result is worth
-having -- not generic OCR accuracy, but whether extract_scope.describe() (the
-same parser the whole site relies on) can find a description in what comes
-back.
+separate and much heavier job, and the right first step before committing to it
+was to run a small known sample through a candidate engine and measure, on real
+documents, whether the result is worth having -- not generic OCR accuracy, but
+whether extract_scope.describe() (the same parser the whole site relies on) can
+find a description in what comes back. README.md's "Generated and OCR'd content"
+section says what the full run has since become and what it feeds.
 
 This pulls a fixed-seed sample of already-classified "scanned" documents,
 fetches each one (politely, the same way scripts/extract_text.py does),
@@ -22,7 +22,7 @@ a spare machine available to run this unattended, dollars are not the
 constraint, and a cloud engine is only worth adding later as a ceiling
 reference if neither local engine reaches usable quality.
 
-    tesseract   the open-source engine README.md's pilot already names.
+    tesseract   the open-source engine the pilot was first scoped around.
                 Needs the `tesseract` binary (e.g. `brew install tesseract`)
                 and `pip install pytesseract`.
     vision      Apple's on-device Vision framework (what Live Text uses),
@@ -150,7 +150,15 @@ def load_pilot_checkpoint():
                   "of a partial line. That document is simply fetched again.")
             os.truncate(OUT_JSONL, start)
             break
-        store[rec["tok"]] = rec
+        tok = rec.get("tok")
+        if not tok:
+            # A worker that died leaves a record with no token ({"crash": ...} or
+            # {"error": ...}). Indexing it raised KeyError, and every later run
+            # died the same way until someone edited the file by hand.
+            print(f"    Warning: {OUT_JSONL} line {i + 1} has no token (a crashed worker's "
+                  "record); skipping it.")
+            continue
+        store[tok] = rec
     return store
 
 

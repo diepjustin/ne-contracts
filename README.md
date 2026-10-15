@@ -27,8 +27,10 @@ There is no backend and no framework.
 
 **739,605 records across 92 entities** — every state agency, board and commission the
 database lists (83), plus all nine University of Nebraska and Nebraska State College
-campuses. Both Active and Expired, contracts and purchase orders. **Collection is
-complete.**
+campuses. Both Active and Expired, contracts and purchase orders. **The initial
+collection finished on 9–11 Aug 2026; since then only Active records are re-read each
+night**, so a record the state publishes already ended can be missing (see the caveats
+below).
 
 | | Records |
 | --- | ---: |
@@ -122,14 +124,46 @@ The scraper reproduces the state's records faithfully, including their errors.
   `data/documents.jsonl`; the page lists them when you click a row. **Rows the backfill
   has not reached yet are `docCount` 255 — unknown — and the page says nothing about
   them.** Coverage so far is `meta.docCheckedRows`.
+- **Records the state publishes already ended are mostly missing since 11 Aug 2026.** The
+  nightly run searches only `Status=Active`, so a record that first appears `Expired` —
+  typically a short University purchase order that starts and ends within a day or two —
+  never enters the dataset. University purchase-order numbers form one counter shared by
+  UNL, UNMC, UNO, UNK and Wayne, and in the weeks measured (mid-Sep to early Oct) about a
+  quarter of them were absent: roughly 430–590 records a week, typically small (median
+  $222, about $2 M a week in all). A separate stretch of about 2,570 purchase orders with
+  begin dates 21 Aug–4 Sep is also missing; a stale restore of the data on 11 Sep is the
+  likely cause, but that is unverified. Per-vendor and per-campus counts for small, fast
+  purchases are understated by that much; Active records are unaffected. Measured in the
+  13 Oct 2026 audit; see "Open work".
+- **A stretch of the state's own data is nearly empty, and some old Expired rows here may
+  no longer exist there.** Very few records end between May 2020 and early August 2021 —
+  about 50 purchase orders in those fifteen months, against about 2,300 a month normally —
+  and an earlier, independent scrape (6 Aug 2026) shows the same hole, so it is in the
+  state's data, not a gap in this collection. Counts and totals for records that begin in
+  2020 or 2021 are low because of it. The hole's upper edge sat at five years before the
+  9–11 Aug 2026 collection, and six rows present on 6 Aug and gone by 9 Aug all ended on
+  the two days that crossed it, which suggests the state drops some records five years
+  after they end. That is an inference: the state was not asked and no document link was
+  tested. Expired rows are never re-read here, so as of 13 Oct 2026 about 9,700 rows
+  ending 9 Aug–12 Oct 2021 (about 150 more each day) may be gone from the state while
+  still listed here.
+- **Some rows show an AI-generated summary, and it is not the state's words.** For
+  scanned documents the site can show a one-sentence summary that a local language model
+  wrote from OCR text. It sits in its own box under the label "AI-GENERATED SUMMARY",
+  says it is not verified, is not searchable and is not in the CSV export. It can be
+  wrong, or say nothing about the document. See
+  [Generated and OCR'd content](#generated-and-ocrd-content) before quoting one.
 
 ### Descriptions
 
 The state publishes no "scope of work" field, so there is nothing to scrape for it. But
 most documents contain one, written by whoever filed them, and `scripts/extract_scope.py`
-lifts it out of the PDF **verbatim**. Nothing is generated, summarised or rewritten —
-every description on the site is the state's own words, which is what makes it quotable.
-Typos, inconsistent capitalisation and abbreviations are theirs and are kept.
+lifts it out of the PDF **verbatim**. Nothing in a description is generated, summarised
+or rewritten — every description on the site is the state's own words, which is what
+makes it quotable. Typos, inconsistent capitalisation and abbreviations are theirs and
+are kept. (Some scanned documents also carry a separate, labelled, unverified AI summary
+beside the description; it is never mixed into one. See
+[Generated and OCR'd content](#generated-and-ocrd-content).)
 
 **540,074 of 739,605 rows have one**, 94.8% of every document that could be read at all.
 They come from three places, in this order of preference:
@@ -252,9 +286,94 @@ which would have published a tax clause as a contract's scope. Guarded hard enou
 safe it reached 154 documents, 2.1%, and still got Oracle's warranty clause. This agrees
 with the 5.4% ceiling under "Open work"; do not spend a week here either.
 
+### Generated and OCR'd content
+
+Everything above is the state's own text. Two things on the site are not, and both are
+kept apart from it.
+
+**OCR.** Scanned documents have no text layer, which no parser can read (see "Open
+work"). `scripts/ocr_pilot.py --engines vision` runs them through Apple's Vision framework
+(via `ocrmac`), so it needs macOS and never runs in CI. It renders up to 200 pages and
+keeps up to 100,000 characters per document, and appends one record per document to
+`data/ocr_pilot.jsonl` (about 1.2 GB; the last record for a token wins). In mid-Oct 2026
+it held 109,173 documents, 105,460 of them with text. **OCR text never enters
+`scope.jsonl` or the descriptions**: it would sit beside the state's own words, which
+this page promises are verbatim, so it stays local until someone decides otherwise.
+
+**AI summaries.** `scripts/generate_ai_summaries.py` asks a local model (Ollama,
+`llama3.1:8b-instruct-q4_K_M`, temperature 0.2) for one sentence of at most 40 words about
+each OCR'd document, or the literal `UNCLEAR` when the text is too garbled. Only the first
+4,000 characters of the OCR text are sent. Records append to `data/ai_summaries.jsonl`;
+`--shard I/N` splits the backlog across machines. Nothing checks a sentence afterwards.
+Neither job's dependencies are in `requirements.txt`: OCR needs
+`pip install ocrmac pymupdf pillow`, and the summaries need Ollama with
+`ollama pull llama3.1:8b-instruct-q4_K_M`.
+
+Where a summary goes:
+
+- `pages.yml` downloads `ai_summaries.jsonl.gz` from the newest `extraction-data-*`
+  release whenever it rebuilds, beside `scope.jsonl.gz`; a release without it builds
+  without summaries. Nothing in the repository produces or uploads that asset — it is a
+  manual step after a local run.
+- `build_site.py` joins a summary to a row by the row's view token, so only a row's own
+  primary document can carry one. On 13 Oct 2026, 105,460 summaries had been generated,
+  104,174 of them with text, and 84,527 rows showed one (`meta.aiCount`).
+- The payload carries them as the `ai/` blocks, `aisrc.bin` (which model wrote each row's
+  summary) and `meta.aiModels` / `meta.aiCount`. A summary is not in the search index and
+  not in the CSV export.
+- The row panel shows it in its own box, labelled "AI-GENERATED SUMMARY", with the note
+  *Generated from OCR text and not verified. Meant to help you decide whether to open the
+  source document, not to be relied on as fact — read the original before citing anything
+  here.*
+
+What to know before trusting one (measured 13 Oct 2026):
+
+- About one in five summarises a one-line state placeholder page — "Document Cancelled"
+  or "PO has been deleted." — so it says nothing about the contract, and some call the
+  document blank or incomplete: 19.1% of the generated summaries that have text (19,878
+  of 104,174), and about 22% of the boxes the site shows (18,933 of 84,527 match a
+  placeholder summary exactly). Nothing filters them out.
+- About 0.7% of the other summaries state a dollar amount, date or number that is not in
+  the OCR text. Of 26 such cases checked by hand, 15 were wrong or unsupported — some
+  amounts off by 10× to 1,000×, some years invented — 6 were true but not literal, and 5
+  were false alarms.
+- About three quarters of all OCR'd characters (74.6%) are never sent: the model sees the
+  first 4,000 characters of each document, and 48.7% of documents are longer.
+
+How it runs. Both jobs run on one Mac under launchd, not in CI; their LaunchAgent plists
+(`com.justindiep.ne-contracts.ocr-catchup` and `…ocr-recapture`) are not in the repo.
+`scripts/run_ocr_catchup.sh` runs nightly at 02:00 — a calendar job, so a run missed while
+the Mac slept fires on wake — and does more than OCR: it first runs
+`scrape.py <dataset> --daily` for all three datasets and `build_site.py` against that
+Mac's own `data/`, which is not the dataset CI publishes from (that lives in the Actions
+cache), and then `extract_text.py`, `ocr_pilot.py` and `generate_ai_summaries.py`. A step
+that fails does not stop the ones after it, and the script always exits 0, so launchd's
+last exit status never shows a failure; read `logs/ocr_catchup.log`.
+`scripts/run_ocr_recapture.sh` was a one-time backlog job. The first OCR pass kept 6 pages
+and 4,000 characters per document; on 17 Sep 2026 the caps went to 200 and 100,000 after a
+corpus-wide check found 24,344 documents (22.4%) had run past the page cap, and a
+recapture run redid 23,504 documents (the file as it stood before is
+`data/ocr_pilot.jsonl.bak-before-full-page-recapture`). Which documents to redo was chosen
+by hand and is not scripted, so running `run_ocr_recapture.sh` on a fresh `data/` would
+OCR everything.
+
 ---
 
 ## Running it
+
+The workflows run Python 3.11 and the maintainer's local venv is 3.9.6; the test suite
+passes on 3.9 and on 3.12.
+
+**On a clean clone, restore `data/` before scraping** (see "Getting the data back").
+`data/*_scrape_progress.json` is tracked in git but `data/*.csv` is gitignored, so a fresh
+clone says every combo is already complete, and `scrape.py` refuses to run in that state
+rather than write a header-only CSV and stamp it complete. To collect everything from
+scratch instead, pass `--fresh` — 20+ hours.
+
+Once `data/` is restored, bring it up to date with `--daily`; a full scrape of a dataset
+whose combos are all done has nothing to fetch and leaves its recorded time alone (and
+`--entity X` finishing X does not stamp the whole dataset either). Restore
+`scrape_meta.json` with the CSVs so that time matches the data.
 
 ```bash
 cd ne-contracts
@@ -280,7 +399,7 @@ python3 scripts/extract_text.py --retry-non-pdf   # re-ask the 32,227 non-PDF an
 python3 scripts/extract_scope.py            # doc_text.jsonl -> data/scope.jsonl (~1 min)
 
 python3 scripts/build_site.py               # data/*.csv -> d/<buildId>/  (~3 min, ~1.7 GB peak)
-python3 ../serve.py                         # preview at http://127.0.0.1:8765/ne-contracts/
+python3 -m http.server 8098                 # preview at http://127.0.0.1:8098/ (index.html, manifest.json and d/ sit at the repo root)
 python3 -m pytest tests/ -q
 python3 scripts/lint_page.py                # eslint over the script in index.html
 ```
@@ -328,9 +447,11 @@ and `build_site.py`'s entity guard match on that exact string.
 
 ### Daily updates
 
-The full scrape is a one-time job. Day to day the state adds records under
+The full scrape is a one-time job. Day to day the state mostly adds records under
 `Status=Active`, only ~7.3% of pages, so `--daily` re-scans just that status and diffs it
-against what the CSV already knows, matched on `Detail URL`:
+against what the CSV already knows, matched on `Detail URL`. "Mostly" is the catch: a
+record the state publishes already ended is born `Expired`, never appears in that list
+and is never collected (see the caveats and "Open work"):
 
 ```bash
 python3 scripts/scrape.py contract --daily
@@ -348,12 +469,24 @@ without it, one outage expired all 44,063 active records in a single green run (
 last contract ending is a real ending — refusing it held the state dataset open for four
 nights.
 
-That floor has a price. A night the state answers empty for everything now flips every
-state entity with one to four active records to `Expired` — 17 of them, 29 records, in
-the 28 Sep 2026 release — while the larger ones are refused. The night does not finish,
-so the stamp stays put and the log names the refusals, but the guard rail below skips
-entities under five, so those small flips pass it. Nothing restores those rows in the
+That floor had a price. On a night the state answered empty for everything, every state
+entity with one to four active records was flipped to `Expired` — 17 of them, 29 records,
+in the 28 Sep 2026 release — while the larger ones were refused. The night did not finish,
+so the stamp stayed put and the log named the refusals, but the guard rail below skips
+entities under five, so those small flips passed it. Nothing restores such rows in the
 CSV: `--daily` only ever flips Active to Expired.
+
+So the scrape also judges the dataset as a whole. Across every entity it finished tonight,
+the refused ones included, if the CSV held 50 or more active records and the state no
+longer lists more than half of them, it flips nothing for any entity, small ones included,
+prints an `::error` line, and leaves the night unfinished: the stamp stays put and the
+last step of `daily.yml` turns the run red (see "A night that did not finish"). Ordinary
+endings are nowhere near that line: in the local 17 Sep 2026 snapshot, apart from the 2099
+open-ended placeholder date, no end date is shared by more than 3% of a dataset's active
+records. The line also holds back the other entities' endings for a night when one entity
+that holds most of a dataset is refused on its own — in that snapshot the University of
+Nebraska Lincoln holds 52% of the active contracts and 61% of the active purchase orders —
+and those are flipped the next night, once the state answers.
 
 **A record that comes back is appended, and its Expired row stays.** A record flipped to
 `Expired` — after a night it was missed, or after an empty night like the one above — is
@@ -415,13 +548,20 @@ have a home to fetch them from. Neither is in git.
 
 ```bash
 # CSVs (363 MB, ~20h of scraping) — cached by the nightly workflow.
-gh workflow run ne-contracts-rescue-cache.yml --ref main   # then download its artifact
+gh workflow run rescue-cache.yml --ref main   # then download its artifact
+# ...or the newest hub-data release's copy (check the date in its tag first). It carries
+# scrape_meta.json too; restore it with the CSVs so the stamps match the data.
+tag=$(gh release list --json tagName --jq '[.[] | select(.tagName | startswith("ne-contracts-hub-data-"))] | sort_by(.tagName) | last | .tagName')
+gh release download "$tag" -D data
+(cd data && gunzip -f nu_contracts.csv.gz nu_purchase_orders.csv.gz state_agencies.csv.gz scrape_meta.json.gz)
 
 # Document text and descriptions (1.5 GB, ~36h of downloading) — a Release, because
 # nothing else keeps them. doc_text.jsonl is the one that matters; scope.jsonl
-# rebuilds from it in about a minute with scripts/extract_scope.py.
-gh release download extraction-data-2026-08-17 -D ne-contracts/data
-cd ne-contracts/data && gunzip doc_text.jsonl.gz scope.jsonl.gz
+# rebuilds from it in about a minute with scripts/extract_scope.py. The release also
+# carries documents.jsonl.gz (without it every row's document count is unknown) and
+# ai_summaries.jsonl.gz (without it the site has no AI summaries).
+gh release download extraction-data-2026-08-17 -D data
+(cd data && gunzip doc_text.jsonl.gz scope.jsonl.gz documents.jsonl.gz ai_summaries.jsonl.gz)
 ```
 
 Both were lost or nearly lost in August 2026 — the CSVs vanished from the working
@@ -677,7 +817,7 @@ preview a change, and the result stays on your machine.
 | trigger | what happens |
 |---|---|
 | push to `main` | restores the last payload from the Actions cache and deploys it. No rebuild, so a portfolio edit does not need the CSVs. (True only from 9 Sep 2026 — see "The payload cache never once hit".) |
-| every night | `ne-contracts-daily.yml` dispatches `pages.yml` **after** `check_daily_diff.py` passes, so it rebuilds from fresh data. |
+| every night | `daily.yml` dispatches `pages.yml` **after** `check_daily_diff.py` passes, so it rebuilds from fresh data. |
 
 The dispatch is deliberately not a `workflow_run` trigger, and staying that way is the
 point of the nightly change rather than an accident of it. `workflow_run` fires on any
@@ -750,7 +890,7 @@ every clone, so it remains a separate decision.
 
 ### Nightly automation
 
-`ne-contracts-daily.yml` scrapes all three datasets with `--daily` every night, on a cron
+`daily.yml` scrapes all three datasets with `--daily` every night, on a cron
 set for 10pm Central — though see the slippage below for when it actually runs. GitHub
 Actions cron has no DST awareness, so two entries fire daily and the gate compares
 `github.event.schedule` against the entry implied by the current offset, letting exactly
@@ -772,14 +912,15 @@ Nothing downstream depends on the hour — that is exactly what gating on the cr
 buys, and it is why the 4-hour regime went unnoticed for a fortnight while every run
 reported success. What it does cost is the reader: the site's "last updated" stamp trails
 the label by hours, and last night's contracts are not on the site until the small hours.
-The cause is not established. The obvious suspect — other scheduled workflows in this repo
-competing for the scheduler — does not fit: `unl-events-nightly.yml` arrived 4 Sep and
-`husker-markets-collect.yml` 8 Sep, both well after the 27 Aug change. The numbers above
+The cause is not established. The obvious suspect — other scheduled workflows competing
+for the scheduler in the repository this ran in until the 10 Sep split — does not fit:
+`unl-events-nightly.yml` arrived 4 Sep and `husker-markets-collect.yml` 8 Sep (neither is
+in this repository), both well after the 27 Aug change. The numbers above
 are one month of one repo, so re-measure rather than trusting them — the dispatch time of
 every scheduled run is one call:
 
 ```bash
-gh api "/repos/diepjustin/diepjustin.github.io/actions/workflows/ne-contracts-daily.yml/runs?event=schedule&per_page=100" \
+gh api "/repos/diepjustin/ne-contracts/actions/workflows/daily.yml/runs?event=schedule&per_page=100" \
   --jq '.workflow_runs[] | "\(.created_at)"' | sort
 ```
 
@@ -798,9 +939,9 @@ treat a missing baseline as "nothing was ever active". Bootstrap once:
 1. Commit the existing `data/*.csv` to a **short-lived branch**, commenting out the
    `data/*.csv` line in `.gitignore` for that commit only. Use a branch, not `main` —
    these are ~346 MB and a revert would not remove the objects from history.
-2. Dispatch `ne-contracts-rescue-cache.yml` **on that branch**; it republishes `data/` as
+2. Dispatch `rescue-cache.yml` **on that branch**; it republishes `data/` as
    an artifact.
-3. Dispatch `ne-contracts-seed-cache.yml` **on `main`**, passing that run's ID as
+3. Dispatch `seed-cache.yml` **on `main`**, passing that run's ID as
    `artifact_run_id`.
 4. Delete the branch.
 
@@ -811,14 +952,61 @@ version of this had the whole thing on the branch, and it took the nightly down 
 days with `refusing --daily: data/nu_contracts.csv does not exist` — the seed was intact
 the whole time, just permanently out of scope.
 
+### A night that did not finish
+
+A dataset's scrape time is recorded only when every entity in it was read, so a night that
+does not finish — an entity refused, a deadline, a crash after the other datasets were done —
+leaves that time where it was and exits 0, and left alone the job ends green while the
+page's "Last updated" date stops moving (as it did from 24 Sep 2026). The last step of
+`daily.yml`, `scripts/check_scrape_stamps.py`, compares each dataset's recorded time with
+the moment the run began and turns the run red, with an `::error` line for each dataset that
+has not finished, if any is older. It runs after the deploy dispatch, the cache save and the
+release, so it blocks none of them: a red final step beside green ones means data is stale,
+not that anything was lost.
+
+### Downstream consumers
+
+`ne-connect` (`diepjustin/ne-connect`, the hub that brings this together with campaign-
+finance, lobbying and FEC data) reads two things from this repository, and neither can
+change on this side alone.
+
+- **The nightly data release.** `daily.yml` cuts a release tagged
+  `ne-contracts-hub-data-YYYY-MM-DD`, the America/Chicago date, carrying four gzipped
+  assets: `nu_contracts.csv.gz`, `nu_purchase_orders.csv.gz`, `state_agencies.csv.gz` and
+  `scrape_meta.json.gz`. The CSVs keep the eleven columns listed under "Running it". A
+  same-day re-run replaces that day's release, and only the newest three are kept.
+  ne-connect's nightly picks the newest by **tag name**, never by `createdAt` (the date
+  of the commit a tag points at, which ties across nights), and downloads `*.gz`. Its
+  `ingest/sources.py` `CONTRACT_FILES` names the same three CSVs, and its
+  `build/check_freshness.py` reads the Central date from the tag, warning at 3 days and
+  failing at 7.
+- **The vendor shards.** `pages.yml` runs `scripts/export_vendor_rows.py`, which writes
+  `d/rows/<A-Z or _>.json`: one file per vendor-name initial (upper-cased; any other first
+  character goes to `_`), each `{"VENDOR": [[document number, type, entity, amount, begin
+  date, end date, status, detail URL], ...]}`, keyed by the exact `Vendor` string and
+  covering all three CSVs. ne-connect's `contractShardKey()` (in its `build/build_site.py`)
+  computes the same key to decide which shard to fetch from this site's `d/rows/`. The
+  shard to watch is `A.json`, because one very large vendor sits in it;
+  `export_vendor_rows.py` warns only past 90 MB, within 10 MB of GitHub's 100 MB push
+  limit, which `d/` never meets because it is gitignored and only deployed.
+
+Changing a column, an asset name, the tag prefix or the shard rule is therefore a change
+in two repositories. `tests/test_export_vendor_rows.py` pins the file tuple and the shard
+key for that reason, each with a comment naming where ne-connect keeps its copy;
+ne-connect's `docs/SCHEMA.md` ("Cross-fetch") describes the consumer side, though it
+predates `state_agencies.csv`.
+
 ---
 
 ## Guard rails
 
 Read this before changing anything that writes.
 
-**Descriptions are the state's words, verbatim.** Nothing is generated or summarised.
-Typos, boilerplate and truncation that the state itself published all stay.
+**Descriptions are the state's words, verbatim.** Nothing in them is generated or
+summarised: OCR text and AI summaries never enter `scope.jsonl` or the description
+blocks. The AI summaries are a separate layer with a label of their own (see
+[Generated and OCR'd content](#generated-and-ocrd-content)). Typos, boilerplate and
+truncation that the state itself published all stay.
 
 **A row's primary document must not move.** `doc_text.jsonl` and `scope.jsonl` are keyed
 by view token, so the row's first document is what every description hangs off. The state
@@ -902,7 +1090,7 @@ checkpoint now means "unknown" and claims no gaps, and the checkpoints are track
 so a public claim never depends on a file riding in a cache.
 
 **Two things the publish must never do**, both asserted in the staging step: ship
-`ne-contracts/data/` (363 MB of scraped CSVs), and deploy a `manifest.json` naming a
+`data/` (363 MB of scraped CSVs), and deploy a `manifest.json` naming a
 build directory that is not in the artifact.
 
 **Never let an empty `data/` reach the cache.** Restore matches on prefix and takes the
@@ -1195,9 +1383,24 @@ most of the error. This is the highest-value unfinished work.
 
 **89,180 scanned documents** — 42.9% of contracts — have no text layer, and no parser
 reaches them. This is the difference between 94.8% description coverage of *readable*
-documents and ~95% of *all* of them. An OCR pilot is scoped but not run: 500 known-scanned
-documents through Tesseract, accuracy measured on descriptions specifically rather than
-text generally, cost and wall-clock per thousand, compared against one cloud OCR.
+documents and ~95% of *all* of them. OCR has been run since (Apple Vision, not
+Tesseract; see "Generated and OCR'd content"), but its text is deliberately kept out of
+the descriptions, because it would sit beside the state's own words, which are promised
+verbatim. What is open is whether OCR-recovered descriptions may be published under a
+label of their own, and the accuracy measurement that decision needs, made on
+descriptions specifically rather than text generally. The yield is known — the extractor
+finds something to return in about 16–17% of the OCR'd documents — but a yield says
+nothing about whether what it returns is right.
+
+**Records the state publishes already ended are not collected.** The nightly searches
+`Status=Active` only, so a record that first appears `Expired` never enters the dataset
+(see the caveats): about one in four new University purchase orders is missing. The fix
+is an append-only Expired sweep of the four University purchase-order combos (UNMC, UNL,
+UNO, UNK; about 90% of the loss), ordered newest-first and stopping on Begin Date, plus a
+one-time catch-up for the late-Aug 2026 hole. It needs one manual check before any code:
+that the state's Expired search honours `sort=BeginDate&sortdir=DESC` as a true date sort
+that still holds on page 2 when the parameters are repeated on every request. Until then
+the caveat is the whole mitigation.
 
 **Change tracking records but does not publish.** `--daily` now writes every amendment
 to `data/changes.jsonl` (see "Daily updates"). Nothing on the site reads it yet: an

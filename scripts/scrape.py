@@ -13,6 +13,8 @@ import threading
 import time
 import csv
 import os
+import shutil
+from urllib.parse import parse_qs, urlsplit
 
 BASE_URL = "https://statecontracts.nebraska.gov"
 SEARCH_URL = f"{BASE_URL}/Search"
@@ -99,6 +101,13 @@ PAGE_DELAY = 0.3
 # Generous, because a few searches genuinely are this slow (see scrape_entity).
 SEARCH_TIMEOUT = 300
 
+# The search form is a plain page, not a computed result set, and answers in
+# well under a second. requests has no default timeout, so without one a
+# half-open connection here waits forever -- and get_token runs before every
+# search and every re-search, so it is the one place a hung server could hold
+# the whole job rather than a single request.
+TOKEN_TIMEOUT = 60
+
 # Detail-fetch latency is the early warning that we are asking too much: if the
 # site starts straining, responses slow down before they start failing. Each
 # combo reports its median so a run that drifts upward is visible in the log
@@ -147,7 +156,7 @@ def detail_session():
 
 
 def get_token(session):
-    resp = session.get(SEARCH_URL)
+    resp = session.get(SEARCH_URL, timeout=TOKEN_TIMEOUT)
     resp.raise_for_status()
     soup = BeautifulSoup(resp.text, "html.parser")
     token = soup.find("input", {"name": "__RequestVerificationToken"})
@@ -368,14 +377,17 @@ def parse_results_page(soup):
     tfoot = table.find("tfoot")
     if tfoot:
         for link in tfoot.find_all("a"):
-            href = link.get("href", "")
-            if "page=" in href:
-                try:
-                    page_num = int(href.split("page=")[-1])
-                    if last_page is None or page_num > last_page:
-                        last_page = page_num
-                except ValueError:
-                    pass
+            # The query string's own page parameter, wherever it sits in it. This
+            # used to be int(href.split("page=")[-1]), which is right only while
+            # page= is the last thing in the link: '?page=217&sort=BeginDate' made
+            # the int() raise, was swallowed, and the whole pager read as absent --
+            # one page, finished, silently. The state's links are bare today.
+            try:
+                page_num = int(parse_qs(urlsplit(link.get("href", "")).query).get("page", [""])[-1])
+            except ValueError:
+                continue    # not a page link, or not a number
+            if last_page is None or page_num > last_page:
+                last_page = page_num
 
     return records, last_page
 
@@ -609,6 +621,34 @@ def local_timestamp():
     return datetime.datetime.now().astimezone().isoformat(timespec="seconds")
 
 
+def set_aside_unreadable(path, error, keep_copy=True):
+    """Say that a state file could not be read, and keep a copy for a person.
+
+    The loaders that call this start fresh on an unreadable file rather than fail
+    a scrape that has just succeeded -- the right call, but done silently it also
+    drops whatever the file held: the other datasets' stamps (so the page's "Last
+    updated" can fall back to the build date and hide a stale dataset), a diff
+    report's unreviewed flips, or the full scrape's checkpoint (the only record of
+    which CSV rows are legitimate). The warning is a GitHub annotation, so it lands
+    on the run's summary page; the copy, named <file>.corrupt and overwritten by the
+    next incident, keeps the evidence. --daily's own progress file is same-day
+    resume state, cheap to rebuild, and takes the warning only.
+
+    The copy is made first and only then claimed: if it cannot be made, the
+    annotation says so rather than promising a file that is not there.
+    """
+    reason = " ".join(str(error).split())
+    kept = ""
+    if keep_copy:
+        try:
+            shutil.copyfile(path, path + ".corrupt")
+            kept = f" A copy is kept as {path}.corrupt."
+        except OSError as e:
+            kept = f" A copy could not be kept ({' '.join(f'{type(e).__name__}: {e}'.split())})."
+    print(f"::warning title=Unreadable state file::{path} could not be read ({reason}); "
+          f"starting it fresh.{kept}")
+
+
 def record_scrape_time(dataset):
     """Stamp this dataset's completion time, preserving stamps for other datasets."""
     stamps = {}
@@ -616,13 +656,20 @@ def record_scrape_time(dataset):
         try:
             with open(SCRAPE_META, encoding="utf-8") as f:
                 stamps = json.load(f)
-        except (OSError, ValueError):
+            if not isinstance(stamps, dict):
+                raise ValueError(f"expected an object, found {type(stamps).__name__}")
+        except (OSError, ValueError) as e:
+            set_aside_unreadable(SCRAPE_META, e)
             stamps = {}  # unreadable or corrupt: start fresh rather than fail the scrape
 
     stamps[dataset] = local_timestamp()
 
-    with open(SCRAPE_META, "w", encoding="utf-8") as f:
+    # Beside and renamed over, like every other state file here, so a kill
+    # mid-write cannot leave empty the one file "Last updated" is read from.
+    tmp = SCRAPE_META + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump(stamps, f, indent=2, sort_keys=True)
+    os.replace(tmp, SCRAPE_META)
     return stamps[dataset]
 
 
@@ -643,7 +690,8 @@ def load_progress(path):
     try:
         with open(path, encoding="utf-8") as f:
             raw = json.load(f)
-    except (OSError, ValueError):
+    except (OSError, ValueError) as e:
+        set_aside_unreadable(path, e)
         return set(), {}  # unreadable or corrupt: treat as a fresh start
 
     if isinstance(raw, list):  # written before page tracking existed
@@ -664,13 +712,131 @@ def save_progress(path, done, partial):
     os.replace(tmp, path)  # atomic, so a kill mid-write can't corrupt the checkpoint
 
 
-def drop_unfinished_rows(csv_path, keep):
+# How far back from the end of a CSV repair_csv_tail looks for the last newline.
+# A row is a few hundred bytes; the file is hundreds of megabytes.
+CSV_TAIL_WINDOW = 1 << 20
+
+
+# How much of a file is counted for quote characters at a time.
+QUOTE_COUNT_CHUNK = 1 << 24
+
+
+def odd_quotes_before(f, upto):
+    """True if the first `upto` bytes of the open binary file hold an odd number of quote characters.
+
+    csv.writer doubles every quote it escapes, so the rows of a whole file hold an even number:
+    an odd one means the last field is still open.
+    """
+    f.seek(0)
+    odd, left = False, upto
+    while left > 0:
+        chunk = f.read(min(QUOTE_COUNT_CHUNK, left))
+        if not chunk:
+            break
+        left -= len(chunk)
+        if chunk.count(b'"') % 2:
+            odd = not odd
+    return odd
+
+
+def repair_csv_tail(csv_path):
+    """Cut a half-written final row off the CSV, so the next append starts a new row.
+
+    A job killed mid-write -- a runner lost, a SIGKILL -- leaves a last line with
+    no newline. Both entry points append, so the next record would be glued onto
+    that stump: one row of fifteen-odd fields that build_site.py cannot read. It
+    exits on an unexpected view URL shape or raises on the Status for nearly every
+    place the cut can fall, and the data cache and the hub-data release carry the
+    row forward, so the nightly site build would fail every night until someone
+    repaired the cached CSV by hand. The JSONL logs have always been repaired the
+    same way on load; the CSV append path was not.
+
+    Always cut, never keep: a stump can look like a whole row (cut just after the
+    Detail URL it has eleven fields and an empty View URL), and an empty View URL
+    says the record has no document -- a claim the state never made. A cut record
+    is simply fetched again, because it is no longer known.
+
+    Returns the number of bytes removed.
+
+    Two cases it cannot repair stop the run (SystemExit) with the file untouched,
+    instead of being guessed at. A megabyte with no newline in it is not a
+    half-written row. And a file that, after the cut, would still end inside a
+    quoted field -- an odd number of quote characters -- which is what a kill leaves
+    in a field that contains a line break, and a search for the last newline cannot
+    tell that line break from the end of a row: it would cut inside the field, or
+    leave the open quote, and the next row appended would be swallowed by it. No
+    field in the 744,100 rows of the local CSVs (a 17 Sep 2026 snapshot, scanned on
+    14 Oct; the production copy in the Actions cache was not) holds a line break, so
+    this has not been seen; if it is, it is loud here, not a garbled row in the build.
+    """
+    if not os.path.exists(csv_path):
+        return 0
+    with open(csv_path, "rb+") as f:
+        size = f.seek(0, os.SEEK_END)
+        if size == 0:
+            return 0
+        keep = size
+        f.seek(size - 1)
+        if f.read(1) != b"\n":
+            window = min(size, CSV_TAIL_WINDOW)
+            f.seek(size - window)
+            newline = f.read(window).rfind(b"\n")
+            if newline < 0 and window < size:
+                sys.exit(f"ERROR: the last {window:,} bytes of {csv_path} hold no newline, which is "
+                         "not a half-written row. Nothing was changed; the file needs a person to "
+                         "look at it.")
+            keep = size - window + newline + 1 if newline >= 0 else 0
+        if odd_quotes_before(f, keep):
+            sys.exit(f"ERROR: {csv_path} would still end inside a quoted field after repair (it has "
+                     "an odd number of quote characters), so the next row appended would be "
+                     "swallowed by it. A kill in a field with a line break in it leaves this, and "
+                     "the repair cannot tell that line break from the end of a row. Nothing was "
+                     "changed; the file needs a person to look at it.")
+        if keep < size:
+            f.truncate(keep)
+    if keep < size:
+        print(f"    Note: {csv_path} ends mid-row; cutting {size - keep:,} bytes of a partial row. "
+              "That record is simply fetched again.")
+    return size - keep
+
+
+def csv_has_records(csv_path):
+    """True if the CSV exists and holds at least one row below its header."""
+    try:
+        with open(csv_path, encoding="utf-8", errors="replace", newline="") as f:
+            next(f, None)  # the header
+            return any(line.strip() for line in f)
+    except FileNotFoundError:
+        return False
+
+
+class UnaccountedRows(ValueError):
+    """More rows belong to combos with no recorded position than a cut-off scrape can leave."""
+
+    def __init__(self, count):
+        super().__init__(f"{count:,} rows")
+        self.count = count
+
+
+# A scrape that is cut off leaves at most the page in flight unaccounted for -- 25 rows
+# today. A thousand is ample slack for a larger page and still a sliver of a dataset. More
+# than that means the progress file does not describe the CSV (unreadable, emptied, from
+# another checkout), and dropping "unfinished" rows would delete the dataset.
+MAX_UNACCOUNTED_ROWS = 1000
+
+
+def drop_unfinished_rows(csv_path, keep, limit=None):
     """Strip rows belonging to combos we have no position for.
 
     A combo that is finished, or that has a recorded page position, has its
     rows accounted for and keeps them. Anything else was cut off before the
     first page was checkpointed, so its rows would be re-scraped and
     duplicated -- those are dropped.
+
+    With `limit`, more than that many such rows raises UnaccountedRows and
+    changes nothing. The file is rewritten beside itself and renamed over, so
+    a kill mid-rewrite cannot leave a truncated CSV that every later check
+    would accept.
     """
     if not os.path.exists(csv_path):
         return 0
@@ -684,12 +850,23 @@ def drop_unfinished_rows(csv_path, keep):
     # Entity Name is column 3, Status is column 8 -- see the header written in main().
     kept = [r for r in body if len(r) > 8 and (r[3], r[8]) in keep]
     dropped = len(body) - len(kept)
+    if limit is not None and dropped > limit:
+        raise UnaccountedRows(dropped)
 
     if dropped:
-        with open(csv_path, "w", newline="", encoding="utf-8") as f:
-            writer = csv.writer(f)
-            writer.writerow(header)
-            writer.writerows(kept)
+        tmp = csv_path + ".tmp"
+        try:
+            with open(tmp, "w", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f)
+                writer.writerow(header)
+                writer.writerows(kept)
+            os.replace(tmp, csv_path)
+        except BaseException:
+            try:
+                os.remove(tmp)      # a half-written copy is of no use to anyone
+            except OSError:
+                pass
+            raise
     return dropped
 
 
@@ -938,7 +1115,10 @@ def append_daily_diff_report(dataset, entity_report, stamp, complete=True):
         try:
             with open(DAILY_DIFF_REPORT, encoding="utf-8") as f:
                 entries = json.load(f)
-        except (OSError, ValueError):
+            if not isinstance(entries, list):
+                raise ValueError(f"expected a list, found {type(entries).__name__}")
+        except (OSError, ValueError) as e:
+            set_aside_unreadable(DAILY_DIFF_REPORT, e)
             entries = []  # unreadable or corrupt: start the report fresh
 
     night = stamp[:10]  # local date, the same day load_daily_progress counts in
@@ -979,7 +1159,8 @@ def load_daily_progress(path):
     try:
         with open(path, encoding="utf-8") as f:
             raw = json.load(f)
-    except (OSError, ValueError):
+    except (OSError, ValueError) as e:
+        set_aside_unreadable(path, e, keep_copy=False)
         return set()
     if raw.get("date") != datetime.date.today().isoformat():
         return set()
@@ -1041,6 +1222,32 @@ def refuse_flips(known, seen):
     return None
 
 
+# The same question asked of the whole dataset. refuse_flips judges one entity at a time, and
+# an entity with fewer than ALL_GONE_FLOOR active records is allowed to lose all of them --
+# a small body's last contract ending is real. So on a night the state answers empty for
+# everything, the large entities are refused and the small ones (17 of them, 29 records, in
+# the 28 Sep 2026 release) flip to Expired with nothing to say the night was bad; nothing
+# restores them, because --daily only ever flips Active -> Expired. More than half of a
+# dataset's active records vanishing in one night is not contracts ending: in the local 17 Sep
+# 2026 snapshot, apart from the open-ended 2099 placeholder date, no end date is shared by more
+# than 3% of a dataset's active records, and under 0.1% are still Active past their end date.
+# So past that point nothing is flipped for any entity. That also holds back the others'
+# endings when one entity holding over half of a dataset is refused on its own (the University
+# of Nebraska Lincoln holds 52% of the contracts and 61% of the purchase orders); the night is
+# unfinished anyway, and those flips come the next night, once the state answers.
+DATASET_BREAKER_FLOOR = 50      # known-active records in the entities finished tonight, below which a share means little
+DATASET_BREAKER_SHARE = 0.5
+
+
+def dataset_breaker(known, vanished):
+    """Why tonight's disappearances, across every entity read, cannot be trusted, or None."""
+    if known >= DATASET_BREAKER_FLOOR and vanished > known * DATASET_BREAKER_SHARE:
+        return (f"{vanished:,} of {known:,} active records ({vanished / known:.0%}) vanished across "
+                "the dataset in one night -- the state is failing, not reporting endings. Flipping "
+                "nothing tonight, for any entity, small ones included. Will re-check next run.")
+    return None
+
+
 def run_daily(args):
     """Scrape only Status=Active for one dataset and diff against what the
     existing CSV already knows is Active -- see README.md, "Daily updates"
@@ -1060,6 +1267,10 @@ def run_daily(args):
         entities = {name: entities[name] for name in args.entity}
 
     os.makedirs("data", exist_ok=True)
+
+    # Before the baseline is read and before anything is appended, so a record
+    # whose row was cut short counts as unknown tonight and is fetched again.
+    repair_csv_tail(output_csv)
 
     loaded = load_known_active(output_csv)
     known_active, baseline = loaded if loaded else (None, None)
@@ -1091,6 +1302,7 @@ def run_daily(args):
     flips = {}    # entity_name -> set(detail_url) flipped to Expired
     report = {}   # entity_name -> counts dict
     amended = 0   # watched fields seen to have moved, written to changes.jsonl
+    scanned_known = scanned_vanished = 0   # every entity read tonight, refused ones too
 
     with open(output_csv, "a", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
@@ -1129,6 +1341,9 @@ def run_daily(args):
                 print(f"  {entity_name}: not finished this run, will re-scan from the top later.")
                 continue
 
+            scanned_known += len(known)
+            scanned_vanished += len(known - seen)
+
             # A refused entity is re-scanned next run, and nothing of it is
             # patched or reported tonight.
             refusal = refuse_flips(known, seen)
@@ -1150,6 +1365,18 @@ def run_daily(args):
 
     if amended:
         print(f"Recorded {amended:,} field change(s) to {CHANGES_JSONL}.")
+
+    distrust = dataset_breaker(scanned_known, scanned_vanished)
+    if distrust:
+        print(f"::error title=Daily scrape: the state looks like it is answering empty::"
+              f"{args.dataset}: {distrust}")
+        # Every entity whose flips and report entry are dropped is not done: left in done_today
+        # it would be skipped by a same-day re-run, which could then finish the night and stamp
+        # it complete over flips that were never made.
+        done_today.difference_update(flips)
+        save_daily_progress(progress_path, done_today)
+        flips.clear()
+        report.clear()
 
     all_flip_urls = {u for s in flips.values() for u in s}
     if all_flip_urls:
@@ -1234,6 +1461,7 @@ def main():
     is_state = args.dataset == "state"
 
     entities = STATE_ENTITIES if is_state else HIGHER_ED_ENTITIES
+    dataset_entities = entities   # "complete" means all of these, whatever subset this run is given
 
     if args.entity:
         unknown = [e for e in args.entity if e not in entities]
@@ -1274,9 +1502,40 @@ def main():
             print(f"PARTIAL={e} | {s} | through page {page}")
         return
 
+    # Repair a torn tail before judging what the CSV holds: a header and one killed row
+    # would otherwise count as a record, and be cut to nothing a moment later.
+    repair_csv_tail(output_csv)
+
+    # A progress file that vouches for finished work the CSV does not hold means
+    # data/ was not restored: the progress files are tracked in git and the CSVs
+    # are not, so this is exactly what a fresh clone looks like. Carrying on would
+    # scrape only what the file says is left, write it under a fresh header, and
+    # stamp the dataset complete -- an empty one, as of now. (If the finished
+    # combos genuinely had no records, --fresh is the way past it.)
+    if (done or partial) and not csv_has_records(output_csv):
+        print(f"ERROR: {progress_path} records {len(done) + len(partial):,} combo(s) as finished "
+              f"or under way, but {output_csv} "
+              f"{'does not exist' if not os.path.exists(output_csv) else 'has no records'}. "
+              "That is what a fresh clone looks like (the progress files are tracked in git, "
+              "the CSVs are not). Nothing was scraped. Restore data/ first (README: \"Getting "
+              "the data back\"), or pass --fresh to collect everything again (20+ hours) -- "
+              "which is also the way past it if those combos really had no records.",
+              file=sys.stderr)
+        sys.exit(1)
+
     print(f"{len(todo):,} (entity, status) combos remaining of {len(all_combos):,}")
 
-    dropped = drop_unfinished_rows(output_csv, done | set(partial))
+    try:
+        dropped = drop_unfinished_rows(output_csv, done | set(partial), limit=MAX_UNACCOUNTED_ROWS)
+    except UnaccountedRows as e:
+        print(f"ERROR: {output_csv} holds {e.count:,} rows for combos that {progress_path} has no "
+              "record of. A scrape that was cut off leaves at most the page in flight (25 rows), "
+              "so this is not a cut-off: the progress file is probably unreadable, empty or from "
+              "another checkout, and dropping these rows would delete the dataset. Nothing was "
+              "changed. Restore the checkpoint (git checkout it; a copy of an unreadable one is "
+              "kept beside it as .corrupt), or pass --fresh to discard the CSV and start over.",
+              file=sys.stderr)
+        sys.exit(1)
     if dropped:
         print(f"Discarded {dropped:,} rows from a combo cut off before its first checkpoint.")
 
@@ -1316,12 +1575,24 @@ def main():
                 partial.pop(key, None)
             save_progress(progress_path, done, partial)
 
-    remaining = len([c for c in all_combos if (c[0], c[2]) not in done])
-    if remaining:
-        print(f"\nStopped with {remaining:,} combos remaining. Re-run to resume.")
-    else:
+    # "Complete" is a fact about the whole dataset, not about the entities this run was
+    # asked for, and the stamp says when it was last pulled: --entity X finishing X is not
+    # the dataset finishing, and a run that found every combo already done pulled nothing.
+    # Either used to record the time as now, so a debugging run or a re-run on a restored
+    # dataset made stale data read as freshly scraped -- the inverse of the 24 Sep 2026
+    # incident, where fresh data read as stale.
+    remaining_here = len([c for c in all_combos if (c[0], c[2]) not in done])
+    remaining = len([c for c in combos(dataset_entities) if (c[0], c[2]) not in done])
+    if remaining_here:
+        print(f"\nStopped with {remaining_here:,} combos remaining. Re-run to resume.")
+    elif remaining:
+        print(f"\nThis run's combos are done, but {remaining:,} of the whole dataset's are still "
+              "to do, so its scrape time is left as it was.")
+    elif todo:
         stamp = record_scrape_time(args.dataset)
         print(f"\nAll combos complete. Scrape time recorded: {stamp}")
+    else:
+        print("\nNothing to do: every combo was already complete, so the scrape time is left as it was.")
 
     print(f"Records this run: {grand_total:,}")
     print(f"Saved to: {output_csv}")

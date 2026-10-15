@@ -376,8 +376,7 @@ def extra_document_targets():
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from scrape import load_documents  # noqa: E402
 
-    with open(os.path.join(ROOT, "manifest.json"), encoding="utf-8") as f:
-        outdir = os.path.join(ROOT, json.load(f)["dir"])
+    outdir = payload_dir()
     with open(os.path.join(outdir, "meta.json"), encoding="utf-8") as f:
         view_base = json.load(f)["viewBase"]
 
@@ -404,6 +403,21 @@ def extra_document_targets():
     return view_base, blank + already
 
 
+def payload_dir():
+    """The directory of the payload manifest.json points at.
+
+    build_site.py writes manifest.json, and nothing here does; a checkout that has
+    never built (a fresh clone, or data/ copied across) has none. Say what to run
+    rather than raise a bare FileNotFoundError.
+    """
+    manifest = os.path.join(ROOT, "manifest.json")
+    if not os.path.exists(manifest):
+        raise SystemExit(f"{manifest} does not exist. build_site.py writes it, and this reads "
+                         "the payload it points at, so run build_site.py first.")
+    with open(manifest, encoding="utf-8") as f:
+        return os.path.join(ROOT, json.load(f)["dir"])
+
+
 def load_targets(group=None, entities=None):
     """(view_base, [(document number, view token), ...]) for documents with a file.
 
@@ -420,8 +434,7 @@ def load_targets(group=None, entities=None):
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import ne_format  # noqa: E402
 
-    with open(os.path.join(ROOT, "manifest.json"), encoding="utf-8") as f:
-        outdir = os.path.join(ROOT, json.load(f)["dir"])
+    outdir = payload_dir()
 
     columns, docs, _vendors, _vtokens, meta = ne_format.read_payload(outdir)
     _dn, view = ne_format.read_token_blocks(outdir, meta["count"])

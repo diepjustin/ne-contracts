@@ -18,6 +18,12 @@ data/scrape_state.txt
 # Versioned with the code that reads them, that cannot happen quietly.
 data/*_scrape_progress*.json.tmp
 
+# Working files beside a state file: the temporary a kill mid-write leaves behind
+# (scrape_meta.json.tmp, nu_contracts.csv.tmp, ...), and the <file>.corrupt copy
+# scrape.set_aside_unreadable keeps of one it could not read. Neither belongs in git.
+data/*.tmp
+data/*.corrupt
+
 # --daily's own within-run resumption and the weekly diff accumulator it
 # feeds -- both are transient working state (round-tripped via the GitHub
 # Actions cache, not git), same category as the progress files above.

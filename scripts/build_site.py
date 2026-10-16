@@ -748,12 +748,17 @@ def main():
                 "aiCount", "aiModels", "bytes", "digests"):
         if key not in on_disk:
             sys.exit(f"meta.json is missing {key!r} — it was added after the file was written")
-    with open(os.path.join(OUT_DIR, "manifest.json"), "w", encoding="utf-8") as f:
-        json.dump({"buildId": build_id, "dir": f"d/{build_id}"}, f)
 
     verify_payload(outdir, columns, docs, vendor_names, vtok_bytes,
                    dn_tokens, view_tokens, sources, descriptions)
     verify_ai_summaries(outdir, ai_summaries, n)
+
+    # manifest.json is what publishes a build: the page, extract_text.py and
+    # the --descriptions-only / --ai-summaries-only paths all follow it. So it moves
+    # only once the build has been read back and verified. A verify failure
+    # then leaves it naming the last build that passed, not this one.
+    with open(os.path.join(OUT_DIR, "manifest.json"), "w", encoding="utf-8") as f:
+        json.dump({"buildId": build_id, "dir": f"d/{build_id}"}, f)
 
     resident = sum(os.path.getsize(os.path.join(outdir, p)) for p in
                    (ne_format.META, ne_format.COLS_I32, ne_format.COLS_F64,

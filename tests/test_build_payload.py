@@ -285,6 +285,10 @@ GUARDS = [
      "unexpected entity"),
     ("a view URL on another host", lambda: [row(view_url="https://example.invalid/ViewDocument?D=abc")],
      "unexpected view URL shape"),
+    # Nothing checks a Detail URL's host before verify_payload rebuilds it from
+    # DETAIL_BASE, so this one is caught only by the round trip (build-08).
+    ("a detail URL on another host", lambda: [row(url=other_host(detail(b64(1))))],
+     "URL round-trip FAILED"),
     ("a document number over 255 bytes", lambda: [row("9" * 256)], "exceeds 255 bytes"),
     ("a lowercase document number", lambda: [row("ab-123")], "contains lowercase"),
     ("one vendor under two V tokens", lambda: [row("1", dn=1, v=1), row("2", dn=2, v=2)],
@@ -294,6 +298,10 @@ GUARDS = [
     ("a DN token of the wrong length", lambda: [row(url=detail(b64(4, 12)))],
      "DN tokens are not 16 bytes"),
 ]
+
+
+def other_host(url):
+    return url.replace("statecontracts.nebraska.gov", "example.invalid", 1)
 
 
 def view_with_bytes(size):
@@ -496,8 +504,10 @@ def test_a_payload_that_does_not_read_back_stops_the_build(site, monkeypatch, la
         return result
 
     monkeypatch.setattr(ne_format, writer, writes_then_damages)
+    previous = publish_previous_build(site)
     with pytest.raises(SystemExit, match=message):
         site.build()
+    assert manifest_bytes(site) == previous, "a build that failed verification was published"
 
 
 def test_a_meta_key_lost_after_the_first_write_stops_the_build(site, monkeypatch):
@@ -513,3 +523,44 @@ def test_a_meta_key_lost_after_the_first_write_stops_the_build(site, monkeypatch
     monkeypatch.setattr(ne_format, "write_meta", forgets_vendor_groups)
     with pytest.raises(SystemExit, match="meta.json is missing 'vendorGroups'"):
         site.build()
+
+
+# --- the manifest moves only after verification (build-08) --------------------------------------
+
+def publish_previous_build(site):
+    """Stand in for the last good build, so a failed one can be seen not to replace it."""
+    with open(site.root / "manifest.json", "w", encoding="utf-8") as f:
+        json.dump({"buildId": "previous", "dir": "d/previous"}, f)
+    return manifest_bytes(site)
+
+
+def manifest_bytes(site):
+    with open(site.root / "manifest.json", "rb") as f:
+        return f.read()
+
+
+def test_a_detail_url_on_another_host_leaves_the_last_good_build_published(site):
+    site.write(state=[row("1454299"), row("1454300", dn=2, url=other_host(detail(b64(2))))])
+    previous = publish_previous_build(site)
+    with pytest.raises(SystemExit, match="URL round-trip FAILED"):
+        site.build()
+    assert manifest_bytes(site) == previous
+
+
+def test_a_verify_that_crashes_rather_than_exits_does_not_publish_either(site):
+    """A DN token shorter than 16 bytes is written unpadded and read_token_blocks raises a
+    bare ValueError inside verify_payload (build-04 item c). Whatever the eventual fix,
+    the manifest must not already name the build by then."""
+    site.write(state=thousand(odd=1, size=12))
+    previous = publish_previous_build(site)
+    with pytest.raises(Exception):
+        site.build()
+    assert manifest_bytes(site) == previous
+
+
+def test_a_verified_build_replaces_the_previous_one(site):
+    described_site(site)
+    previous = publish_previous_build(site)
+    outdir = site.build()
+    assert manifest_bytes(site) != previous
+    assert os.path.basename(outdir) == ne_format.read_payload(outdir)[4]["buildId"]

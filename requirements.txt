@@ -1,4 +1,8 @@
-requests==2.32.5
+# 2.33.0 fixes Dependabot alert #3 (insecure temp file reuse in
+# extract_zipped_paths) but needs Python >=3.10; 2.32.5 is the last release
+# that installs on the 3.9 local venv. CI (3.11) gets the fixed version.
+requests==2.33.1; python_version >= "3.10"
+requests==2.32.5; python_version < "3.10"
 beautifulsoup4==4.12.3
 pypdf==6.19.0
 # pypdf needs this to open AES-encrypted PDFs and raises rather than saying so

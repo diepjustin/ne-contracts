@@ -236,7 +236,8 @@ def test_known_records_that_are_all_still_listed_flip_nothing_and_cost_no_fetch(
     assert stamp_written(daily.tmp), "a night that read everything finishes and stamps"
     [entry] = json.loads((daily.tmp / "data" / "daily_diff_report.json").read_text(encoding="utf-8"))
     assert entry["entities"][ENTITY] == {"previously_active": 30, "still_active": 30,
-                                         "newly_active": 0, "flipped_to_expired": 0}
+                                         "newly_active": 0, "flipped_to_expired": 0,
+                                         "flipped_back": 0}
 
 
 def test_a_new_record_is_appended_and_a_vanished_one_flips(daily, search):

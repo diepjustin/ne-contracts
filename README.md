@@ -473,8 +473,8 @@ That floor had a price. On a night the state answered empty for everything, ever
 entity with one to four active records was flipped to `Expired` — 17 of them, 29 records,
 in the 28 Sep 2026 release — while the larger ones were refused. The night did not finish,
 so the stamp stayed put and the log named the refusals, but the guard rail below skips
-entities under five, so those small flips passed it. Nothing restores such rows in the
-CSV: `--daily` only ever flips Active to Expired.
+entities under five, so those small flips passed it, and the rows stayed Expired until
+the state listed them again.
 
 So the scrape also judges the dataset as a whole. Across every entity it finished tonight,
 the refused ones included, if the CSV held 50 or more active records and the state no
@@ -488,26 +488,36 @@ that holds most of a dataset is refused on its own — in that snapshot the Univ
 Nebraska Lincoln holds 52% of the active contracts and 61% of the active purchase orders —
 and those are flipped the next night, once the state answers.
 
-**A record that comes back is appended, and its Expired row stays.** A record flipped to
-`Expired` — after a night it was missed, or after an empty night like the one above — is
-unknown when it is listed again, because `--daily` knows only Active rows. It gets a
-detail fetch and a new `Active` row, and the old row is not touched. Unchecked, the site
-then lists it twice, once falsely Expired, and adds its amount into every total twice.
-The 28 Sep 2026 release has 302 Detail URLs carrying both statuses; 134 are identical in
-every other column. `build_site.py` drops an Expired row whose every other column, View
-URL included, matches a published Active row with the same Detail URL — 131 rows and
-$18,505,640.26 on that release, the other three pairs' twins already falling to the
-duplicate-row check. So the site shows such a record once, as Active, while the CSV —
-and the `ne-contracts-hub-data-*` release, which ships the raw CSVs — keeps the stale
-Expired row beside the new one. The new row's View URL comes from a fresh detail fetch,
-so if the state has filed a newer document ahead of the old first one the pair differs
-and both stay listed. A pair that differs anywhere is kept; `45500` below is one.
+**A record that comes back is flipped back, not appended.** Every record `--daily` flips
+to `Expired` is noted in `data/<dataset>_daily_flips.json`, beside the CSV in the Actions
+cache. When the Active search lists one again — after a night it was missed, or after an
+empty night like the one above — its row is flipped back to `Active` in the same rewrite
+that applies the night's endings, and nothing is fetched or appended. Any amendment it
+picked up while off the list goes to `data/changes.jsonl` like any other. A record the CSV
+holds as Expired is never appended by `--daily` any more, which is what keeps every Detail
+URL to one row.
 
-Undoing `--daily`'s own flips in the CSV is deferred, because the undo would rewrite the
-baseline in place on the word of the same Active search whose silence made the flip,
-and no refusal was found that neither lets a search leaking Expired records rewrite
-thousands of rows in one green night nor turns an outage spread over two nights into a
-permanent, silent freeze.
+Until Oct 2026 such a record was unknown, fetched and appended as a new `Active` row beside
+the stale one, and the site listed it twice, once falsely Expired, adding its amount into
+every total twice. The 28 Sep 2026 release has 302 Detail URLs carrying both statuses.
+Those pairs are left as they are: `build_site.py` drops an Expired row whose every other
+column, View URL included, matches a published Active row with the same Detail URL — 131
+rows and $18,505,640.26 on that release — and a pair that differs anywhere is kept;
+`45500` below is one.
+
+Flipping back trusts the same Active search whose silence made the flip, so it has to know
+when that search is wrong the other way: when its Status filter lets Expired records
+through. The test is how many listed records the CSV holds as Expired *and `--daily` never
+flipped* — the full scrape read those from the Expired search, and they outnumber the
+Active rows about sixteen to one, so a leaking filter cannot hide. Five or more such
+strays that are also more than 5% of what an entity listed, or of what the whole dataset
+listed, and nothing is flipped back that night, for that entity or for the dataset, with
+an `::warning` line naming it. A handful below that line is a contract genuinely
+re-opened, and is flipped back too. How many of `--daily`'s own flips came back is never
+part of the test: after an outage spread over two nights all of them come back at once,
+and refusing that would turn the outage into a permanent freeze. A leaky night still
+finishes and stamps, because what it lists can only add to what was seen, so its endings
+are as sound as any night's.
 
 **Amendments are recorded rather than discarded.** Amount, vendor, begin and end date are
 compared against what the CSV already held, and any move is appended to

@@ -29,6 +29,11 @@ data/*.corrupt
 # Actions cache, not git), same category as the progress files above.
 data/*_daily_progress.json*
 
+# Which records --daily itself flipped to Expired, so one listed again can be flipped
+# back rather than appended (see scrape.py's leak_suspected). Rides the Actions cache
+# with the CSV it describes; losing it costs no data.
+data/*_daily_flips.json*
+
 # The amendment log. Append-only, grows slowly, and is the one file here that
 # cannot be regenerated from anything -- a night not recorded is a night gone.
 # Gitignored like the rest of data/, so it rides in the Actions cache and must
@@ -95,3 +100,6 @@ data/ocr_pilot.jsonl.bak-before-full-page-recapture
 ai_summary_test2.log
 venv/
 .claude/
+
+# Python bytecode from running the scripts or the tests.
+__pycache__/

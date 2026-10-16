@@ -1058,40 +1058,93 @@ def record_changes(record, baseline, out_path=CHANGES_JSONL):
 
 
 def patch_status_to_expired(csv_path, flip_urls):
-    """Flip Status Active -> Expired for existing rows whose Detail URL is in flip_urls.
+    """Flip Status Active -> Expired for existing rows whose Detail URL is in flip_urls."""
+    return patch_statuses(csv_path, flip_urls, set())[0]
+
+
+def patch_statuses(csv_path, to_expired, to_active):
+    """Flip Active -> Expired for rows whose Detail URL is in to_expired, and
+    Expired -> Active for one row of each URL in to_active.
+
+    Returns (rows flipped to Expired, {url: values of its row flipped back}),
+    the values being the WATCHED_FIELDS columns as they stood, so the caller can
+    record what moved while the record was off the list.
 
     One full rewrite, same shape as drop_unfinished_rows -- there is no index
     to seek by. Called once per dataset per --daily run, after every entity
     has been scraped, not once per entity.
+
+    A URL in to_active is one with no Active row at all (see load_expired_only),
+    so flipping one of its rows is what leaves it listed exactly once. The one
+    flipped is its last: rows are only ever appended, so that is the row --daily
+    most recently knew as Active, and an older Expired twin beside it -- the
+    pairs the append-on-return behaviour left before Oct 2026 -- stays as it was.
     """
-    if not flip_urls or not os.path.exists(csv_path):
-        return 0
+    if (not to_expired and not to_active) or not os.path.exists(csv_path):
+        return 0, {}
     with open(csv_path, newline="", encoding="utf-8") as f:
         rows = list(csv.reader(f))
     if not rows:
-        return 0
+        return 0, {}
 
     header, body = rows[0], rows[1:]
     patched = 0
-    for r in body:
-        if len(r) > 9 and r[8] == "Active" and r[9] in flip_urls:
+    last_expired = {}
+    for i, r in enumerate(body):
+        if len(r) <= 9:
+            continue
+        if r[8] == "Active" and r[9] in to_expired:
             r[8] = "Expired"
             patched += 1
+        elif r[8] == "Expired" and r[9] in to_active:
+            last_expired[r[9]] = i
 
-    if patched:
+    restored = {}
+    for url, i in last_expired.items():
+        body[i][8] = "Active"
+        restored[url] = tuple(body[i][column] for _key, column, _label in WATCHED_FIELDS)
+
+    if patched or restored:
         tmp = csv_path + ".tmp"
         with open(tmp, "w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
             writer.writerow(header)
             writer.writerows(body)
         os.replace(tmp, csv_path)  # atomic, same reasoning as save_progress
-    return patched
+    return patched, restored
+
+
+def load_expired_only(csv_path):
+    """document_key of every Detail URL the CSV holds as Expired and never as Active.
+
+    These are the records an Active search should not list. --daily uses the set
+    twice: a listed record in it is not fetched or appended (that append is what
+    left a URL with both an Active and an Expired row), and how many of them are
+    listed is what says whether tonight's Status filter held (see leak_suspected).
+
+    Keys rather than URLs because nearly every row is Expired -- about 700,000
+    URLs at ~290 characters each -- and a membership test is all this is for.
+    """
+    expired, active = set(), set()
+    if not os.path.exists(csv_path):
+        return expired
+    with open(csv_path, newline="", encoding="utf-8") as f:
+        reader = csv.reader(f)
+        next(reader, None)  # header
+        for r in reader:
+            if len(r) > 9:
+                if r[8] == "Expired":
+                    expired.add(document_key(r[9]))
+                elif r[8] == "Active":
+                    active.add(document_key(r[9]))
+    return expired - active
 
 
 DAILY_DIFF_REPORT = "data/daily_diff_report.json"
 
 # The per-entity counts --daily reports, each summed into an entry's totals.
-REPORT_COUNTS = ("previously_active", "still_active", "newly_active", "flipped_to_expired")
+REPORT_COUNTS = ("previously_active", "still_active", "newly_active", "flipped_to_expired",
+                 "flipped_back")
 
 
 def append_daily_diff_report(dataset, entity_report, stamp, complete=True):
@@ -1132,7 +1185,8 @@ def append_daily_diff_report(dataset, entity_report, stamp, complete=True):
         entry["entities"].setdefault(name, counts)
     entry["timestamp"] = stamp
     entry["complete"] = complete
-    entry["totals"] = {k: sum(e[k] for e in entry["entities"].values()) for k in REPORT_COUNTS}
+    # .get: an entry merged into tonight's may predate a count.
+    entry["totals"] = {k: sum(e.get(k, 0) for e in entry["entities"].values()) for k in REPORT_COUNTS}
 
     tmp = DAILY_DIFF_REPORT + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
@@ -1175,6 +1229,39 @@ def save_daily_progress(path, done_entities):
     os.replace(tmp, path)
 
 
+def flip_ledger_file(dataset):
+    return f"data/{dataset}_daily_flips.json"
+
+
+def load_flip_ledger(path):
+    """{detail_url: date flipped} for every record --daily itself flipped to Expired.
+
+    Unlike the day's progress file this persists across nights: it is how a
+    record listed again is told apart from one the Status filter let through
+    (see leak_suspected). Losing it costs no data -- a returning record it no
+    longer names counts as unexpected, which only weighs toward judging a night
+    leaky -- so an unreadable one is kept aside and started fresh.
+    """
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            raw = json.load(f)
+        if not isinstance(raw, dict):
+            raise ValueError(f"expected an object, found {type(raw).__name__}")
+    except (OSError, ValueError) as e:
+        set_aside_unreadable(path, e)
+        return {}
+    return raw
+
+
+def save_flip_ledger(path, ledger):
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(ledger, f, indent=0, sort_keys=True)
+    os.replace(tmp, path)
+
+
 # How many active records an entity needs before "all of them vanished" is
 # refused rather than believed. Without a floor, one record was enough: the
 # Coordinating Commission for Postsecondary Education had a single active
@@ -1188,11 +1275,10 @@ def save_daily_progress(path, done_entities):
 #
 # The price: an outage that answers empty for every entity now flips each
 # entity with one to four active records to Expired -- 17 state entities, 29
-# records, on the 28 Sep 2026 release -- and nothing puts those rows back.
-# --daily only ever flips Active -> Expired. When the records are listed again
-# they are unknown, so each is appended as a new Active row. Where that row
-# matches the stale one in every column, View URL included, build_site.py drops
-# the Expired twin and the site lists the record once; the CSV keeps both.
+# records, on the 28 Sep 2026 release. Until Oct 2026 nothing put those rows
+# back: a record listed again was unknown and appended as a new Active row
+# beside its stale Expired one. Now it is flipped back (see leak_suspected),
+# and dataset_breaker below keeps such a night from flipping them at all.
 ALL_GONE_FLOOR = 5
 
 
@@ -1204,8 +1290,8 @@ def refuse_flips(known, seen):
     for every entity for two days; scrape_entity treats an empty first page as
     a clean finish, so `seen` came back empty, `known - seen` was everything,
     and a single run marked all 44,063 active records in the database Expired.
-    Nothing failed, and nothing could undo it: --daily only ever flips Active
-    -> Expired.
+    Nothing failed, and nothing could undo it: --daily then only ever flipped
+    Active -> Expired.
 
     So a flip has to be evidence of an ending, not of an absence. Refuse the
     two shapes that cannot be real -- five or more active records all gone,
@@ -1226,8 +1312,8 @@ def refuse_flips(known, seen):
 # an entity with fewer than ALL_GONE_FLOOR active records is allowed to lose all of them --
 # a small body's last contract ending is real. So on a night the state answers empty for
 # everything, the large entities are refused and the small ones (17 of them, 29 records, in
-# the 28 Sep 2026 release) flip to Expired with nothing to say the night was bad; nothing
-# restores them, because --daily only ever flips Active -> Expired. More than half of a
+# the 28 Sep 2026 release) flip to Expired with nothing to say the night was bad, and stay so
+# until the state lists them again. More than half of a
 # dataset's active records vanishing in one night is not contracts ending: in the local 17 Sep
 # 2026 snapshot, apart from the open-ended 2099 placeholder date, no end date is shared by more
 # than 3% of a dataset's active records, and under 0.1% are still Active past their end date.
@@ -1245,6 +1331,37 @@ def dataset_breaker(known, vanished):
         return (f"{vanished:,} of {known:,} active records ({vanished / known:.0%}) vanished across "
                 "the dataset in one night -- the state is failing, not reporting endings. Flipping "
                 "nothing tonight, for any entity, small ones included. Will re-check next run.")
+    return None
+
+
+# A record --daily flipped to Expired is flipped back when the Active search lists it again.
+# Until Oct 2026 nothing did that: the record was unknown, so it was fetched and appended as a
+# new Active row beside its stale Expired one, and the CSV listed it twice. Flipping back trusts
+# the same search whose silence made the flip, so it has to know when that search is wrong the
+# other way: when its Status filter lets Expired records through. Such a "leak" lists records
+# the CSV holds as Expired that --daily never flipped -- the full scrape read them from the
+# Expired search -- and those far outnumber the Active ones (about 700,000 of 741,653 rows). So
+# the leak is judged on those strays alone, never on how many of --daily's own flips came back:
+# after an outage spread over two nights all of those come back at once, and refusing that
+# would turn the outage into a freeze. A few strays are a contract genuinely re-opened and are
+# flipped back too; past the line nothing is flipped back, for the entity or, judged across
+# every entity read tonight, for the whole dataset. A leaky night is still finished and stamped:
+# what it lists adds to `seen`, so its endings are as sound as any night's, and holding it open
+# would freeze the dataset for as long as the state's filter stays broken. It warns instead.
+LEAK_FLOOR = 5          # strays below this are never a leak, whatever the share
+LEAK_SHARE = 0.05       # ...and at or above it, a leak once they are more than this share of what was listed
+
+
+def leak_suspected(strays, listed):
+    """Why tonight's Active search cannot be trusted to flip anything back, or None.
+
+    `strays`: listed records the CSV holds only as Expired, which --daily never flipped.
+    `listed`: every record the search listed.
+    """
+    if strays >= LEAK_FLOOR and strays > listed * LEAK_SHARE:
+        return (f"the Active search listed {strays:,} record(s) the state had already filed as "
+                f"Expired, of {listed:,} listed -- its Status filter is letting Expired records "
+                "through. Flipping nothing back and appending none of them. Will re-check next run.")
     return None
 
 
@@ -1294,15 +1411,20 @@ def run_daily(args):
 
     progress_path = daily_progress_file(args.dataset)
     done_today = load_daily_progress(progress_path)
+    ledger_path = flip_ledger_file(args.dataset)
+    ledger = load_flip_ledger(ledger_path)
+    expired_only = load_expired_only(output_csv)
 
     write_header = not os.path.exists(output_csv) or os.path.getsize(output_csv) == 0
     start = time.time()
     deadline = start + args.hours * 3600 if args.hours else None
 
     flips = {}    # entity_name -> set(detail_url) flipped to Expired
+    backs = {}    # entity_name -> {detail_url: record} flipped back to Active
     report = {}   # entity_name -> counts dict
     amended = 0   # watched fields seen to have moved, written to changes.jsonl
     scanned_known = scanned_vanished = 0   # every entity read tonight, refused ones too
+    listed_total = strays_total = 0        # every entity finished and not refused tonight
 
     with open(output_csv, "a", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
@@ -1320,17 +1442,29 @@ def run_daily(args):
             entity_val = entities[entity_name]
             known = known_active.get(entity_name, set())
             seen = set()
+            returned = {}   # detail_url -> record, for listed records the CSV holds only as Expired
 
             def note_change(record):
                 nonlocal amended
                 amended += record_changes(record, baseline)
 
+            def note_seen(record, _seen=seen, _returned=returned):
+                _seen.add(record["detail_url"])
+                if document_key(record["detail_url"]) in expired_only:
+                    _returned[record["detail_url"]] = record
+                else:
+                    note_change(record)
+
             count, finished = scrape_entity(
                 session, entity_name, entity_val, "Active", entity_type, doc_type, writer,
                 deadline=deadline,
-                record_filter=lambda r, _k=known: r["detail_url"] not in _k,
-                on_record_seen=lambda r, _s=seen: (_s.add(r["detail_url"]),
-                                                   note_change(r)),
+                # Neither a known Active record nor one the CSV holds as Expired is
+                # fetched or appended: the first is unchanged, the second is flipped
+                # back below or, on a leaky night, left alone. Either way its URL keeps
+                # exactly one row.
+                record_filter=lambda r, _k=known: (r["detail_url"] not in _k
+                                                   and document_key(r["detail_url"]) not in expired_only),
+                on_record_seen=note_seen,
             )
             f.flush()
 
@@ -1351,14 +1485,26 @@ def run_daily(args):
                 print(f"  {entity_name}: {refusal}")
                 continue
 
+            strays = sum(1 for u in returned if u not in ledger)
+            listed_total += len(seen)
+            strays_total += strays
+            appended = seen - known - set(returned)
+            leak = leak_suspected(strays, len(seen))
+            if leak:
+                print(f"::warning title=Daily scrape: the Active search is listing Expired records::"
+                      f"{args.dataset}: {entity_name}: {leak}")
+                returned = {}
+
             vanished = known - seen
             report[entity_name] = {
                 "previously_active": len(known),
                 "still_active": len(seen & known),
-                "newly_active": len(seen - known),
+                "newly_active": len(appended),
                 "flipped_to_expired": len(vanished),
+                "flipped_back": len(returned),
             }
             flips[entity_name] = vanished
+            backs[entity_name] = returned
 
             done_today.add(entity_name)
             save_daily_progress(progress_path, done_today)
@@ -1376,12 +1522,40 @@ def run_daily(args):
         done_today.difference_update(flips)
         save_daily_progress(progress_path, done_today)
         flips.clear()
+        backs.clear()
         report.clear()
 
+    # The same leak test across the dataset, for a filter leaking a few records into each of
+    # many entities. The entities stay finished, as a leaky entity does; only their flip-backs go.
+    leak = leak_suspected(strays_total, listed_total)
+    if leak and any(backs.values()):
+        print(f"::warning title=Daily scrape: the Active search is listing Expired records::"
+              f"{args.dataset}: across the dataset, {leak}")
+        for name in backs:
+            report[name]["flipped_back"] = 0
+        backs.clear()
+
     all_flip_urls = {u for s in flips.values() for u in s}
-    if all_flip_urls:
-        patched = patch_status_to_expired(output_csv, all_flip_urls)
-        print(f"Patched {patched:,} row(s) Active -> Expired.")
+    all_backs = {u: r for b in backs.values() for u, r in b.items()}
+    if all_flip_urls or all_backs:
+        # Into the ledger before the CSV, out of it after: a kill in between leaves a ledger
+        # entry with no Expired row, which is never consulted, rather than an Expired row the
+        # ledger forgot, which would count against the next night as a stray.
+        today = datetime.date.today().isoformat()
+        if all_flip_urls:
+            ledger.update((u, today) for u in all_flip_urls)
+            save_flip_ledger(ledger_path, ledger)
+        patched, restored = patch_statuses(output_csv, all_flip_urls, set(all_backs))
+        if all_flip_urls:
+            print(f"Patched {patched:,} row(s) Active -> Expired.")
+        if all_backs:
+            print(f"Patched {len(restored):,} row(s) Expired -> Active: listed again tonight.")
+            for url in restored:
+                ledger.pop(url, None)
+            save_flip_ledger(ledger_path, ledger)
+            moved = sum(record_changes(all_backs[u], restored) for u in restored)
+            if moved:
+                print(f"Recorded {moved:,} field change(s) to {CHANGES_JSONL} on records listed again.")
 
     if all(e in done_today for e in entities):
         stamp = record_scrape_time(args.dataset)

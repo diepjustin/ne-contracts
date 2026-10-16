@@ -100,3 +100,6 @@ data/ocr_pilot.jsonl.bak-before-full-page-recapture
 ai_summary_test2.log
 venv/
 .claude/
+
+# Python bytecode from running the scripts or the tests.
+__pycache__/

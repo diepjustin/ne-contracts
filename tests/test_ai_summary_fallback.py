@@ -31,6 +31,9 @@ WHERE = {
     "P2": (2, 0, True), "B1": (2, 1, False),
     "S": (3, 0, True),
 }
+# Each row's own list, as row_document_tokens reads it from the xdoc lists. Row 3,
+# publishing one document, has none.
+ROW_DOCS = {0: ["A1", "P1", "A2"], 1: ["P2", "B1"], 2: ["P2", "B1"]}
 
 
 @pytest.fixture(autouse=True)
@@ -44,11 +47,11 @@ def line(tok, summary="Summary.", **extra):
     return json.dumps(out)
 
 
-def load(monkeypatch, tmp_path, lines):
+def load(monkeypatch, tmp_path, lines, tokens=TOKENS, row_documents=ROW_DOCS):
     path = tmp_path / "ai_summaries.jsonl"
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     monkeypatch.setattr(build_site, "AI_SUMMARIES_JSONL", str(path))
-    return build_site.load_ai_summaries(TOKENS)
+    return build_site.load_ai_summaries(tokens, row_documents)
 
 
 def test_the_rows_own_document_wins_wherever_it_falls_in_the_file(monkeypatch, tmp_path):
@@ -83,6 +86,77 @@ def test_another_document_of_a_shared_record_reaches_every_row_too(monkeypatch, 
     summaries, _, docs = load(monkeypatch, tmp_path, [line("B1", "attachment")])
     assert summaries == {1: b"attachment", 2: b"attachment"}
     assert docs == {1: 1, 2: 1}
+
+
+# Review of the fan-out (2026-10-23): rows sharing a View URL can belong to records that
+# publish different documents, and document_positions keeps only one record's list per
+# token. Rows 0 and 1 both carry P2; WHERE holds row 1's record.
+SHARED = ["P2", "P2"]
+SHARED_WHERE = {"P2": (1, 0, True), "B1": (1, 1, False)}
+
+
+def written_shared(monkeypatch, tmp_path, lines, row_documents, doc_counts, where=SHARED_WHERE):
+    monkeypatch.setattr(build_site, "document_positions", lambda tokens: dict(where))
+    summaries, sources, docs = load(monkeypatch, tmp_path, lines, SHARED, row_documents)
+    out = tmp_path / "out"
+    out.mkdir()
+    build_site.write_ai_files(str(out), summaries, sources, docs, len(SHARED), {})
+    build_site.verify_ai_summaries(str(out), summaries, len(SHARED), docs, doc_counts)
+    return summaries, docs
+
+
+def test_another_document_skips_a_sibling_whose_record_does_not_publish_it(monkeypatch, tmp_path):
+    # Scenario A: row 0 publishes only P2. Copying row 1's B1 summary to it at
+    # position 1 made verify_ai_summaries exit -- the whole nightly build.
+    summaries, docs = written_shared(monkeypatch, tmp_path, [line("B1", "amendment")],
+                                     {1: ["P2", "B1"]}, [1, 2])
+    assert summaries == {1: b"amendment"}
+    assert docs == {1: 1}
+
+
+def test_another_document_is_not_shown_under_a_siblings_different_document(monkeypatch, tmp_path):
+    # Scenario B: row 0 publishes [P2, C1]. Row 1's B1 summary at position 1
+    # would have read "Summary of C1" over B1's text. Both records' primary is P2,
+    # so document_positions files both C1 and B1 under row 1, the last row
+    # carrying it.
+    summaries, docs = written_shared(monkeypatch, tmp_path,
+                                     [line("B1", "B1 amendment"), line("C1", "C1 amendment")],
+                                     {0: ["P2", "C1"], 1: ["P2", "B1"]}, [2, 2],
+                                     dict(SHARED_WHERE, C1=(1, 1, False)))
+    assert summaries == {0: b"C1 amendment", 1: b"B1 amendment"}
+    assert docs == {0: 1, 1: 1}
+
+
+def test_another_document_takes_its_place_in_each_siblings_own_list(monkeypatch, tmp_path):
+    summaries, docs = written_shared(monkeypatch, tmp_path, [line("B1", "amendment")],
+                                     {0: ["P2", "C1", "B1"], 1: ["P2", "B1"]}, [3, 2])
+    assert summaries == {0: b"amendment", 1: b"amendment"}
+    assert docs == {0: 2, 1: 1}
+
+
+def test_a_shared_own_document_takes_its_place_in_each_rows_own_list(monkeypatch, tmp_path):
+    # Row 0 lists P2 second, row 1 first; neither borrows the other's position.
+    summaries, docs = written_shared(monkeypatch, tmp_path, [line("P2", "own")],
+                                     {0: ["C1", "P2"], 1: ["P2", "B1"]}, [2, 2],
+                                     {"P2": (1, 0, True), "B1": (1, 1, False), "C1": (1, 0, False)})
+    assert summaries == {0: b"own", 1: b"own"}
+    assert docs == {0: 1, 1: 0}
+
+
+def test_a_shared_own_document_on_a_single_document_sibling_is_position_zero(monkeypatch, tmp_path):
+    _, docs = written_shared(monkeypatch, tmp_path, [line("P2", "own")],
+                             {1: ["B1", "P2"]}, [1, 2], {"P2": (1, 1, True), "B1": (1, 0, False)})
+    assert docs == {0: 0, 1: 1}
+
+
+def test_row_document_tokens_reads_the_xdoc_lists_in_view_token_form():
+    import base64
+    from urllib.parse import quote
+    raw = [bytes([i]) * ne_format.TOKEN_BYTES for i in (1, 2)]
+    blob = ne_format.pack_documents([{"token": t, "name": "n", "size": "1 KB"} for t in raw])
+    want = [quote(base64.b64encode(t).decode(), safe="") for t in raw]
+    assert build_site.row_document_tokens({4: blob}) == {4: want}
+    assert build_site.row_document_tokens([b"", blob]) == {1: want}
 
 
 def test_a_single_document_row_is_summarized_at_position_zero(monkeypatch, tmp_path):

@@ -699,7 +699,8 @@ def main():
     meta["descBytes"] = sum(len(d) for d in descriptions.values())
     add_source_meta(meta, desc_sources)
 
-    ai_summaries, ai_sources, ai_documents = load_ai_summaries(view_tokens)
+    ai_summaries, ai_sources, ai_documents = load_ai_summaries(
+        view_tokens, row_document_tokens(xdoc_packed))
     meta["aiCount"] = len(ai_summaries)
     meta["aiBytes"] = sum(len(s) for s in ai_summaries.values())
     add_ai_meta(meta, ai_sources)
@@ -891,7 +892,9 @@ def attach_ai_summaries_to_build():
         if columns["viewPresent"][i]:
             view_tokens[i] = quote(base64.b64encode(view[i]).decode(), safe="")
 
-    summaries, ai_sources, ai_documents = load_ai_summaries(view_tokens)
+    lists = (ne_format.read_xdoc_blocks(outdir, n)
+             if os.path.isdir(os.path.join(outdir, ne_format.XDOC_DIR)) else [])
+    summaries, ai_sources, ai_documents = load_ai_summaries(view_tokens, row_document_tokens(lists))
     if not summaries:
         sys.exit(f"nothing to attach — {AI_SUMMARIES_JSONL} is missing or matched no rows")
 
@@ -1375,7 +1378,21 @@ def load_descriptions(view_tokens, carry=True):
     return descriptions, sources, documents
 
 
-def load_ai_summaries(view_tokens):
+def row_document_tokens(packed):
+    """row -> that row's own document tokens, in the state's order, from xdoc lists.
+
+    `packed` is row -> pack_documents bytes (a dict, as load_document_counts
+    returns it, or a list, as read_xdoc_blocks does). Tokens come back in the
+    url-quoted base64 form view tokens and data/ai_summaries.jsonl use, the
+    same re-encoding verify_payload proves round-trips.
+    """
+    items = packed.items() if isinstance(packed, dict) else enumerate(packed)
+    return {row: [quote(base64.b64encode(d["token"]).decode(), safe="")
+                  for d in ne_format.unpack_documents(blob)]
+            for row, blob in items if blob}
+
+
+def load_ai_summaries(view_tokens, row_documents=None):
     """(row -> summary bytes, row -> model code, row -> document position), keyed off tokens.
 
     scripts/generate_ai_summaries.py summarizes whatever scripts/ocr_pilot.py
@@ -1392,7 +1409,15 @@ def load_ai_summaries(view_tokens):
 
     A view token can be shared by several rows (the state lists one document
     under more than one record), so a summary keyed on it reaches every one of
-    them, not only whichever row happened to be indexed last.
+    them, not only whichever row happened to be indexed last. Those rows' own
+    records need not publish the same documents, though: document_positions
+    keeps one record's list per token, so the position it gives -- and, for a
+    summary of another document, whether that document is the row's at all --
+    holds for that record's row alone. row_documents (row -> the row's own
+    tokens in the state's order, as row_document_tokens builds it; rows
+    publishing a single document have none) decides it for every row: a
+    summary of another document reaches only the rows whose own list holds it,
+    at the position it has there.
 
     No carry-forward: unlike descriptions, which every nightly build carries
     forward from the previous one as a floor (see carry_descriptions_forward),
@@ -1419,32 +1444,60 @@ def load_ai_summaries(view_tokens):
     # token -> (row, position, is the row's primary), from documents.jsonl.
     where = document_positions(view_tokens)
 
+    # Each row's own document list, from the row's own record. Both builds
+    # pass it. Without it (a caller with no xdoc lists) the only lists known
+    # are the ones document_positions kept, one record per token; those are
+    # attributed to the row it kept them for and to no sibling of it. Never
+    # mix the two: a kept list can be a sibling's record, not this row's.
+    if row_documents is not None:
+        lists = {row: list(tokens) for row, tokens in row_documents.items() if tokens}
+    else:
+        by_row = collections.defaultdict(dict)
+        for token, (row, position, _primary) in where.items():
+            by_row[row][position] = token
+        lists = {row: [by[p] for p in sorted(by)] for row, by in by_row.items()
+                 if len(by) > 1 or 0 not in by}
+
     def candidates(token):
         """[(row, rank, position)] this token's summary could describe."""
         own = rows_of.get(token)
         if own:
             found = where.get(token)
-            # The row's own document, at its position in the record's list.
-            # document_positions starts every row's own token at position 0,
-            # which is right for the ~95% publishing a single document, and
-            # moves it where documents.jsonl lists it. If the list files the
-            # token under a different record, where it sits for this row is
-            # not known, and the page then marks no document rather than the
-            # wrong one.
-            if found is None:
-                position = 0
-            elif found[0] in own:
-                position = found[1]
-            else:
-                position = ne_format.AI_DOC_UNKNOWN
-            return [(row, 0, position) for row in own]
+            out = []
+            for row in own:
+                listed = lists.get(row)
+                if listed:
+                    # Where the row's own record lists it; a record that no
+                    # longer lists the row's View URL at all marks no document.
+                    position = (listed.index(token) if token in listed
+                                else ne_format.AI_DOC_UNKNOWN)
+                elif found is None or found[0] in own:
+                    # No list: the row publishes this one document, which is
+                    # right for the ~95% publishing a single document.
+                    position = 0
+                else:
+                    # documents.jsonl files the token under a different record,
+                    # so where it sits for this row is not known, and the page
+                    # then marks no document rather than the wrong one.
+                    position = ne_format.AI_DOC_UNKNOWN
+                out.append((row, 0, position))
+            return out
         found = where.get(token)
         if found is None:
             return []
-        row, position, _primary = found
-        # Every row carrying that record's primary document, for the same
-        # reason as above.
-        return [(r, 1 + position, position) for r in rows_of.get(view_tokens[row], [row])]
+        row = found[0]
+        # Every row carrying that record's primary document -- but only those
+        # whose own record lists this document, at its place in their list. A
+        # sibling publishing fewer documents, or different ones, would show a
+        # summary of something it does not publish, under another document's
+        # name.
+        out = []
+        for r in rows_of.get(view_tokens[row], [row]):
+            listed = lists.get(r) or []
+            if token in listed:
+                position = listed.index(token)
+                out.append((r, 1 + position, position))
+        return out
 
     best = {}
     unmatched = skipped = 0

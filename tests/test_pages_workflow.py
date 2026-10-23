@@ -58,3 +58,34 @@ def test_the_document_log_is_still_merged_cached_first():
 def test_every_asset_is_used_only_if_it_was_downloaded_now():
     for name in ("scope.jsonl.gz", "documents.jsonl.gz", "ai_summaries.jsonl.gz"):
         assert "if [ -f data/%s ]; then" % name in FETCH
+
+
+# --- what reaches the public site (docs-16) ------------------------------------------------
+
+STAGE = step("Stage the site")
+
+
+def test_only_the_page_its_manifest_and_the_payload_are_staged():
+    assert "rsync" not in STAGE and "./ _site" not in STAGE, "copying the checkout publishes repo internals"
+    assert "cp index.html manifest.json _site/" in STAGE
+    assert "cp -R d _site/d" in STAGE
+    for internal in ("scripts", "tests", "README", "requirements", "eslint", "LICENSE", "data"):
+        assert internal not in STAGE, "%s must not be staged" % internal
+
+
+def test_the_page_fetches_nothing_the_staging_leaves_out():
+    with open(os.path.join(ROOT, "index.html"), encoding="utf-8") as f:
+        page = f.read()
+    fetched = re.findall(r"fetch\(\s*BASE\s*\+\s*([^,)]+)", page)
+    assert fetched, "the page no longer fetches through BASE; recheck what the site must stage"
+    for target in fetched:
+        target = target.strip()
+        assert target == '"manifest.json"' or target.startswith(("dir", "path")), \
+            "index.html fetches %s, which may not be staged" % target
+    # `path` above is fetchBytes' parameter; every caller passes a path inside the build dir.
+    callers = re.findall(r"fetchBytes\(\s*([^,)]+)", page)
+    assert callers and all(c.strip().startswith(("dir", "path")) for c in callers), callers
+
+
+def test_the_upload_takes_the_staged_directory():
+    assert "path: _site" in step("actions/upload-pages-artifact")

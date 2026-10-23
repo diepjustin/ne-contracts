@@ -311,24 +311,24 @@ jobs:
             | jq -r 'sort_by(.createdAt) | reverse | .[3:] | .[].id' \
             | xargs -r -n1 gh cache delete
 
-      # Stage what actually gets published. Copying rather than uploading the
-      # checkout directly is deliberate: data/ holds hundreds of MB of scraped
-      # CSVs and the extraction JSONL, none of which belongs on the site, and
-      # an exclude list is easier to audit than remembering to clean.
+      # Stage what actually gets published, and nothing else: the page, the
+      # manifest, and d/ (the build the manifest names, plus d/rows/ for
+      # ne-connect). index.html fetches nothing outside manifest.json and the
+      # manifest's d/<buildId>/. An allowlist on purpose -- this used to copy
+      # the whole checkout minus an exclude list, which put scripts/, tests/,
+      # the README, requirements.txt and the lint config on the public site
+      # (docs-16), and would have published whatever was added next.
       - name: Stage the site
         run: |
+          rm -rf _site
           mkdir -p _site
-          rsync -a ./ _site/ \
-            --exclude '.git' \
-            --exclude '.github' \
-            --exclude '_site' \
-            --exclude 'data' \
-            --exclude 'venv' \
-            --exclude '**/__pycache__' \
-            --exclude '.pytest_cache'
-          echo "staged $(du -sh _site | cut -f1)"
-          test -f _site/index.html
-          test -f _site/manifest.json
+          cp index.html manifest.json _site/
+          cp -R d _site/d
+          # Optional extras a page might add later; none exist today.
+          for extra in 404.html favicon.ico robots.txt; do
+            if [ -f "$extra" ]; then cp "$extra" _site/; fi
+          done
+          echo "staged $(du -sh _site | cut -f1): $(ls _site | paste -sd' ' -)"
           # The payload the manifest names must actually be there, or the site
           # deploys with a page that cannot load its data.
           dir=$(python3 -c "import json;print(json.load(open('_site/manifest.json'))['dir'])")

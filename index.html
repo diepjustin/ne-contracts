@@ -266,6 +266,9 @@
     padding: 1px 0; white-space: normal;
   }
   #detail .doc-pos { color: var(--muted); min-width: 2.2em; text-align: right; font-variant-numeric: tabular-nums; }
+  /* Themed: left to the browser, these were its default #0000ee, 2.3:1 on
+     the dark panel. */
+  #detail a { color: var(--accent); }
   #detail .doc-row a { font-variant-numeric: tabular-nums; font-family: var(--mono); }
   #detail .doc-size {
     color: var(--muted); font-variant-numeric: tabular-nums;
@@ -347,10 +350,46 @@
   }
   footer a { color: inherit; }
   @media (max-width: 720px) {
-    .hide-sm { display: none; }
     #scroller { height: calc(100vh - 300px); }
     body.has-detail #scroller { height: calc(100vh - 300px - 132px); }
     header, .controls { margin-left: 0; margin-right: 0; border-radius: 0; }
+  }
+  /* Phones: each row is a card. As a table, eight columns at 375px pushed the
+     scroller to 658px wide and cut amounts mid-number -- "$38,025," for $38.0
+     billion -- while Begins and Status sat off-screen and Ends, Type and
+     Agency were hidden outright. As a card, every row shows all eight on
+     three lines, the amount is never truncated, and nothing scrolls sideways.
+     The card is a fixed CARD_H tall, because the table is virtualised on
+     every row being one known height; render() reads ROW_H from the same
+     breakpoint. The column headers become a row of sort buttons that scrolls
+     on its own. (fe-01) */
+  @media (max-width: 720px) {
+    #scroller table, #scroller thead, #scroller tbody { display: block; width: 100%; }
+    #scroller thead { position: sticky; top: 0; z-index: 2; background: var(--panel); border-bottom: 1px solid var(--border); }
+    #scroller thead tr { display: flex; overflow-x: auto; gap: 2px; padding: 0 6px; }
+    #scroller thead th { position: static; flex: 0 0 auto; padding: 8px 8px; border-bottom: none; }
+    #scroller thead th.amt { text-align: left; }
+    #scroller tbody tr { display: block; }
+    #scroller tbody tr[data-row] {
+      display: grid; height: 70px; overflow: hidden; padding: 6px 10px;
+      /* Fixed tracks, so the third line's columns line up from card to card
+         (each card is its own grid; auto tracks would follow its own text)
+         and the amount always has the end-date track plus the agency's to
+         itself: 158px at 320 wide, enough for $38,025,000,000.00. */
+      grid-template-columns: 56px 74px 88px minmax(0, 1fr);
+      grid-template-areas: "doc doc amt amt" "vendor vendor vendor status" "type begin end agency";
+      column-gap: 6px; align-items: baseline; border-bottom: 1px solid var(--border);
+    }
+    #scroller tbody td { padding: 0; border: none; min-width: 0; line-height: 18px; }
+    #scroller td.doc { grid-area: doc; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    #scroller td.amt { grid-area: amt; justify-self: end; font-weight: 600; }
+    #scroller td.vendor { grid-area: vendor; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    #scroller td.st { grid-area: status; justify-self: end; }
+    #scroller td.ty { grid-area: type; font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    #scroller td.begin { grid-area: begin; font-size: 12px; }
+    #scroller td.end { grid-area: end; font-size: 12px; white-space: nowrap; }
+    #scroller td.end::before { content: "\2013\00a0"; }
+    #scroller td.ag { grid-area: agency; font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   }
 </style>
 </head>
@@ -509,13 +548,13 @@
   <table>
     <thead><tr>
       <th data-k="0">Document # <span class="ind"></span></th>
-      <th data-k="7" class="hide-sm">Type <span class="ind"></span></th>
+      <th data-k="7">Type <span class="ind"></span></th>
       <th data-k="1">Vendor <span class="ind"></span></th>
       <th data-k="2" class="amt">Amount <span class="ind"></span></th>
       <th data-k="3">Begins <span class="ind"></span></th>
-      <th data-k="4" class="hide-sm">Ends <span class="ind"></span></th>
+      <th data-k="4">Ends <span class="ind"></span></th>
       <th data-k="5">Status <span class="ind"></span></th>
-      <th data-k="6" class="hide-sm">Agency <span class="ind"></span></th>
+      <th data-k="6">Agency <span class="ind"></span></th>
     </tr></thead>
     <tbody id="rows"></tbody>
   </table>
@@ -540,7 +579,13 @@
   // staging/ is this same file with "../" here, and nothing else changed.
   var BASE = "";
 
-  var ROW_H = 33, BUF = 8;
+  // A row's height, which the virtualised table depends on being exact: 33px
+  // as a table row, CARD_H as a phone card (see the second max-width: 720px
+  // rule). Re-read whenever the window crosses that width.
+  var TABLE_ROW_H = 33, CARD_H = 70, BUF = 8;
+  var narrow = window.matchMedia ? window.matchMedia("(max-width: 720px)") : null;
+  var ROW_H = narrow && narrow.matches ? CARD_H : TABLE_ROW_H;
+  function rowHeight() { ROW_H = narrow && narrow.matches ? CARD_H : TABLE_ROW_H; }
 
   // Browsers cap how tall one element may be -- Chrome at 2^24 px. All 738,195
   // rows at 33 px is 24.4 million, so spacer rows sized to the true height get
@@ -624,8 +669,13 @@
     // window with rows and hides the attribution behind a page scroll.
     var foot = document.querySelector("footer");
     var below = foot ? foot.getBoundingClientRect().height : 0;
+    // On a phone the controls fill more than a screen and are not pinned, so
+    // the table is reached by scrolling the page anyway; once there it should
+    // fill most of the screen, not show three cards in a 220px strip.
+    var floor = narrow && narrow.matches
+      ? Math.max(MIN_TABLE_H, Math.round(window.innerHeight * 0.8)) : MIN_TABLE_H;
     scroller.style.height =
-      Math.max(MIN_TABLE_H, window.innerHeight - top - below) + "px";
+      Math.max(floor, window.innerHeight - top - below) + "px";
   }
 
   // Below this the table is not worth showing and the reader is better served
@@ -1342,16 +1392,16 @@
           (oddCol[id] ? '<span class="odd-flag" data-extra role="img" aria-label="Source oddity: ' +
             esc(oddityText(oddCol[id], begin[id], end[id])) + '" title="As published by the state: ' +
             esc(oddityText(oddCol[id], begin[id], end[id])) + '">⚠\uFE0E</span>' : "") + "</td>" +
-        '<td class="hide-sm" title="' + esc(meta.types[t]) + '">' +
+        '<td class="ty" title="' + esc(meta.types[t]) + '">' +
           esc(shortType(meta.typeGroups[t])) + "</td>" +
         '<td class="vendor">' + highlight(vname[vendorIdx[id]]) + "</td>" +
         '<td class="amt">' + fmtMoney.format(amount[id]) + "</td>" +
-        '<td class="dt">' + fmtDate(begin[id]) + "</td>" +
-        '<td class="dt hide-sm"' + (isOpenEnded(end[id]) ? ' title="' + esc(endTitle(end[id])) + '"' : "") +
+        '<td class="dt begin">' + fmtDate(begin[id]) + "</td>" +
+        '<td class="dt end"' + (isOpenEnded(end[id]) ? ' title="' + esc(endTitle(end[id])) + '"' : "") +
           ">" + endShown(end[id]) + "</td>" +
-        '<td><span class="pill ' + (statusCol[id] === 0 ? "active" : "expired") + '">' +
+        '<td class="st"><span class="pill ' + (statusCol[id] === 0 ? "active" : "expired") + '">' +
           esc(meta.statuses[statusCol[id]]) + "</span></td>" +
-        '<td class="hide-sm">' + esc(meta.entities[entityCol[id]]) + "</td>" +
+        '<td class="ag">' + esc(meta.entities[entityCol[id]]) + "</td>" +
         "</tr>";
     }
 
@@ -2976,7 +3026,7 @@
     });
 
     scroller.addEventListener("scroll", render, { passive: true });
-    window.addEventListener("resize", function () { fitScroller(); render(); });
+    window.addEventListener("resize", function () { rowHeight(); fitScroller(); render(); });
     armLinks();
     armDetail();
 

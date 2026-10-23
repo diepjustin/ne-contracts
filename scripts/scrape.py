@@ -1621,7 +1621,9 @@ def run_daily(args):
         strays = len(stray_docs)
         appended = seen - known - set(returned)
         leak = leak_suspected(strays, len(seen))
-        if leak and accept_strays:
+        # Every stray of a named entity, not only an entity over the line: a dataset-wide streak
+        # is made of entities each under it, and their strays have to leave the dataset's count.
+        if accept_strays and strays:
             print(f"  {entity_name}: --accept-strays: taking {strays:,} stray(s) as genuinely "
                   f"re-opened and flipping them back: {', '.join(stray_docs[:LEAK_SAMPLE])}"
                   f"{'...' if strays > LEAK_SAMPLE else ''}")
@@ -1697,19 +1699,23 @@ def run_daily(args):
                         force_reset=accept_strays)
     if report:
         note_leak_night(streaks, DATASET_STREAK, bool(dataset_leak), today,
-                        sorted(d for n in report for d in samples.get(n, ()))[:LEAK_SAMPLE],
+                        sorted(f"{n}: {d}" for n in report for d in samples.get(n, ()))[:LEAK_SAMPLE],
                         force_reset=accept_strays)
+        if streaks.get(DATASET_STREAK, {}).get("last") == today and "entities" not in streaks[DATASET_STREAK]:
+            streaks[DATASET_STREAK]["entities"] = sorted(n for n in report if samples.get(n))
     save_leak_streaks(streaks_path, streaks)
     persistent = persistent_leaks(streaks, dataset_entities)
     for name, e in sorted(persistent.items()):
+        named = (" ".join(f'--entity "{n}"' for n in e.get("entities", [])) or '--entity "<entity>"'
+                 if name == DATASET_STREAK else f'--entity "{name}"')
         print(f"::error title=Daily scrape: flip-backs held back {e['nights']} nights running::"
               f"{args.dataset}: {name}: the Active search has listed records the CSV holds as "
               f"Expired on {e['nights']} judged nights in a row (last {e['last']}), so none of its "
               "flip-backs or new records have been applied. Either the state's Status filter is "
               "still leaking, or these are records the flip ledger no longer names -- look up "
               f"some of them: {', '.join(e.get('strays', [])) or 'none recorded'}. If they are "
-              f"genuinely Active again: scrape.py {args.dataset} --daily --entity "
-              f"\"<entity>\" --accept-strays. The dataset stays unstamped until then.")
+              f"genuinely Active again: scrape.py {args.dataset} --daily {named} --accept-strays. "
+              "The dataset stays unstamped until then.")
 
     all_flip_urls = {u for s in flips.values() for u in s}
     all_backs = {u: (name, r) for name, b in backs.items() for u, r in b.items()}

@@ -412,8 +412,19 @@ def test_a_thin_leak_across_the_dataset_keeps_its_own_streak(monkeypatch, tmp_pa
     unstamp(tmp_path)
     capsys.readouterr()
     night(monkeypatch, tmp_path, None, search, today=on(3))
-    assert ERROR + scrape.DATASET_STREAK in capsys.readouterr().out
+    printed = capsys.readouterr().out
+    assert ERROR + scrape.DATASET_STREAK in printed
+    assert f'--daily --entity "{CAMPUS}" --entity "{OTHER}" --accept-strays' in printed
+    assert f"{CAMPUS}: 500" in printed, "strays named with their entity"
     assert not stamped(tmp_path)
+
+    # Accepting both entities clears the dataset's count too: each was under the line alone.
+    out = night(monkeypatch, tmp_path, None, search, today=on(3), only=(CAMPUS, OTHER), accept_strays=True)
+    from test_status_flips import RESTORED_VIEW
+    returned = [r for r in out if 500 <= int(r[0]) < 700 and r[8] == "Active"]
+    assert len(returned) == 8 and all(r[10] == RESTORED_VIEW for r in returned)
+    assert streaks(tmp_path) == {}
+    assert stamped(tmp_path)
 
 
 def test_an_unreadable_streak_file_is_set_aside_and_started_fresh(tmp_path, capsys):

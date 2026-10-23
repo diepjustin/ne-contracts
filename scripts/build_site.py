@@ -843,10 +843,13 @@ def add_descriptions_to_build():
     # no description while the blocks beside it hold 540,000.
     ne_format.write_desc_sources(outdir, desc_sources, n)
     ne_format.write_desc_documents(outdir, desc_documents, n)
-    meta.setdefault("bytes", {})[ne_format.DESC_SRC] = os.path.getsize(
-        os.path.join(outdir, ne_format.DESC_SRC))
-    meta.setdefault("digests", {})[ne_format.DESC_SRC] = zlib.crc32(
-        open(os.path.join(outdir, ne_format.DESC_SRC), "rb").read())
+    # Both files, as the full build records them. descdoc.bin's digest used to
+    # be left as the full build wrote it, so the page's selftest -- which now
+    # checks every file it fetches -- would fail on the next attach.
+    for name in (ne_format.DESC_SRC, ne_format.DESC_DOC):
+        path = os.path.join(outdir, name)
+        meta.setdefault("bytes", {})[name] = os.path.getsize(path)
+        meta.setdefault("digests", {})[name] = zlib.crc32(open(path, "rb").read())
     verify_descriptions(outdir, descriptions, n)
 
     meta["descCount"] = len(descriptions)

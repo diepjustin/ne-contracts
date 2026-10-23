@@ -355,3 +355,58 @@ def test_scope_goes_to_its_own_stable_release(repo):
     assert out.returncode == 0, out.stdout + out.stderr
     assert sorted(repo.state()["releases"]["scope-data"]["assets"]) == ["scope.jsonl.gz"]
     assert '"b"' in repo.asset("scope-data", "scope.jsonl.gz")
+
+
+# A publish killed between its two renames leaves the old asset as prev-<asset>, the new one
+# as next-<asset>, and nothing under <asset>. Until Oct 2026 the next run took that as "no
+# baseline" and its leftovers cleanup deleted prev-<asset>, the only real copy.
+NAME = "ai_summaries.jsonl.gz"
+
+
+def died_between_renames(repo):
+    repo.seed("ai-summaries-data", "prev-" + NAME, [ai("a"), ai("b"), ai("c")])
+    repo.seed("ai-summaries-data", "next-" + NAME, [ai("a"), ai("b"), ai("c"), ai("x")])
+
+
+def published_throughout(repo):
+    """Every state the release moved through held the asset under one of its two names."""
+    for e in repo.events():
+        names = e["assets"].get("ai-summaries-data", [])
+        assert NAME in names or "prev-" + NAME in names, names
+
+
+@needs_bash
+def test_a_rerun_restores_the_asset_a_killed_publish_left_as_prev(repo):
+    died_between_renames(repo)
+    jsonl(repo.root / "data" / "ai_summaries.jsonl", [ai("a"), ai("b"), ai("c"), ai("d")])
+    out = repo.publish()
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert "restored prev-" + NAME in out.stderr
+    assert "comparing with the copy published on ai-summaries-data" in out.stdout
+    assert sorted(repo.state()["releases"]["ai-summaries-data"]["assets"]) == [NAME]
+    assert '"d"' in repo.asset("ai-summaries-data", NAME)
+    published_throughout(repo)
+
+
+@needs_bash
+def test_the_restored_asset_is_the_baseline_a_shrinking_file_is_checked_against(repo):
+    died_between_renames(repo)
+    jsonl(repo.root / "data" / "ai_summaries.jsonl", [ai("a"), ai("b")])
+    out = repo.publish()
+    assert out.returncode == 1
+    assert "fewer records" in out.stderr
+    assets = repo.state()["releases"]["ai-summaries-data"]["assets"]
+    assert NAME in assets and "prev-" + NAME not in assets
+    assert '"c"' in repo.asset("ai-summaries-data", NAME)
+    published_throughout(repo)
+
+
+@needs_bash
+def test_a_dry_run_compares_with_prev_and_changes_nothing(repo):
+    died_between_renames(repo)
+    jsonl(repo.root / "data" / "ai_summaries.jsonl", [ai("a"), ai("b")])
+    before = repo.state()
+    out = repo.publish("publish_ai_summaries.sh", "--dry-run")
+    assert out.returncode == 1
+    assert "fewer records" in out.stderr
+    assert repo.state() == before

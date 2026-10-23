@@ -103,12 +103,48 @@ elif ! gh_missing "$err"; then
     exit 1
 fi
 
+asset_id() {
+    gh api "repos/$REPO/releases/tags/$TAG" --jq '.assets[] | "\(.id) \(.name)"' \
+        | awk -v name="$1" '$2 == name { print $1 }'
+}
+
+# A publish that died between its two renames left the old asset as
+# prev-<asset> and nothing under <asset>. That is the published copy, so put it
+# back before anything else: left there, this run would find no baseline (and
+# compare against an older extraction release, or nothing), and the leftovers
+# cleanup below would delete the only real copy. A dry run changes nothing, so
+# it compares against prev-<asset> where it lies.
+recovered_prev=""
+if [ "$release_exists" = 1 ] && [ -z "$(asset_id "$ASSET")" ]; then
+    prev_id=$(asset_id "prev-$ASSET")
+    if [ -n "$prev_id" ]; then
+        if [ "$DRY_RUN" = 1 ]; then
+            echo "$TAG has no $ASSET but has prev-$ASSET, left by a publish that died part" \
+                 "way; a real run renames it back first" >&2
+            recovered_prev="prev-$ASSET"
+        elif gh api -X PATCH "repos/$REPO/releases/assets/$prev_id" -f name="$ASSET" >/dev/null; then
+            echo "restored prev-$ASSET to $ASSET on $TAG, left by a publish that died part way" >&2
+        else
+            echo "$TAG has no $ASSET, only prev-$ASSET, and renaming it back failed;" \
+                 "not publishing" >&2
+            exit 1
+        fi
+    fi
+fi
+
 # The published copy to compare against: the stable release's, or until it
 # has one, the newest extraction-data-* release's (pages.yml's own choice).
 baseline_tag=""
 mkdir -p "$work/old"
 if [ "$release_exists" = 1 ]; then
-    if err=$(gh release download "$TAG" --repo "$REPO" --pattern "$ASSET" --dir "$work/old" 2>&1 >/dev/null); then
+    if [ -n "$recovered_prev" ]; then
+        if ! err=$(gh release download "$TAG" --repo "$REPO" --pattern "$recovered_prev" --dir "$work/old" 2>&1 >/dev/null); then
+            echo "could not download $recovered_prev from $TAG: $err" >&2
+            exit 1
+        fi
+        mv "$work/old/$recovered_prev" "$work/old/$ASSET"
+        baseline_tag="$TAG"
+    elif err=$(gh release download "$TAG" --repo "$REPO" --pattern "$ASSET" --dir "$work/old" 2>&1 >/dev/null); then
         baseline_tag="$TAG"
     elif ! gh_missing "$err"; then
         echo "could not download the published $ASSET from $TAG: $err" >&2
@@ -151,21 +187,22 @@ if [ "$DRY_RUN" = 1 ]; then
     exit 0
 fi
 
-asset_id() {
-    gh api "repos/$REPO/releases/tags/$TAG" --jq '.assets[] | "\(.id) \(.name)"' \
-        | awk -v name="$1" '$2 == name { print $1 }'
-}
-
 if [ "$release_exists" = 0 ]; then
     # --latest=false: this release is storage, not a version of anything.
     gh release create "$TAG" --repo "$REPO" --title "$TITLE" --latest=false \
         --notes "Being published by scripts/publish_release_asset.sh; the notes are filled in once the asset is up."
 fi
 
-# Leftovers from a publish that died part way.
+# Leftovers from a publish that died part way. prev-<asset> is deleted only
+# beside a <asset>: without one it is the published copy, never a leftover.
 for stale in "next-$ASSET" "prev-$ASSET"; do
     id=$(asset_id "$stale")
-    if [ -n "$id" ]; then gh api -X DELETE "repos/$REPO/releases/assets/$id" >/dev/null; fi
+    if [ -z "$id" ]; then continue; fi
+    if [ "$stale" = "prev-$ASSET" ] && [ -z "$(asset_id "$ASSET")" ]; then
+        echo "$TAG has prev-$ASSET but no $ASSET; not deleting it" >&2
+        exit 1
+    fi
+    gh api -X DELETE "repos/$REPO/releases/assets/$id" >/dev/null
 done
 
 gh release upload "$TAG" "$work/next-$ASSET" --repo "$REPO"

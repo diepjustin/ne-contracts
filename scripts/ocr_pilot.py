@@ -63,6 +63,7 @@ from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import extract_scope  # noqa: E402 -- describe(), the score that actually matters
 import extract_text  # noqa: E402 -- worker_session, load_checkpoint, the politeness gate
+import ocr_io  # noqa: E402 -- appends, the run lock, the exit rule
 from build_site import VIEW_BASE  # noqa: E402 -- a plain constant, safe to import directly
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -163,13 +164,17 @@ def load_pilot_checkpoint():
 
 
 def append_pilot_checkpoint(records):
-    if not records:
-        return
-    os.makedirs(os.path.dirname(OUT_JSONL), exist_ok=True)
-    with open(OUT_JSONL, "a", encoding="utf-8") as f:
-        for rec in records:
-            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-        f.flush()
+    ocr_io.append_jsonl(OUT_JSONL, records)
+
+
+def record_failed(record):
+    """True for a document this run got nothing from: a fetch or render error, a
+    crashed worker, or every engine failing. A document OCR'd to no text is not a
+    failure -- that is what OCR said."""
+    if "fetch_error" in record or "render_error" in record or "crash" in record:
+        return True
+    engines = record.get("engines")
+    return not engines or all("error" in r for r in engines.values())
 
 
 def check_engine_available(engine):
@@ -438,6 +443,14 @@ def main():
                          help="just re-print the summary from data/ocr_pilot.jsonl and exit")
     args = parser.parse_args()
 
+    # Held for every mode, --status included: load_pilot_checkpoint() truncates a
+    # torn tail, which must never happen while another run is appending to it.
+    with ocr_io.lock_or_exit():
+        code = run(args)
+    sys.exit(code)
+
+
+def run(args):
     engines = ("tesseract", "vision") if args.engines == "both" else (args.engines,)
 
     all_scanned, sample = load_scanned_sample(args.sample, args.seed)
@@ -446,7 +459,7 @@ def main():
 
     if args.report_only:
         print_summary(checkpoint, len(all_scanned), total_scanned_pages)
-        return
+        return 0
 
     todo = [(dn, tok, pages) for dn, tok, pages in sample if tok not in checkpoint]
 
@@ -455,7 +468,7 @@ def main():
               f"{total_scanned_pages:,} pages")
         print(f"SAMPLE={len(sample):,}  DONE={len(sample) - len(todo):,}  "
               f"REMAINING={len(todo):,}")
-        return
+        return 0
 
     for engine in engines:
         check_engine_available(engine)
@@ -488,6 +501,7 @@ def main():
     # regardless of what the slowest in-flight task is doing.
     start = time.time()
     processed = 0
+    failed = 0
     todo_iter = iter(todo)
     new_records = []
 
@@ -528,6 +542,7 @@ def main():
                 append_pilot_checkpoint(new_records)
                 for rec in new_records:
                     checkpoint[rec.get("tok", id(rec))] = rec
+                    failed += record_failed(rec)
                 new_records = []
 
                 elapsed = time.time() - start
@@ -535,6 +550,15 @@ def main():
                       f"({processed / elapsed:.2f} docs/s, {elapsed:.0f}s elapsed)")
 
     print_summary(checkpoint, len(all_scanned), total_scanned_pages)
+
+    # The summary above is cumulative, over every record on disk; this is about
+    # tonight alone. It used to exit 0 regardless, so a night where every fetch
+    # failed looked exactly like a good one to launchd and to the wrapper.
+    code = ocr_io.failed_run_exit(failed, processed)
+    if code:
+        print(f"ERROR: {failed:,} of {processed:,} documents this run produced no OCR "
+              f"(more than half); exiting {code}.", file=sys.stderr)
+    return code
 
 
 if __name__ == "__main__":

@@ -305,16 +305,24 @@ this page promises are verbatim, so it stays local until someone decides otherwi
 each OCR'd document, or the literal `UNCLEAR` when the text is too garbled. Only the first
 4,000 characters of the OCR text are sent. Records append to `data/ai_summaries.jsonl`;
 `--shard I/N` splits the backlog across machines. Nothing checks a sentence afterwards.
-Neither job's dependencies are in `requirements.txt`: OCR needs
-`pip install ocrmac pymupdf pillow`, and the summaries need Ollama with
-`ollama pull llama3.1:8b-instruct-q4_K_M`.
+Neither job's dependencies are in `requirements.txt`: OCR's are pinned in
+`requirements-ocr.txt` (`ocrmac`, PyMuPDF, Pillow and PyObjC, at the versions the Mac
+runs), and the summaries need Ollama with `ollama pull llama3.1:8b-instruct-q4_K_M`.
+Summary records written since 23 Oct 2026 carry `generated_at`; older ones have no date.
 
 Where a summary goes:
 
 - `pages.yml` downloads `ai_summaries.jsonl.gz` from the newest `extraction-data-*`
   release whenever it rebuilds, beside `scope.jsonl.gz`; a release without it builds
-  without summaries. Nothing in the repository produces or uploads that asset — it is a
-  manual step after a local run.
+  without summaries.
+- `scripts/publish_ai_summaries.sh`, run by hand on the Mac, publishes the file to one
+  stable release, `ai-summaries-data` (asset `ai_summaries.jsonl.gz`), and
+  `scripts/publish_scope.sh` does the same for `scope.jsonl` (`scope-data`,
+  `scope.jsonl.gz`). Each refuses a file that does not parse, names a model
+  `build_site.AI_MODELS` does not list, or holds less than the copy already published,
+  and records the count and sha256 in the release notes. `pages.yml` does not read
+  those two releases yet; until it does, getting a summary onto the site still means
+  putting the asset on the `extraction-data-*` release by hand.
 - `build_site.py` joins a summary to a row by the row's view token, so only a row's own
   primary document can carry one. On 13 Oct 2026, 105,460 summaries had been generated,
   104,174 of them with text, and 84,527 rows showed one (`meta.aiCount`).
@@ -342,13 +350,26 @@ What to know before trusting one (measured 13 Oct 2026):
 
 How it runs. Both jobs run on one Mac under launchd, not in CI; their LaunchAgent plists
 (`com.justindiep.ne-contracts.ocr-catchup` and `…ocr-recapture`) are not in the repo.
-`scripts/run_ocr_catchup.sh` runs nightly at 02:00 — a calendar job, so a run missed while
-the Mac slept fires on wake — and does more than OCR: it first runs
-`scrape.py <dataset> --daily` for all three datasets and `build_site.py` against that
-Mac's own `data/`, which is not the dataset CI publishes from (that lives in the Actions
-cache), and then `extract_text.py`, `ocr_pilot.py` and `generate_ai_summaries.py`. A step
-that fails does not stop the ones after it, and the script always exits 0, so launchd's
-last exit status never shows a failure; read `logs/ocr_catchup.log`.
+`scripts/run_ocr_catchup.sh` runs nightly at 04:30, from `~/Developer/ne-contracts`
+rather than the iCloud copy, under `caffeinate`. launchd does not wake a sleeping Mac: a
+run missed while it slept fires at the next wake, which can be mid-morning. The job does
+more than OCR. It first downloads that day's `ne-contracts-hub-data-<date>` release (the
+CSVs and `scrape_meta.json` the GitHub nightly published at about 03:17) instead of
+scraping its own copy, which had drifted from what the site shows; `--local-scrape` still
+scrapes instead. That release carries no `documents.jsonl`, so the Mac's own build calls
+the document count of newer records unknown, which nothing it feeds depends on. Then come
+`build_site.py`, a prune of every `d/` build but the current one, `extract_text.py`,
+`extract_scope.py`, `ocr_pilot.py` and `generate_ai_summaries.py`.
+
+A step that fails does not stop the ones after it, but the script now exits with the
+first non-zero step code: 3 when the day's release is not out yet, 4 when it is unusable
+(nothing in `data/` is replaced), 2 when OCR or summaries ran but more than half of the
+night's items failed, 75 when another run holds `data/.ocr.lock`. Each step's exit code
+and duration go to `logs/ocr_catchup.log` and to `logs/ocr_status.json`, which also
+records the start and finish times, the commit and how many OCR and summary records the
+night added. Nothing outside the Mac reads it yet. `scripts/update_live_checkout.sh`
+brings that checkout up to `origin/main`: fast-forward only, requirements reinstalled
+when they change, tests run, and a rollback if they fail.
 `scripts/run_ocr_recapture.sh` was a one-time backlog job. The first OCR pass kept 6 pages
 and 4,000 characters per document; on 17 Sep 2026 the caps went to 200 and 100,000 after a
 corpus-wide check found 24,344 documents (22.4%) had run past the page cap, and a

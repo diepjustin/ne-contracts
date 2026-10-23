@@ -100,7 +100,24 @@ The scraper reproduces the state's records faithfully, including their errors.
   expired and $21,204,743 active. 176 triples repeat; 5 are two different documents.
 - **Document `41780` begins 09/28/2223** and ends 09/28/2023. Filter on begin > end to
   find that class of error — the page has a checkbox for it.
-- Open-ended records commonly carry an end date of `12/31/2099` or `01/01/2099`.
+- Open-ended records commonly carry an end date of `12/31/2099` or `01/01/2099` (and 19
+  carry `12/31/9999`). The page shows those three exact dates as *open-ended*, with the
+  date as recorded on hover; sorting and the CSV export use the recorded date.
+- **Some published values cannot be right as they stand**, and the page keeps them:
+  56 negative amounts (−$75.8M in all), 317 records that end before they begin, and 158
+  with a year before 1900 or after 2100 other than the placeholders above — 511 rows on
+  the 22 Oct 2026 data. Each carries a small ⚠ mark naming the problem, and every total
+  includes them as published; the record count says how many are in the current view.
+- Vendor names are displayed with runs of whitespace and control characters collapsed
+  (1,532 rows have a double space). The CSV export, the vendor groups and every join use
+  the state's exact string.
+- **CSV exports say when and what they are.** The file is named
+  `nebraska-contracts_<data date>_build-<build id>_<n>-records_page-links.csv` (Export CSV)
+  or `..._state-source-links.csv` (Export + source links); the link column is "Record
+  Link (this site)" or "State Source URL" accordingly, and every line ends with a "Data As
+  Of" column holding the scrape time. A text cell starting with `=`, `+`, `-`, `@`, a tab
+  or a CR is prefixed with an apostrophe so a spreadsheet shows it instead of evaluating
+  it; numbers, including negative amounts, are left as numbers.
 - Amounts are as recorded by the state and may not reflect amendments. `--daily` does not
   rewrite an amended row — the CSV keeps the value from the last full scrape — but it does
   record the movement to `data/changes.jsonl`. Only a full re-scrape updates the row
@@ -150,7 +167,8 @@ The scraper reproduces the state's records faithfully, including their errors.
 - **Some rows show an AI-generated summary, and it is not the state's words.** For
   scanned documents the site can show a one-sentence summary that a local language model
   wrote from OCR text. It sits in its own box under the label "AI-GENERATED SUMMARY",
-  says it is not verified, is not searchable and is not in the CSV export. It can be
+  says it is not verified, is not searchable and is not in the CSV export. It names the
+  document it summarizes, which is not always the one the row links to. It can be
   wrong, or say nothing about the document. See
   [Generated and OCR'd content](#generated-and-ocrd-content) before quoting one.
 
@@ -305,22 +323,40 @@ this page promises are verbatim, so it stays local until someone decides otherwi
 each OCR'd document, or the literal `UNCLEAR` when the text is too garbled. Only the first
 4,000 characters of the OCR text are sent. Records append to `data/ai_summaries.jsonl`;
 `--shard I/N` splits the backlog across machines. Nothing checks a sentence afterwards.
-Neither job's dependencies are in `requirements.txt`: OCR needs
-`pip install ocrmac pymupdf pillow`, and the summaries need Ollama with
-`ollama pull llama3.1:8b-instruct-q4_K_M`.
+Neither job's dependencies are in `requirements.txt`: OCR's are pinned in
+`requirements-ocr.txt` (`ocrmac`, PyMuPDF, Pillow and PyObjC, at the versions the Mac
+runs), and the summaries need Ollama with `ollama pull llama3.1:8b-instruct-q4_K_M`.
+Summary records written since 23 Oct 2026 carry `generated_at`; older ones have no date.
 
 Where a summary goes:
 
-- `pages.yml` downloads `ai_summaries.jsonl.gz` from the newest `extraction-data-*`
-  release whenever it rebuilds, beside `scope.jsonl.gz`; a release without it builds
-  without summaries. Nothing in the repository produces or uploads that asset — it is a
-  manual step after a local run.
-- `build_site.py` joins a summary to a row by the row's view token, so only a row's own
-  primary document can carry one. On 13 Oct 2026, 105,460 summaries had been generated,
-  104,174 of them with text, and 84,527 rows showed one (`meta.aiCount`).
+- `pages.yml` downloads `ai_summaries.jsonl.gz` from the `ai-summaries-data` release
+  whenever it rebuilds (falling back to the newest `extraction-data-*` release while that
+  one is missing), and warns when the asset is more than 14 days old; with neither, it
+  builds without summaries.
+- `scripts/publish_ai_summaries.sh`, run by hand on the Mac, publishes the file to one
+  stable release, `ai-summaries-data` (asset `ai_summaries.jsonl.gz`), and
+  `scripts/publish_scope.sh` does the same for `scope.jsonl` (`scope-data`,
+  `scope.jsonl.gz`). Each refuses a file that does not parse, names a model
+  `build_site.AI_MODELS` does not list, or holds less than the copy already published,
+  and records the count and sha256 in the release notes. `pages.yml` reads
+  those two releases first.
+- `build_site.py` joins a summary to a row by the row's own view token first. Where the
+  row's own document has no summary (or only `UNCLEAR`), the first summarized of the
+  record's other documents, in the state's order, stands in — the same rule descriptions
+  follow — and a summary keyed on a view token several rows share reaches all of them.
+  Until Oct 2026 only the row's own document counted, and every summary of an amendment
+  or attachment (19,639 on 22 Oct) was dropped as "unmatched". On the 22 Oct data that
+  rule change took the rows showing a summary from 84,721 to 87,245, 2,504 of them from
+  another document.
 - The payload carries them as the `ai/` blocks, `aisrc.bin` (which model wrote each row's
-  summary) and `meta.aiModels` / `meta.aiCount`. A summary is not in the search index and
-  not in the CSV export.
+  summary), `aidoc.bin` (which of the record's documents was summarized, as a position in
+  the state's list; 255 = not known) and `meta.aiModels` / `meta.aiCount` /
+  `meta.aiFormatVersion` (2 since `aidoc.bin`; versioned apart from `formatVersion`
+  because `--ai-summaries-only` never touches a resident file). The panel says "Summary
+  of <file name> (document k of n)" above every summary and marks that document in the
+  list; a page meeting a newer `aiFormatVersion` than it knows shows no summaries. A
+  summary is not in the search index and not in the CSV export.
 - The row panel shows it in its own box, labelled "AI-GENERATED SUMMARY", with the note
   *Generated from OCR text and not verified. Meant to help you decide whether to open the
   source document, not to be relied on as fact — read the original before citing anything
@@ -342,13 +378,26 @@ What to know before trusting one (measured 13 Oct 2026):
 
 How it runs. Both jobs run on one Mac under launchd, not in CI; their LaunchAgent plists
 (`com.justindiep.ne-contracts.ocr-catchup` and `…ocr-recapture`) are not in the repo.
-`scripts/run_ocr_catchup.sh` runs nightly at 02:00 — a calendar job, so a run missed while
-the Mac slept fires on wake — and does more than OCR: it first runs
-`scrape.py <dataset> --daily` for all three datasets and `build_site.py` against that
-Mac's own `data/`, which is not the dataset CI publishes from (that lives in the Actions
-cache), and then `extract_text.py`, `ocr_pilot.py` and `generate_ai_summaries.py`. A step
-that fails does not stop the ones after it, and the script always exits 0, so launchd's
-last exit status never shows a failure; read `logs/ocr_catchup.log`.
+`scripts/run_ocr_catchup.sh` runs nightly at 04:30, from `~/Developer/ne-contracts`
+rather than the iCloud copy, under `caffeinate`. launchd does not wake a sleeping Mac: a
+run missed while it slept fires at the next wake, which can be mid-morning. The job does
+more than OCR. It first downloads that day's `ne-contracts-hub-data-<date>` release (the
+CSVs and `scrape_meta.json` the GitHub nightly published at about 03:17) instead of
+scraping its own copy, which had drifted from what the site shows; `--local-scrape` still
+scrapes instead. That release carries no `documents.jsonl`, so the Mac's own build calls
+the document count of newer records unknown, which nothing it feeds depends on. Then come
+`build_site.py`, a prune of every `d/` build but the current one, `extract_text.py`,
+`extract_scope.py`, `ocr_pilot.py` and `generate_ai_summaries.py`.
+
+A step that fails does not stop the ones after it, but the script now exits with the
+first non-zero step code: 3 when the day's release is not out yet, 4 when it is unusable
+(nothing in `data/` is replaced), 2 when OCR or summaries ran but more than half of the
+night's items failed, 75 when another run holds `data/.ocr.lock`. Each step's exit code
+and duration go to `logs/ocr_catchup.log` and to `logs/ocr_status.json`, which also
+records the start and finish times, the commit and how many OCR and summary records the
+night added. Nothing outside the Mac reads it yet. `scripts/update_live_checkout.sh`
+brings that checkout up to `origin/main`: fast-forward only, requirements reinstalled
+when they change, tests run, and a rollback if they fail.
 `scripts/run_ocr_recapture.sh` was a one-time backlog job. The first OCR pass kept 6 pages
 and 4,000 characters per document; on 17 Sep 2026 the caps went to 200 and 100,000 after a
 corpus-wide check found 24,344 documents (22.4%) had run past the page cap, and a
@@ -372,7 +421,7 @@ scratch instead, pass `--fresh` — 20+ hours.
 
 Once `data/` is restored, bring it up to date with `--daily`; a full scrape of a dataset
 whose combos are all done has nothing to fetch and leaves its recorded time alone (and
-`--entity X` finishing X does not stamp the whole dataset either). Restore
+`--entity X` finishing X, with or without `--daily`, does not stamp the whole dataset either). Restore
 `scrape_meta.json` with the CSVs so that time matches the data.
 
 ```bash
@@ -385,7 +434,7 @@ python3 scripts/scrape.py state             # -> data/state_agencies.csv
 python3 scripts/scrape.py state --status    # progress, no network
 python3 scripts/scrape.py state --hours 3   # stop cleanly after 3h
 python3 scripts/scrape.py state --entity "Roads, Department of"
-python3 scripts/check_entity_drift.py       # has the state's entity list changed?
+python3 scripts/check_entity_drift.py --strict   # has the state's entity list changed? (exit 1 if so)
 
 python3 scripts/backfill_documents.py       # -> data/documents.jsonl (the 33h one)
 python3 scripts/backfill_documents.py --dataset contract   # one dataset at a time
@@ -490,12 +539,22 @@ and those are flipped the next night, once the state answers.
 
 **A record that comes back is flipped back, not appended.** Every record `--daily` flips
 to `Expired` is noted in `data/<dataset>_daily_flips.json`, beside the CSV in the Actions
-cache. When the Active search lists one again — after a night it was missed, or after an
-empty night like the one above — its row is flipped back to `Active` in the same rewrite
-that applies the night's endings, and nothing is fetched or appended. Any amendment it
-picked up while off the list goes to `data/changes.jsonl` like any other. A record the CSV
-holds as Expired is never appended by `--daily` any more, which is what keeps every Detail
-URL to one row.
+cache: a hash of its Detail URL and the date flipped. An entry is dropped once its record
+is no longer Expired in the CSV, and after 365 days, since most flips are real endings that
+never come back and the file otherwise grew by about 80,000 entries a year.
+
+When the Active search lists one again — after a night it was missed, or after an empty
+night like the one above — its row is flipped back to `Active` in the same rewrite that
+applies the night's endings, and nothing is appended. The row is rewritten the way a new
+record's is: vendor, amount and dates from tonight's listing, and a detail fetch for its
+View URL and its `documents.jsonl` entry, made once the night has been judged (below), so
+a leaking search costs no fetches. Until late Oct 2026 only the Status moved, so a contract
+extended while it was off the list came back Active with its old end date: 12 of the 13
+records restored in the 20–22 Oct releases were Active with an end date already passed. A
+record whose detail page cannot be read stays Expired for the night and is restored the
+next. Whatever moved while it was off the list goes to `data/changes.jsonl`, dated that
+night. A record the CSV holds as Expired is never appended by `--daily` any more, which is
+what keeps every Detail URL to one row.
 
 Until Oct 2026 such a record was unknown, fetched and appended as a new `Active` row beside
 the stale one, and the site listed it twice, once falsely Expired, adding its amount into
@@ -512,12 +571,40 @@ flipped* — the full scrape read those from the Expired search, and they outnum
 Active rows about sixteen to one, so a leaking filter cannot hide. Five or more such
 strays that are also more than 5% of what an entity listed, or of what the whole dataset
 listed, and nothing is flipped back that night, for that entity or for the dataset, with
-an `::warning` line naming it. A handful below that line is a contract genuinely
+an `::warning` line naming it. Nor is anything appended: a leaking filter lists Expired
+records the CSV has never seen as readily as ones it has, so each entity's new rows (and
+their `documents.jsonl` entries) are held until both verdicts are in, and a leaky night's
+are dropped, counted as `held_back` in the diff report instead of `newly_active`. They are
+fetched and judged again the next night, and appended then if the filter holds. A handful below that line is a contract genuinely
 re-opened, and is flipped back too. How many of `--daily`'s own flips came back is never
 part of the test: after an outage spread over two nights all of them come back at once,
 and refusing that would turn the outage into a permanent freeze. A leaky night still
 finishes and stamps, because what it lists can only add to what was seen, so its endings
 are as sound as any night's.
+
+**Strays that never go away turn the run red.** Not every stray is a broken filter. A
+record `--daily` flipped before the ledger existed, or one the ledger lost (a cache rebuilt
+from release CSVs, a ledger set aside as corrupt, an entry past 365 days), reads as a stray
+when it is listed again — and it is listed every night. Six such records at an agency of a
+hundred is a leak, so that agency's flip-backs and new records were held back night after
+night with a warning and a green run. Persistence cannot tell the two apart (a filter that
+stays broken lists the same strays every night too), so it is not taken as proof either way.
+Instead `data/<dataset>_daily_leaks.json` counts each entity's leak nights in a row, and the
+dataset's own: a clean night ends a streak, and a night that judged nothing (the entity
+refused or unfinished, the dataset-wide breaker tripped, a same-day re-run) leaves it alone.
+On the third, the run prints an `::error` naming the entity and a few of its strays'
+document numbers, and the dataset is left unstamped, so the last step of `daily.yml` turns
+the run red. Nothing else is blocked, but the site's "last updated" date for that dataset
+stays where it was for as long as the run is red. Look the strays up on the state's site; if
+they really are Active again:
+
+```bash
+python3 scripts/scrape.py state --daily --entity "Military Department" --accept-strays
+```
+
+That re-reads the named entities, takes their strays as re-opened, restores them as above,
+and ends their streaks (and the dataset's). If the filter is genuinely leaking, leave it:
+the run stays red until it stops.
 
 **Amendments are recorded rather than discarded.** Amount, vendor, begin and end date are
 compared against what the CSV already held, and any move is appended to
@@ -767,7 +854,15 @@ display rather than by re-running the code that produced it — re-running it wo
 with itself no matter what it read. The amount is read back out of the formatted cell as
 a number (to the cent, since the formatter is capped at two fraction digits), and the
 type code is taken from the type cell's hover text, which is where a reader finds it.
-The permalink under the document number is checked against the export's URL column.
+The permalink under the document number is checked against the export's "Record Link
+(this site)" column, and every exported line's "Data As Of" against the build's. Three
+display rules are undone the same way: an *open-ended* End cell is compared through the
+recorded date its hover text leads with, a vendor name through the tidying the page
+applies to it, and the source-oddity mark (marked `data-extra`) is left out of the cell
+text. The export's formula guard (an apostrophe before a leading `= + - @`, tab or CR in
+a text cell) is stripped before comparing. The CRCs also cover `descsrc.bin`,
+`descdoc.bin`, `aisrc.bin` and `aidoc.bin`, and a build with `aiFormatVersion` 2 fails if
+`aidoc.bin` did not load.
 
 Rows are sampled from eight scroll positions rather than one screenful, because past
 `MAX_H` the scroller stops being a 1:1 map of the list and scroll position is scaled onto
@@ -784,7 +879,9 @@ no rendered table to read otherwise — and prints the report below the table.
 
 `?selftest=1` also publishes the page's pure functions on `window.neContracts`:
 `fmtDate`, `shortType`, `csvCell`, `csvParts`, `docStr`, `docCountCell`, `comparator`,
-`permalink`, `yearFloor`, `yearCeil`, `amountBound`, `crc32`, `queryFor` and `stateFrom`. Every one of them is a
+`permalink`, `yearFloor`, `yearCeil`, `amountBound`, `crc32`, `queryFor`, `stateFrom`,
+`csvUnguard`, `csvHead`, `csvName`, `comboFilter`, `isOpenEnded`, `endShown`, `oddity`,
+`oddityText`, `displayName`, `listedPositions` and `documentName`. Every one of them is a
 function of its arguments and the loaded payload, and every one was unreachable from
 outside the IIFE, which is most of why this page has never had a unit test.
 
@@ -827,14 +924,29 @@ preview a change, and the result stays on your machine.
 | trigger | what happens |
 |---|---|
 | push to `main` | restores the last payload from the Actions cache and deploys it. No rebuild, so a portfolio edit does not need the CSVs. (True only from 9 Sep 2026 — see "The payload cache never once hit".) |
-| every night | `daily.yml` dispatches `pages.yml` **after** `check_daily_diff.py` passes, so it rebuilds from fresh data. |
+| every night | `daily.yml` dispatches `pages.yml` **after** `check_daily_diff.py` passes and the `data/` cache save has finished, so it rebuilds from fresh data. Its `verify-deploy` job then waits on that run and checks the live site (below). |
 
 The dispatch is deliberately not a `workflow_run` trigger, and staying that way is the
 point of the nightly change rather than an accident of it. `workflow_run` fires on any
 successful completion and cannot see what the run decided: it would deploy after a night
-the DST gate correctly skipped, and after a `dry_run`, neither of which produced anything
-to publish. The dispatch sits after the guard rail in the same job, so a scrape the guard
-rail rejects still never reaches the site.
+the gate skipped as already done, and after a `dry_run`, neither of which produced anything
+to publish. The dispatch runs only if the guard rail step succeeded, so a scrape the guard
+rail rejects still never reaches the site. It also waits for the cache save: `pages.yml`
+rebuilds from the newest `ne-contracts-data-` cache, and until Oct 2026 the dispatch landed
+11–28 s before the save did. It comes before the prunes and the release, so none of those
+failing can skip a deploy.
+
+**The nightly checks that the deploy happened.** It used to dispatch and never look back,
+so a failed Pages build left the site frozen while every nightly stayed green. The
+`verify-deploy` job in `daily.yml` finds the `pages.yml` run it dispatched (the earliest
+`workflow_dispatch` run created after the dispatch time; `gh workflow run` returns no id),
+waits on it with `gh run watch --exit-status`, then runs `scripts/check_live_site.py`
+against the published `manifest.json`. That passes only if the live `buildId` was stamped
+at or after the dispatch (it is runner time, UTC), retrying for about ten minutes through
+the CDN. A red `verify-deploy` beside a green scrape job means the data is fine and the
+site is not. One known false red: a push to `main` landing while the dispatched run is
+still queued replaces it in the `pages` concurrency group, so the watch fails even though
+the push's run deploys the same data; the live-site check still reports what is served.
 
 **Every night is a publish night as of Sep 2026.** It was Sunday only before that, which
 left the site up to six days behind a source the state updates daily, and left the guard
@@ -847,13 +959,17 @@ discovered later:
   a silent stop is this project's characteristic failure, and a site that rebuilds
   unconditionally cannot go quietly stale.
 - `check_entity_drift.py` now asks the state for its entity lists nightly rather than
-  weekly — two requests, but a drift it finds blocks publishing every night until the
-  committed lists are updated.
+  weekly — two requests, retried once. A drift it finds, or a failure to ask, is a
+  `::warning` annotation every night until the committed lists are updated, not a failed
+  step: it used to exit 1, which stopped the deploy for something `--daily` does not even
+  read (a new agency is simply not scraped until it is added). Run it with `--strict`
+  before a full re-scrape to get the exit 1 back.
 - Seven 60 MB payload cache entries a week instead of one, which is why `pages.yml` prunes
   them to the newest three.
 
-Descriptions are built in CI from `scope.jsonl.gz`, downloaded from the newest
-`extraction-data-*` release, laid over the previous build's. `carry_descriptions_forward()`
+Descriptions are built in CI from `scope.jsonl.gz`, downloaded from the `scope-data`
+release (or, while that does not exist or lacks the asset, the newest `extraction-data-*`
+release), laid over the previous build's. `carry_descriptions_forward()`
 is not a fallback: `pages.yml` restores the build being replaced from the payload cache
 before every nightly dispatch, so every nightly build starts from it, and only a build
 whose restore missed — a push that moved the key — starts from `scope.jsonl` alone. So a
@@ -888,6 +1004,19 @@ becomes one unparseable line in the middle of the file, which `load_documents` r
 read past — and if the release were ever a single line, that fusion would instead be
 silently truncated, taking a real record with it.
 
+**AI summaries** come the same way, from `ai-summaries-data` with the same fallback; both
+fixed tags are updated in place by the Mac job, and the build warns when either asset is
+more than 14 days old. All three downloads go through `scripts/fetch_release_asset.py`,
+which tells "not published" (a warning; the build goes on without the file) apart from "the
+download broke" (an error; the build fails). Until Oct 2026 they ran with `2>/dev/null`, so
+a network failure looked like a missing asset and the site published without descriptions
+or summaries. A missing asset is looked for again after 10 s, and a failed download is
+retried once, because the publish script renames a new asset into place in two steps.
+
+**Only the site is deployed:** `index.html`, `manifest.json` and `d/` (the build the
+manifest names, and `d/rows/`). The artifact used to be the whole checkout minus an exclude
+list, which served `scripts/`, `tests/` and this README on the public site.
+
 `index.html` carries no build identity — it reads `manifest.json` with
 `cache: 'no-store'` — so a reader holding a stale page can never pair it with a different
 build's data.
@@ -900,15 +1029,26 @@ every clone, so it remains a separate decision.
 
 ### Nightly automation
 
-`daily.yml` scrapes all three datasets with `--daily` every night, on a cron
-set for 10pm Central — though see the slippage below for when it actually runs. GitHub
-Actions cron has no DST awareness, so two entries fire daily and the gate compares
-`github.event.schedule` against the entry implied by the current offset, letting exactly
-one through. It gates on *which entry fired*, never on the wall clock, because an earlier
-hour-equals-22 check silently skipped entire nights, reporting success while scraping
-nothing. There is no weekday arithmetic left in the gate either: it rolled the weekday
-back for a run that landed before noon Central, purely so a delayed Sunday-night scrape
-still counted as Sunday and reached the publish leg. Nothing cares what day it is now.
+`daily.yml` scrapes all three datasets with `--daily` every night, from two cron entries
+set off the hour for the late evening, Central (`17 3` and `47 4` UTC) — though see the
+slippage below for when they actually run. Both fire every night, and the gate step makes
+the second a **backup**: a scheduled run proceeds unless every dataset already finished
+*tonight*, according to `scrape_meta.json` in the newest hub-data release. So the backup
+skips a night the first entry finished, and retries one it did not. A manual dispatch
+always runs, and any doubt — no release, a download error, an unreadable file — means run,
+because running twice is harmless and a skipped night is not. "Tonight" runs from noon to
+noon Central (`scripts/nightly_gate.py`): every run lands inside one such window whatever
+the delay, where "is there a release dated today" would skip an on-time 10pm run on a day
+whose release a late run cut at 3am. The gate this replaced let through only the entry
+matching the current UTC offset; at the delays below, both entries would have skipped the
+14 Mar 2027 spring-forward night. One consequence: a manual run after noon Central counts
+as that night's scrape — a `dry_run` too, which publishes the hub-data release but not the
+site — so the scheduled entries will skip it.
+
+Each scrape step has `--hours 0.75`, so the three stop cleanly, checkpointed, well inside
+the job's 180-minute limit (a normal night is about 16 minutes for all three), and
+`PYTHONUNBUFFERED=1` so progress reaches the log as it happens. A dataset cut short keeps
+its old stamp, so the run goes red and the backup entry resumes it.
 
 **The scheduler is hours late, not minutes.** This said "30–90 minutes" until 9 Sep 2026,
 which was wrong. Measured across all 28 nights from 13 Aug to 9 Sep, the live cron entry
@@ -934,8 +1074,21 @@ gh api "/repos/diepjustin/ne-contracts/actions/workflows/daily.yml/runs?event=sc
   --jq '.workflow_runs[] | "\(.created_at)"' | sort
 ```
 
-Two runs land per night, one per cron entry; the earlier of each pair is the one that
-proceeds while Central is on CDT, and its slot is 03:00 UTC.
+Two runs land per night, one per cron entry; normally the first scrapes and the second
+skips in its gate step. Before Oct 2026 the slots were 03:00 and 04:00 UTC.
+
+**Keeping the schedule alive.** GitHub disables a public repository's scheduled workflows
+after 60 days without repository activity, and the nightly then stops without a failed run
+to email anyone. `keepalive.yml` runs on the 1st and 15th and calls the enable API for
+`daily.yml` and itself. If it has been disabled anyway, re-enable both from the Actions tab
+(or `gh workflow enable daily.yml`).
+
+**Workflow hardening.** Every action is pinned to a full commit SHA with its version in a
+comment, and Dependabot (configured in `.github/`) opens weekly PRs for the actions and for
+`requirements.txt`, each tested by `ci.yml`. Each job declares only the token permissions it
+uses; in `pages.yml` only the one-action deploy job holds `pages: write`. Checkouts keep no
+credentials, and every `run:` step is `bash -eo pipefail`. `tests/test_workflow_hardening.py`
+fails if any workflow, including a new one, drops one of these.
 
 **Runners are ephemeral and `data/*.csv` is gitignored**, so `data/` round-trips through
 `actions/cache`: restored under a `ne-contracts-data-` prefix, saved under a fresh
@@ -965,8 +1118,8 @@ the whole time, just permanently out of scope.
 ### A night that did not finish
 
 A dataset's scrape time is recorded only when every entity in it was read, so a night that
-does not finish — an entity refused, a deadline, a crash after the other datasets were done —
-leaves that time where it was and exits 0, and left alone the job ends green while the
+does not finish — an entity refused, a deadline, a crash after the other datasets were done,
+or a leak streak at its third night (see "Strays that never go away") — leaves that time where it was and exits 0, and left alone the job ends green while the
 page's "Last updated" date stops moving (as it did from 24 Sep 2026). The last step of
 `daily.yml`, `scripts/check_scrape_stamps.py`, compares each dataset's recorded time with
 the moment the run began and turns the run red, with an `::error` line for each dataset that
@@ -983,8 +1136,12 @@ change on this side alone.
 - **The nightly data release.** `daily.yml` cuts a release tagged
   `ne-contracts-hub-data-YYYY-MM-DD`, the America/Chicago date, carrying four gzipped
   assets: `nu_contracts.csv.gz`, `nu_purchase_orders.csv.gz`, `state_agencies.csv.gz` and
-  `scrape_meta.json.gz`. The CSVs keep the eleven columns listed under "Running it". A
-  same-day re-run replaces that day's release, and only the newest three are kept.
+  `scrape_meta.json.gz`, plus `documents.jsonl.gz` when the nightly's `data/` has a document
+  log (the entries `--daily` has written since the cache was seeded, not the full backfill).
+  The CSVs keep the eleven columns listed under "Running it". A same-day re-run replaces
+  that day's assets in place (`--clobber`, then removes any it did not produce), so there is
+  no moment without a release. Only the newest three are kept, and pruning a release
+  deletes its tag too; a nightly step clears tags earlier prunes left behind.
   ne-connect's nightly picks the newest by **tag name**, never by `createdAt` (the date
   of the commit a tag points at, which ties across nights), and downloads `*.gz`. Its
   `ingest/sources.py` `CONTRACT_FILES` names the same three CSVs, and its

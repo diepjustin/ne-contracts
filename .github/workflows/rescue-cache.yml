@@ -17,14 +17,24 @@ name: NE Contracts rescue cache
 on:
   workflow_dispatch:
 
-permissions:
-  contents: read
+permissions: {}
+
+defaults:
+  run:
+    # Declared, not left implicit: an explicit `shell: bash` runs each step as
+    # `bash --noprofile --norc -eo pipefail {0}`, while the implicit default is `bash -e {0}`,
+    # under which a failing `gh ... | jq | xargs` prune exits 0 and is never noticed.
+    shell: bash
 
 jobs:
   rescue:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read    # checkout; the cache restore and artifact upload need no token scope
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false   # nothing here pushes; gh gets its token from env
 
       # Two ways in: recovering an orphaned cache (restore below), or a
       # bootstrap branch that carries the CSVs in the checkout itself. Both end
@@ -42,7 +52,7 @@ jobs:
 
       - name: Restore the branch-scoped data/ cache
         if: steps.have.outputs.csvs != 'true'
-        uses: actions/cache/restore@v5
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
           path: data
           key: ne-contracts-data-rescue-${{ github.run_id }}   # never pre-exists -- forces the restore-keys fallback
@@ -63,7 +73,7 @@ jobs:
           du -sh data
 
       - name: Publish data/ as a cross-ref artifact
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
         with:
           name: ne-contracts-data-rescue
           path: data

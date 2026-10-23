@@ -53,6 +53,10 @@ import json
 import os
 import random
 import re
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import ocr_io  # noqa: E402 -- the atomic writer
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 IN_JSONL = os.path.join(ROOT, "data", "doc_text.jsonl")
@@ -219,10 +223,17 @@ def current_lines(path):
 
     Two passes rather than a dict of parsed records: at 691,145 documents the
     records are gigabytes and the line numbers are megabytes.
+
+    A last line with no newline is an extract_text.py run cut off mid-write. It
+    is left out here, so neither pass reads it; extract_text.py cuts it itself
+    the next time it starts.
     """
     newest = {}
     with open(path, encoding="utf-8") as f:
         for number, line in enumerate(f):
+            if not line.endswith("\n"):
+                print(f"note: {path} ends mid-write; ignoring its last line (line {number + 1})")
+                break
             if line.strip():
                 newest[json.loads(line)["tok"]] = number
     return set(newest.values())
@@ -801,7 +812,10 @@ def main():
                 print(f"      {description[:300]}\n")
         return
 
-    with open(args.out, "w", encoding="utf-8") as f:
+    # Written beside the old file and swapped in whole. It used to be truncated
+    # and rewritten in place, so a run killed part way -- or a publish or build
+    # reading it at the wrong moment -- saw a scope.jsonl missing most records.
+    with ocr_io.atomic_write(args.out) as f:
         for record in records:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
 

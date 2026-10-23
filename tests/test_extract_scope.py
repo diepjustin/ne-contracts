@@ -13,6 +13,8 @@ import json
 import os
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts"))
 
 import extract_scope  # noqa: E402
@@ -213,6 +215,53 @@ def test_only_the_newest_entry_per_document_is_used(tmp_path):
 
     current = extract_scope.current_lines(str(path))
     assert current == {1, 2}, "line 0 is superseded by line 1"
+
+
+def write_doc_text(path, entries, torn_tail=None):
+    with open(path, "w", encoding="utf-8") as f:
+        for tok, text in entries:
+            f.write(json.dumps({"tok": tok, "data": {"status": "text", "doc": "D-" + tok,
+                                                      "text": text}}) + "\n")
+        if torn_tail is not None:
+            f.write(torn_tail)
+
+
+def run_main(monkeypatch, doc_text, out):
+    monkeypatch.setattr(extract_scope, "IN_JSONL", str(doc_text))
+    monkeypatch.setattr(sys, "argv", ["extract_scope.py", "--out", str(out)])
+    extract_scope.main()
+
+
+def test_a_torn_last_line_of_the_text_log_is_ignored(tmp_path, monkeypatch):
+    """extract_text.py killed mid-write leaves one; it used to stop this script."""
+    doc_text, out = tmp_path / "doc_text.jsonl", tmp_path / "scope.jsonl"
+    write_doc_text(doc_text, [("A", COVER_SHEET)], torn_tail='{"tok": "B", "data": {"sta')
+    run_main(monkeypatch, doc_text, out)
+    records = [json.loads(line) for line in out.read_text().splitlines()]
+    assert [r["tok"] for r in records] == ["A"]
+
+
+def test_output_is_swapped_in_whole_and_leaves_no_temporary(tmp_path, monkeypatch):
+    doc_text, out = tmp_path / "doc_text.jsonl", tmp_path / "scope.jsonl"
+    out.write_text("previous run\n")
+    write_doc_text(doc_text, [("A", COVER_SHEET)])
+    run_main(monkeypatch, doc_text, out)
+    assert json.loads(out.read_text())["tok"] == "A"
+    assert sorted(os.listdir(tmp_path)) == ["doc_text.jsonl", "scope.jsonl"]
+
+
+def test_a_failed_run_leaves_the_previous_output_untouched(tmp_path, monkeypatch):
+    doc_text, out = tmp_path / "doc_text.jsonl", tmp_path / "scope.jsonl"
+    out.write_text("previous run\n")
+    write_doc_text(doc_text, [("A", COVER_SHEET)])
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("killed")
+    monkeypatch.setattr(extract_scope.json, "dumps", boom)
+    with pytest.raises(RuntimeError):
+        run_main(monkeypatch, doc_text, out)
+    assert out.read_text() == "previous run\n"
+    assert sorted(os.listdir(tmp_path)) == ["doc_text.jsonl", "scope.jsonl"]
 
 
 # --- the University's wrapped description column ----------------------------

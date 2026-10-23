@@ -1863,6 +1863,12 @@ def combos(entities):
 
 
 def main():
+    # Line-buffered even when stdout is a pipe, as it is in Actions: block-buffered, a night's
+    # progress lines arrived in the log minutes late and out of order with what stderr said,
+    # and a run killed at its time limit lost the tail that said where it had got to.
+    reconfigure = getattr(sys.stdout, "reconfigure", None)
+    if reconfigure is not None:
+        reconfigure(line_buffering=True)
     parser = argparse.ArgumentParser(description="Scrape documents from the Nebraska State Contracts Database.")
     parser.add_argument("dataset", nargs="?", default="purchase-order", choices=sorted(DATASETS),
                         help="Which dataset to scrape (default: purchase-order)")

@@ -34,6 +34,8 @@ data/*_daily_progress.json*
 # with the CSV it describes. Losing it costs no rows, but every record it owed a flip
 # back then counts as a stray (see scrape.py's load_flip_ledger).
 data/*_daily_flips.json*
+# ...and how many leak nights in a row each entity has had (see scrape.py's LEAK_NIGHTS_LIMIT).
+data/*_daily_leaks.json*
 
 # The amendment log. Append-only, grows slowly, and is the one file here that
 # cannot be regenerated from anything -- a night not recorded is a night gone.

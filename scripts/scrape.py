@@ -1406,7 +1406,8 @@ def dataset_breaker(known, vanished):
 # flipped back too; past the line nothing is flipped back, for the entity or, judged across
 # every entity read tonight, for the whole dataset. A leaky night is still finished and stamped:
 # what it lists adds to `seen`, so its endings are as sound as any night's, and holding it open
-# would freeze the dataset for as long as the state's filter stays broken. It warns instead.
+# would freeze the dataset for as long as the state's filter stays broken. It warns instead,
+# until the leak has held for LEAK_NIGHTS_LIMIT nights (below).
 LEAK_FLOOR = 5          # strays below this are never a leak, whatever the share
 LEAK_SHARE = 0.05       # ...and at or above it, a leak once they are more than this share of what was listed
 
@@ -1423,6 +1424,71 @@ def leak_suspected(strays, listed):
                 "through. Flipping nothing back, and holding back the records the CSV has never seen "
                 "rather than appending them as Active. Will re-check next run.")
     return None
+
+
+# Strays that never go away freeze flip-backs for good. They are not always a broken filter:
+# a lost or pruned ledger, or a record --daily flipped before the ledger existed (Oct 2026),
+# makes a record it owes look like a stray, and it is listed again every night. Before this
+# the leak warning simply repeated, nightly and green, while the entity's flip-backs never
+# happened (audit diff-01). Persistence cannot say which it is -- a filter that stays broken
+# lists the same strays every night too -- so it is not taken as proof either way: after
+# this many leak nights in a row for one entity, or for the dataset, the dataset is left
+# unstamped, which turns the run red (check_scrape_stamps.py), and a person decides. If
+# the strays are genuine, `--daily --entity X --accept-strays` restores them.
+LEAK_NIGHTS_LIMIT = 3
+LEAK_SAMPLE = 5             # stray document numbers kept per entity, for a person to look up
+DATASET_STREAK = "(across the dataset)"
+
+
+def leak_streak_file(dataset):
+    return f"data/{dataset}_daily_leaks.json"
+
+
+def load_leak_streaks(path):
+    """{entity name or DATASET_STREAK: {"nights": n, "last": date, "strays": [doc, ...]}}."""
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            raw = json.load(f)
+        if not isinstance(raw, dict):
+            raise ValueError(f"expected an object, found {type(raw).__name__}")
+    except (OSError, ValueError) as e:
+        set_aside_unreadable(path, e)
+        return {}
+    return raw
+
+
+def save_leak_streaks(path, streaks):
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(streaks, f, indent=2, sort_keys=True)
+    os.replace(tmp, path)
+
+
+def note_leak_night(streaks, name, leaky, today, strays=(), force_reset=False):
+    """Count one judged night into `name`'s streak: a leak adds a night, a clean night ends it.
+
+    A second judgement the same day changes nothing, so a same-day re-run neither adds a
+    night nor wipes one out. Only judged nights reach here -- a refused entity, an
+    unfinished one and a breaker night say nothing about the filter and leave it alone.
+    """
+    entry = streaks.get(name)
+    if force_reset or not leaky:
+        if entry is not None and (force_reset or entry.get("last") != today):
+            del streaks[name]
+        return
+    if entry is not None and entry.get("last") == today:
+        return
+    streaks[name] = {"nights": (entry or {}).get("nights", 0) + 1, "last": today,
+                     "strays": list(strays)[:LEAK_SAMPLE]}
+
+
+def persistent_leaks(streaks, dataset_entities):
+    """The streaks at or past LEAK_NIGHTS_LIMIT, among this dataset's entities and its own."""
+    return {name: e for name, e in streaks.items()
+            if (name in dataset_entities or name == DATASET_STREAK)
+            and isinstance(e, dict) and e.get("nights", 0) >= LEAK_NIGHTS_LIMIT}
 
 
 def run_daily(args):
@@ -1474,6 +1540,12 @@ def run_daily(args):
 
     progress_path = daily_progress_file(args.dataset)
     done_today = load_daily_progress(progress_path)
+    accept_strays = bool(getattr(args, "accept_strays", False))
+    if accept_strays:
+        # A deliberate re-read of entities tonight's run may already have finished.
+        done_today.difference_update(entities)
+    streaks_path = leak_streak_file(args.dataset)
+    streaks = load_leak_streaks(streaks_path)
     ledger_path = flip_ledger_file(args.dataset)
     expired_only = load_expired_only(output_csv)
     ledger = load_flip_ledger(ledger_path, expired_only)
@@ -1489,6 +1561,7 @@ def run_daily(args):
     backs = {}    # entity_name -> {detail_url: record} flipped back to Active
     pending = {}  # entity_name -> (rows, documents entries, new-record count, leaky), held until the night is judged
     report = {}   # entity_name -> counts dict
+    samples = {}  # entity_name -> sorted document numbers of tonight's strays
     amended = 0   # watched fields seen to have moved, written to changes.jsonl
     scanned_known = scanned_vanished = 0   # every entity read tonight, refused ones too
     listed_total = strays_total = 0        # every entity finished and not refused tonight
@@ -1544,9 +1617,17 @@ def run_daily(args):
         scanned_known += len(known)
         scanned_vanished += len(known - seen)
 
-        strays = sum(1 for u in returned if ledger_key(u) not in ledger)
+        stray_docs = sorted(r["doc_number"] for u, r in returned.items() if ledger_key(u) not in ledger)
+        strays = len(stray_docs)
         appended = seen - known - set(returned)
         leak = leak_suspected(strays, len(seen))
+        if leak and accept_strays:
+            print(f"  {entity_name}: --accept-strays: taking {strays:,} stray(s) as genuinely "
+                  f"re-opened and flipping them back: {', '.join(stray_docs[:LEAK_SAMPLE])}"
+                  f"{'...' if strays > LEAK_SAMPLE else ''}")
+            leak = None
+            strays = 0
+        samples[entity_name] = stray_docs
         # Its new rows wait for both leak verdicts, this entity's and the dataset's: a leaking
         # filter lists Expired records the CSV has never seen as readily as ones it has, and
         # appending those would publish them as Active (audit sc-04).
@@ -1610,6 +1691,26 @@ def run_daily(args):
 
     write_new_rows(output_csv, pending, report, held=lambda name: pending[name][3] or bool(dataset_leak))
 
+    today = datetime.date.today().isoformat()
+    for name in report:                     # judged tonight: finished, not refused, no breaker
+        note_leak_night(streaks, name, pending[name][3], today, samples.get(name, ()),
+                        force_reset=accept_strays)
+    if report:
+        note_leak_night(streaks, DATASET_STREAK, bool(dataset_leak), today,
+                        sorted(d for n in report for d in samples.get(n, ()))[:LEAK_SAMPLE],
+                        force_reset=accept_strays)
+    save_leak_streaks(streaks_path, streaks)
+    persistent = persistent_leaks(streaks, dataset_entities)
+    for name, e in sorted(persistent.items()):
+        print(f"::error title=Daily scrape: flip-backs held back {e['nights']} nights running::"
+              f"{args.dataset}: {name}: the Active search has listed records the CSV holds as "
+              f"Expired on {e['nights']} judged nights in a row (last {e['last']}), so none of its "
+              "flip-backs or new records have been applied. Either the state's Status filter is "
+              "still leaking, or these are records the flip ledger no longer names -- look up "
+              f"some of them: {', '.join(e.get('strays', [])) or 'none recorded'}. If they are "
+              f"genuinely Active again: scrape.py {args.dataset} --daily --entity "
+              f"\"<entity>\" --accept-strays. The dataset stays unstamped until then.")
+
     all_flip_urls = {u for s in flips.values() for u in s}
     all_backs = {u: (name, r) for name, b in backs.items() for u, r in b.items()}
     if all_flip_urls or all_backs:
@@ -1620,9 +1721,8 @@ def run_daily(args):
         # Into the ledger before the CSV, out of it after: a kill in between leaves a ledger
         # entry with no Expired row, which is pruned at the next load, rather than an Expired
         # row the ledger forgot, which would count against the next night as a stray.
-        today = datetime.date.today().isoformat()
         if all_flip_urls:
-            ledger.update((ledger_key(u), today) for u in all_flip_urls)
+            ledger.update((ledger_key(u), datetime.date.today().isoformat()) for u in all_flip_urls)
             save_flip_ledger(ledger_path, ledger)
         patched, restored = patch_statuses(output_csv, all_flip_urls, fresh)
         if all_flip_urls:
@@ -1641,7 +1741,14 @@ def run_daily(args):
             if moved:
                 print(f"Recorded {moved:,} field change(s) to {CHANGES_JSONL} on records listed again.")
 
-    if all(e in done_today for e in dataset_entities):
+    if all(e in done_today for e in dataset_entities) and persistent:
+        # Every entity was read, but the run has to go red: check_scrape_stamps.py is the only
+        # step in daily.yml that can fail the run without blocking the deploy after it.
+        append_daily_diff_report(args.dataset, report, local_timestamp(), complete=False)
+        print(f"\nDaily scrape read every entity of {args.dataset}, but its scrape time is not "
+              f"recorded: {len(persistent)} leak streak(s) reached {LEAK_NIGHTS_LIMIT} nights "
+              "(see the ::error lines above).")
+    elif all(e in done_today for e in dataset_entities):
         stamp = record_scrape_time(args.dataset)
         append_daily_diff_report(args.dataset, report, stamp)
         if os.path.exists(progress_path):
@@ -1770,8 +1877,15 @@ def main():
     parser.add_argument("--daily", action="store_true",
                         help="Scrape only Status=Active and diff against the existing CSV, "
                              "instead of a full (entity, status) sweep.")
+    parser.add_argument("--accept-strays", action="store_true",
+                        help="With --daily --entity: take the records the Active search lists that "
+                             "the CSV holds as Expired as genuinely re-opened, flip them back, and "
+                             "end those entities' leak streaks. For use by hand, after looking.")
     args = parser.parse_args()
 
+    if args.accept_strays and not (args.daily and args.entity):
+        parser.error("--accept-strays needs --daily and at least one --entity: it overrides the "
+                     "leak check, so it is given only for entities a person has looked at.")
     if args.daily:
         if args.fresh or args.status:
             parser.error("--daily is incompatible with --fresh/--status (it always reads and "

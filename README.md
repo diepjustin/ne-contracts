@@ -533,6 +533,30 @@ and refusing that would turn the outage into a permanent freeze. A leaky night s
 finishes and stamps, because what it lists can only add to what was seen, so its endings
 are as sound as any night's.
 
+**Strays that never go away turn the run red.** Not every stray is a broken filter. A
+record `--daily` flipped before the ledger existed, or one the ledger lost (a cache rebuilt
+from release CSVs, a ledger set aside as corrupt, an entry past 365 days), reads as a stray
+when it is listed again — and it is listed every night. Six such records at an agency of a
+hundred is a leak, so that agency's flip-backs and new records were held back night after
+night with a warning and a green run. Persistence cannot tell the two apart (a filter that
+stays broken lists the same strays every night too), so it is not taken as proof either way.
+Instead `data/<dataset>_daily_leaks.json` counts each entity's leak nights in a row, and the
+dataset's own: a clean night ends a streak, and a night that judged nothing (the entity
+refused or unfinished, the dataset-wide breaker tripped, a same-day re-run) leaves it alone.
+On the third, the run prints an `::error` naming the entity and a few of its strays'
+document numbers, and the dataset is left unstamped, so the last step of `daily.yml` turns
+the run red. Nothing else is blocked, but the site's "last updated" date for that dataset
+stays where it was for as long as the run is red. Look the strays up on the state's site; if
+they really are Active again:
+
+```bash
+python3 scripts/scrape.py state --daily --entity "Military Department" --accept-strays
+```
+
+That re-reads the named entities, takes their strays as re-opened, restores them as above,
+and ends their streaks (and the dataset's). If the filter is genuinely leaking, leave it:
+the run stays red until it stops.
+
 **Amendments are recorded rather than discarded.** Amount, vendor, begin and end date are
 compared against what the CSV already held, and any move is appended to
 `data/changes.jsonl` — one entry per field, carrying both values and the date observed:
@@ -982,8 +1006,8 @@ the whole time, just permanently out of scope.
 ### A night that did not finish
 
 A dataset's scrape time is recorded only when every entity in it was read, so a night that
-does not finish — an entity refused, a deadline, a crash after the other datasets were done —
-leaves that time where it was and exits 0, and left alone the job ends green while the
+does not finish — an entity refused, a deadline, a crash after the other datasets were done,
+or a leak streak at its third night (see "Strays that never go away") — leaves that time where it was and exits 0, and left alone the job ends green while the
 page's "Last updated" date stops moving (as it did from 24 Sep 2026). The last step of
 `daily.yml`, `scripts/check_scrape_stamps.py`, compares each dataset's recorded time with
 the moment the run began and turns the run red, with an `::error` line for each dataset that

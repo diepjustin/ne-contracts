@@ -114,14 +114,15 @@ class NoNetwork:
 
 
 def night(monkeypatch, tmp_path, rows, search, entities=(CAMPUS, OTHER), only=None,
-          documents=None):
+          documents=None, today=None, accept_strays=False):
     """One `scrape.py contract --daily` over `rows`, the search answering `search`.
 
     `entities` is the whole dataset (it stands in for HIGHER_ED_ENTITIES, so a night
     that reads all of them is complete); `only` is an `--entity` subset, if any.
     `documents` answers run_daily's own detail fetches, {detail_url: list or None},
     RESTORED_DOCUMENTS for any URL it does not name. Every documents.jsonl entry the
-    night writes is collected in night.documents.
+    night writes is collected in night.documents. `today` (a datetime.date) is the date
+    the night runs on, for tests that span several; it is the real date otherwise.
 
     The fake honours scrape_entity's contract, including asking record_filter
     twice per record -- once to choose what to fetch, once before writing.
@@ -161,8 +162,19 @@ def night(monkeypatch, tmp_path, rows, search, entities=(CAMPUS, OTHER), only=No
 
     monkeypatch.setattr(scrape, "scrape_entity", fake_scrape_entity)
     monkeypatch.setattr(scrape, "HIGHER_ED_ENTITIES", {e: e for e in entities})
+    if today is not None:
+        import datetime
+        import types
+
+        class Day(datetime.date):
+            @classmethod
+            def today(cls):
+                return today
+        monkeypatch.setattr(scrape, "datetime", types.SimpleNamespace(
+            date=Day, datetime=datetime.datetime, timedelta=datetime.timedelta))
     scrape.run_daily(argparse.Namespace(dataset="contract", entity=list(only) if only else None,
-                                        hours=None))
+                                        hours=None, accept_strays=accept_strays))
+    monkeypatch.setattr(scrape, "datetime", __import__("datetime"))
 
     with open(csv_path, newline="", encoding="utf-8") as f:
         return list(csv.reader(f))[1:]

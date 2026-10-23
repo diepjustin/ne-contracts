@@ -37,9 +37,11 @@ case "$1" in
     echo '{"buildId": "20261023-043000", "dir": "d/20261023-043000"}' > manifest.json
     exit "${FAKE_BUILD_EXIT:-0}" ;;
   scripts/ocr_pilot.py)
+    "$FAKE_REAL_PYTHON" "$FAKE_LOCK_PROBE" || exit 99
     echo '{"tok": "new"}' >> data/ocr_pilot.jsonl
     exit "${FAKE_OCR_EXIT:-0}" ;;
   scripts/generate_ai_summaries.py)
+    "$FAKE_REAL_PYTHON" "$FAKE_LOCK_PROBE" || exit 99
     echo '{"tok": "new"}' >> data/ai_summaries.jsonl
     echo '{"tok": "new2"}' >> data/ai_summaries.jsonl
     exit "${FAKE_SUMMARY_EXIT:-0}" ;;
@@ -78,6 +80,24 @@ echo "serving"
 """
 
 
+# Run by the stand-in for the two steps that take the lock themselves, the way
+# they really run it (through caffeinate, where there is one): the step must get
+# the lock from the wrapper's inherited fd, and the wrapper must really hold it.
+LOCK_PROBE = """
+import os, sys
+sys.path.insert(0, "scripts")
+import ocr_io
+with ocr_io.run_lock():
+    fresh = os.open(ocr_io.LOCK_PATH, os.O_RDWR)
+    try:
+        ocr_io.lock_fd(fresh)
+    except ocr_io.LockBusy:
+        pass
+    else:
+        sys.exit("a fresh descriptor got the lock: the wrapper was not holding it")
+"""
+
+
 def executable(path, text):
     path.write_text(text)
     path.chmod(0o755)
@@ -100,6 +120,8 @@ def job(tmp_path):
     executable(bindir / "curl", FAKE_CURL)
     executable(bindir / "ollama", FAKE_OLLAMA)
 
+    (tmp_path / "probe.py").write_text(LOCK_PROBE)
+
     release = tmp_path / "release"
     release.mkdir()
     for name in HUB_FILES:
@@ -121,6 +143,7 @@ def job(tmp_path):
         "FAKE_REAL_PYTHON": sys.executable,
         "FAKE_RELEASE_DIR": str(release),
         "FAKE_OLLAMA_UP": str(tmp_path / "ollama-up"),
+        "FAKE_LOCK_PROBE": str(tmp_path / "probe.py"),
     }
 
     def run(*args, **env):

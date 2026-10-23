@@ -699,7 +699,7 @@ def main():
     meta["descBytes"] = sum(len(d) for d in descriptions.values())
     add_source_meta(meta, desc_sources)
 
-    ai_summaries, ai_sources = load_ai_summaries(view_tokens)
+    ai_summaries, ai_sources, ai_documents = load_ai_summaries(view_tokens)
     meta["aiCount"] = len(ai_summaries)
     meta["aiBytes"] = sum(len(s) for s in ai_summaries.values())
     add_ai_meta(meta, ai_sources)
@@ -730,12 +730,7 @@ def main():
         os.path.join(outdir, ne_format.DESC_DOC))
     meta["digests"][ne_format.DESC_DOC] = zlib.crc32(
         open(os.path.join(outdir, ne_format.DESC_DOC), "rb").read())
-    ne_format.write_ai_blocks(outdir, ai_summaries, n)
-    ne_format.write_ai_sources(outdir, ai_sources, n)
-    meta["bytes"][ne_format.AI_SRC] = os.path.getsize(
-        os.path.join(outdir, ne_format.AI_SRC))
-    meta["digests"][ne_format.AI_SRC] = zlib.crc32(
-        open(os.path.join(outdir, ne_format.AI_SRC), "rb").read())
+    write_ai_files(outdir, ai_summaries, ai_sources, ai_documents, n, meta)
     write_search_index(outdir, descriptions, meta)
     write_vendor_groups(outdir, vendor_names, columns, meta)
     write_selftest(outdir, sources, columns["viewPresent"], n)
@@ -745,20 +740,19 @@ def main():
     # invisible: the page just behaves as though the feature is not there.
     on_disk = json.load(open(os.path.join(outdir, ne_format.META), encoding="utf-8"))
     for key in ("wordCount", "vendorGroups", "descCount", "descSources",
-                "aiCount", "aiModels", "bytes", "digests"):
+                "aiCount", "aiModels", "aiFormatVersion", "bytes", "digests"):
         if key not in on_disk:
             sys.exit(f"meta.json is missing {key!r} — it was added after the file was written")
 
     verify_payload(outdir, columns, docs, vendor_names, vtok_bytes,
                    dn_tokens, view_tokens, sources, descriptions)
-    verify_ai_summaries(outdir, ai_summaries, n)
+    verify_ai_summaries(outdir, ai_summaries, n, ai_documents, doc_counts)
 
     # manifest.json is what publishes a build: the page, extract_text.py and
     # the --descriptions-only / --ai-summaries-only paths all follow it. So it moves
     # only once the build has been read back and verified. A verify failure
     # then leaves it naming the last build that passed, not this one.
-    with open(os.path.join(OUT_DIR, "manifest.json"), "w", encoding="utf-8") as f:
-        json.dump({"buildId": build_id, "dir": f"d/{build_id}"}, f)
+    write_manifest(build_id)
 
     resident = sum(os.path.getsize(os.path.join(outdir, p)) for p in
                    (ne_format.META, ne_format.COLS_I32, ne_format.COLS_F64,
@@ -785,6 +779,30 @@ def main():
     print(f"document lists: {xdoc / 1e6:6.2f} MB raw in {ne_format.block_count(n):,} blocks "
           f"({meta['docMultiRows']:,} rows publish more than one)")
     print(f"written to    : {outdir}")
+
+
+def write_manifest(build_id):
+    """Point manifest.json at a build, atomically.
+
+    Written beside the payload and moved into place with os.replace, so a
+    reader -- the page, or the next step of the workflow -- sees the old
+    manifest or the new one, never a truncated file. Writing it in place left
+    a window in which a kill or a full disk published an empty manifest.json,
+    which the page cannot load at all. The temporary sits in d/, which is
+    gitignored and on the same filesystem, and is a dotfile so pages.yml's
+    "keep only the build just made" loop never mistakes it for a build.
+    """
+    path = os.path.join(OUT_DIR, "manifest.json")
+    tmp = os.path.join(OUT_DIR, "d", f".manifest.{os.getpid()}.tmp")
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"buildId": build_id, "dir": f"d/{build_id}"}, f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
 
 
 def add_descriptions_to_build():
@@ -825,10 +843,13 @@ def add_descriptions_to_build():
     # no description while the blocks beside it hold 540,000.
     ne_format.write_desc_sources(outdir, desc_sources, n)
     ne_format.write_desc_documents(outdir, desc_documents, n)
-    meta.setdefault("bytes", {})[ne_format.DESC_SRC] = os.path.getsize(
-        os.path.join(outdir, ne_format.DESC_SRC))
-    meta.setdefault("digests", {})[ne_format.DESC_SRC] = zlib.crc32(
-        open(os.path.join(outdir, ne_format.DESC_SRC), "rb").read())
+    # Both files, as the full build records them. descdoc.bin's digest used to
+    # be left as the full build wrote it, so the page's selftest -- which now
+    # checks every file it fetches -- would fail on the next attach.
+    for name in (ne_format.DESC_SRC, ne_format.DESC_DOC):
+        path = os.path.join(outdir, name)
+        meta.setdefault("bytes", {})[name] = os.path.getsize(path)
+        meta.setdefault("digests", {})[name] = zlib.crc32(open(path, "rb").read())
     verify_descriptions(outdir, descriptions, n)
 
     meta["descCount"] = len(descriptions)
@@ -870,17 +891,12 @@ def attach_ai_summaries_to_build():
         if columns["viewPresent"][i]:
             view_tokens[i] = quote(base64.b64encode(view[i]).decode(), safe="")
 
-    summaries, ai_sources = load_ai_summaries(view_tokens)
+    summaries, ai_sources, ai_documents = load_ai_summaries(view_tokens)
     if not summaries:
         sys.exit(f"nothing to attach — {AI_SUMMARIES_JSONL} is missing or matched no rows")
 
-    ne_format.write_ai_blocks(outdir, summaries, n)
-    ne_format.write_ai_sources(outdir, ai_sources, n)
-    meta.setdefault("bytes", {})[ne_format.AI_SRC] = os.path.getsize(
-        os.path.join(outdir, ne_format.AI_SRC))
-    meta.setdefault("digests", {})[ne_format.AI_SRC] = zlib.crc32(
-        open(os.path.join(outdir, ne_format.AI_SRC), "rb").read())
-    verify_ai_summaries(outdir, summaries, n)
+    write_ai_files(outdir, summaries, ai_sources, ai_documents, n, meta)
+    verify_ai_summaries(outdir, summaries, n, ai_documents, columns.get("docCount"))
 
     meta["aiCount"] = len(summaries)
     meta["aiBytes"] = sum(len(s) for s in summaries.values())
@@ -1182,6 +1198,24 @@ def add_ai_meta(meta, ai_sources):
     meta["aiModelCounts"] = [counts.get(code, 0) for code in range(len(AI_MODELS))]
 
 
+def write_ai_files(outdir, summaries, sources, documents, n, meta):
+    """The AI-summary blocks and both per-row files, recorded in meta.
+
+    One function for both callers -- the full build and --ai-summaries-only --
+    so the two cannot drift: a build whose aidoc.bin was skipped on one path
+    would label every summary as being of the row's own document.
+    """
+    ne_format.write_ai_blocks(outdir, summaries, n)
+    ne_format.write_ai_sources(outdir, sources, n)
+    ne_format.write_ai_documents(outdir, documents, n)
+    meta["aiFormatVersion"] = ne_format.AI_FORMAT_VERSION
+    for name in (ne_format.AI_SRC, ne_format.AI_DOC):
+        path = os.path.join(outdir, name)
+        meta.setdefault("bytes", {})[name] = os.path.getsize(path)
+        # ?selftest=1 checks every file the page fetches against these.
+        meta.setdefault("digests", {})[name] = zlib.crc32(open(path, "rb").read())
+
+
 def document_positions(view_tokens):
     """token -> (row, position in the state's list, is this the row's primary).
 
@@ -1342,16 +1376,27 @@ def load_descriptions(view_tokens, carry=True):
 
 
 def load_ai_summaries(view_tokens):
-    """(row -> summary bytes, row -> model code), keyed off tokens.
+    """(row -> summary bytes, row -> model code, row -> document position), keyed off tokens.
 
-    Simpler than load_descriptions on purpose: scripts/generate_ai_summaries.py
-    only ever summarizes a record's primary document (the one
-    scripts/ocr_pilot.py OCR'd), so there is no other-document fallback and no
-    rank to compute -- a token either is a row's own view token or it isn't.
-    No carry-forward either: unlike descriptions, which every nightly build
-    carries forward from the previous one as a floor (see
-    carry_descriptions_forward), AI summaries
-    are meant to be fetched fresh from a release asset on every build, the
+    scripts/generate_ai_summaries.py summarizes whatever scripts/ocr_pilot.py
+    OCR'd, and that is not only a record's primary document: amendments and
+    attachments get OCR'd and summarized too. On 22 Oct 2026 every one of the
+    19,638 summaries this used to report as "unmatched" was of a record's other
+    document, across 9,824 records, 2,516 of which then showed no summary at
+    all. So the same rule as load_descriptions applies: a row's own document
+    (its View URL) wins whenever it has a summary, and only where it has none
+    does the first summarized other document, in the state's order, stand in.
+    The position of the document actually summarized is returned with it, and
+    the page names that document above the text -- a summary of an amendment
+    shown as though it were of the contract would misstate what was read.
+
+    A view token can be shared by several rows (the state lists one document
+    under more than one record), so a summary keyed on it reaches every one of
+    them, not only whichever row happened to be indexed last.
+
+    No carry-forward: unlike descriptions, which every nightly build carries
+    forward from the previous one as a floor (see carry_descriptions_forward),
+    AI summaries are fetched fresh from a release asset on every build, the
     same way scope.jsonl already is. A local iterative build simply has fewer
     summaries until data/ai_summaries.jsonl is refreshed.
 
@@ -1359,15 +1404,50 @@ def load_ai_summaries(view_tokens):
     text) are skipped entirely: publishing nothing is what whyBlank()-style
     honesty already means elsewhere in this codebase, and a row this build
     knows nothing useful about should read exactly like one nobody has
-    attempted yet.
+    attempted yet. An unclear primary therefore lets another document's
+    summary stand in, like a primary with no summary at all.
     """
-    row_of = {token: i for i, token in enumerate(view_tokens) if token}
-    summaries, sources = {}, {}
+    rows_of = collections.defaultdict(list)
+    for i, token in enumerate(view_tokens):
+        if token:
+            rows_of[token].append(i)
+    summaries, sources, documents = {}, {}, {}
     if not os.path.exists(AI_SUMMARIES_JSONL):
         print(f"note: no {AI_SUMMARIES_JSONL} — building without AI summaries")
-        return summaries, sources
+        return summaries, sources, documents
 
-    matched = unmatched = skipped = 0
+    # token -> (row, position, is the row's primary), from documents.jsonl.
+    where = document_positions(view_tokens)
+
+    def candidates(token):
+        """[(row, rank, position)] this token's summary could describe."""
+        own = rows_of.get(token)
+        if own:
+            found = where.get(token)
+            # The row's own document, at its position in the record's list.
+            # document_positions starts every row's own token at position 0,
+            # which is right for the ~95% publishing a single document, and
+            # moves it where documents.jsonl lists it. If the list files the
+            # token under a different record, where it sits for this row is
+            # not known, and the page then marks no document rather than the
+            # wrong one.
+            if found is None:
+                position = 0
+            elif found[0] in own:
+                position = found[1]
+            else:
+                position = ne_format.AI_DOC_UNKNOWN
+            return [(row, 0, position) for row in own]
+        found = where.get(token)
+        if found is None:
+            return []
+        row, position, _primary = found
+        # Every row carrying that record's primary document, for the same
+        # reason as above.
+        return [(r, 1 + position, position) for r in rows_of.get(view_tokens[row], [row])]
+
+    best = {}
+    unmatched = skipped = 0
     unknown_models = collections.Counter()
     # Bytes, split on b"\n" alone, each line decoded on its own -- the way
     # scrape.load_documents reads its log. str.splitlines() would also break at U+0085,
@@ -1397,17 +1477,24 @@ def load_ai_summaries(view_tokens):
         if record.get("unclear") or not record.get("summary"):
             skipped += 1
             continue
-        row = row_of.get(record["tok"])
-        if row is None:
+        targets = candidates(record["tok"])
+        if not targets:
             unmatched += 1
             continue
         model = record.get("model") or ""
         if model not in AI_MODEL_CODE:
             unknown_models[model or "(missing)"] += 1
             continue
-        summaries[row] = record["summary"].encode("utf-8")
-        sources[row] = AI_MODEL_CODE[model]
-        matched += 1
+        text = record["summary"].encode("utf-8")
+        for row, rank, position in targets:
+            # Strictly better wins. Equal rank is the same document summarized
+            # again, and the later line is the newer run of it.
+            if row in best and best[row] < rank:
+                continue
+            best[row] = rank
+            summaries[row] = text
+            sources[row] = AI_MODEL_CODE[model]
+            documents[row] = position
 
     if unknown_models:
         # Fail here, naming the cause. A row published with source 0 beside its
@@ -1418,10 +1505,14 @@ def load_ai_summaries(view_tokens):
                  + ". Add it to AI_MODELS in scripts/build_site.py - append only, because "
                  "the position is the code stored in aisrc.bin.")
 
-    print(f"AI summaries  : {matched:,} joined to rows"
+    other = sum(1 for rank in best.values() if rank)
+    print(f"AI summaries  : {len(summaries):,} joined to rows"
           + (f", {unmatched:,} unmatched" if unmatched else "")
           + (f", {skipped:,} skipped (unclear or empty)" if skipped else ""))
-    return summaries, sources
+    if other:
+        print(f"                {other:,} of those summarize a document other than the "
+              "row's own, which has none; the page names the document")
+    return summaries, sources, documents
 
 
 SELFTEST_ROWS = 1000
@@ -1522,7 +1613,7 @@ def verify_descriptions(outdir, descriptions, n):
           f"{ne_format.block_count(n):,} blocks, sources agree on every row")
 
 
-def verify_ai_summaries(outdir, summaries, n):
+def verify_ai_summaries(outdir, summaries, n, documents=None, doc_counts=None):
     """Decode the AI-summary blocks and prove they carry the same text.
 
     Identical rule and identical shape to verify_descriptions: read every
@@ -1549,8 +1640,37 @@ def verify_ai_summaries(outdir, summaries, n):
                      f"  text   {decoded[row][:60]!r}\n"
                      f"  source {codes[row]}")
 
+    # Which document each summary is of. The page prints that document's name
+    # above the text, so a position that is off by one puts an amendment's
+    # name over the contract's summary -- wrong in exactly the way the label
+    # exists to prevent.
+    positions = ne_format.read_ai_documents(outdir, n)
+    if documents is not None:
+        if positions is None:
+            sys.exit(f"{ne_format.AI_DOC} was not written — the page could not say "
+                     "which document each summary is of")
+        for row in range(n):
+            if not decoded[row]:
+                if positions[row]:
+                    sys.exit(f"row {row}: {ne_format.AI_DOC} names document "
+                             f"{positions[row]} for a row with no summary")
+                continue
+            want = min(documents.get(row, 0), ne_format.AI_DOC_UNKNOWN)
+            if positions[row] != want:
+                sys.exit(f"row {row}: AI summary document round trip failed "
+                         f"(wrote {want}, read {positions[row]})")
+            if want == ne_format.AI_DOC_UNKNOWN or doc_counts is None:
+                continue
+            count = doc_counts[row]
+            if count == ne_format.DOC_COUNT_UNKNOWN:
+                continue
+            if want >= max(count, 1):
+                sys.exit(f"row {row}: AI summary is of document {want + 1}, but the row "
+                         f"publishes {count} — the page would name a document it does not list")
+
     print(f"AI summaries round-trip verified: {present:,} rows across "
-          f"{ne_format.block_count(n):,} blocks, sources agree on every row")
+          f"{ne_format.block_count(n):,} blocks, sources"
+          + (" and documents" if documents is not None else "") + " agree on every row")
 
 
 def verify_payload(outdir, columns, docs, vendor_names, vtok_bytes,

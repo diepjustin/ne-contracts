@@ -27,6 +27,7 @@ Layout, where n = row count and V = vendor count:
     descsrc.bin      descSource[n]                             (1 byte each)
     descdoc.bin      descDocument[n]                           (1 byte each)
     aisrc.bin        aiSource[n]                                (1 byte each)
+    aidoc.bin        aiDocument[n]                              (1 byte each)
     docs.bin         document numbers, packed, no separators
     vendors.bin      len[V] as u8, then vendor names packed as UTF-8
     vtok.bin         units[V] as u8, then V tokens packed as raw bytes
@@ -56,7 +57,9 @@ aisrc.bin is the same idea as descsrc.bin, for a different kind of text: an
 AI-generated summary (build_site.py's --ai-summaries-only), attachable the
 same way and for the same reason. Its deferred block files live under ai/,
 alongside desc/ and xdoc/, none of which this comment enumerates -- see the
-note directly above write_desc_blocks and write_ai_blocks instead.
+note directly above write_desc_blocks and write_ai_blocks instead. aidoc.bin is
+descdoc.bin's twin for the summaries: which of the record's documents each
+summary was generated from. See AI_FORMAT_VERSION below.
 
 Little-endian is assumed. Every browser this will run in is little-endian,
 but meta records it and the page asserts it rather than rendering whatever
@@ -102,6 +105,7 @@ DESC_SRC = "descsrc.bin"
 DESC_DOC = "descdoc.bin"
 AI_DIR = "ai"
 AI_SRC = "aisrc.bin"
+AI_DOC = "aidoc.bin"
 WORDS = "words.bin"
 POSTINGS = "postings.bin"
 VGROUP = "vgroup.bin"
@@ -385,6 +389,25 @@ def write_ai_blocks(outdir, summaries, n):
                 f.write(text)
 
 
+# What each AI-summary format version carries, recorded as meta.aiFormatVersion.
+# Versioned apart from FORMAT_VERSION on purpose: --ai-summaries-only attaches
+# summaries to a build that is already live, and must never touch a resident
+# file -- so it cannot move the resident format either. Same rule as the
+# columns above: never renumber, add to the end and bump.
+#
+#   1  ai/NNNNN.bin and aisrc.bin. Every summary is of the row's own document
+#      (its View URL); no meta.aiFormatVersion at all means this.
+#   2  ... and aidoc.bin: which of the record's documents was summarized, as a
+#      position in the state's list (the xdoc order). A record whose own
+#      document has no summary can now show one of another of its documents,
+#      so the page has to be told which, and say so.
+AI_FORMAT_VERSION = 2
+
+# aidoc.bin's value for "not recorded". Same reasoning as DESC_DOC_UNKNOWN: 0 is
+# a claim (the first document), so a position nobody knows must not be 0.
+AI_DOC_UNKNOWN = 255
+
+
 def write_ai_sources(outdir, sources, n):
     """Which model produced each row's summary. `sources` maps row -> code.
 
@@ -408,6 +431,35 @@ def read_ai_sources(outdir, n):
     data = open(path, "rb").read()
     if len(data) != n:
         raise ValueError(f"{AI_SRC} is {len(data)} bytes, expected {n}")
+    column = array.array("B")
+    column.frombytes(data)
+    return column
+
+
+def write_ai_documents(outdir, positions, n):
+    """Which of a record's documents each AI summary was generated from.
+
+    The exact counterpart of write_desc_documents: a position in the state's
+    list (the order the xdoc blocks ship), 0 for a row whose summary is of its
+    first document and for a row with no summary -- the page asks aisrc.bin
+    whether there is one before it reads this. AI_DOC_UNKNOWN where the
+    position is not known. Its own file for the same reason as aisrc.bin.
+    """
+    column = array.array("B", bytes(n))
+    for row, position in positions.items():
+        column[row] = min(position, AI_DOC_UNKNOWN)
+    with open(os.path.join(outdir, AI_DOC), "wb") as f:
+        f.write(column.tobytes())
+
+
+def read_ai_documents(outdir, n):
+    """The summarized document's position per row, or None on a v1 build."""
+    path = os.path.join(outdir, AI_DOC)
+    if not os.path.exists(path):
+        return None
+    data = open(path, "rb").read()
+    if len(data) != n:
+        raise ValueError(f"{AI_DOC} is {len(data)} bytes, expected {n}")
     column = array.array("B")
     column.frombytes(data)
     return column

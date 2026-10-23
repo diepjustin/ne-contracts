@@ -105,3 +105,60 @@ def test_every_scrape_step_has_a_time_budget_that_fits_the_job():
         assert m, "%s has no --hours budget" % dataset
         budgets.append(float(m.group(1)) * 60)
     assert sum(budgets) <= timeout - 30, "the scrape budgets leave no room for the publish leg"
+
+
+# --- the deploy dispatch (fresh-09) and the check that it reached the site (sc-01) ---------
+
+def test_the_deploy_is_dispatched_only_after_the_cache_save_and_before_anything_that_can_fail():
+    dispatch = index("Deploy the rebuilt site")
+    assert index("Save data/ cache") < dispatch, "pages.yml restores the cache this run saves"
+    assert index("Guard rail on tonight's diff") < dispatch
+    for later in ("Delete old data/ cache entries", "Publish a data release for ne-connect",
+                  "Delete old hub-data releases"):
+        assert dispatch < index(later), "%r failing must not be able to skip the deploy" % later
+
+
+def test_the_dispatch_needs_the_guard_rail_and_the_cache_save_to_have_succeeded():
+    condition = " ".join(code(step("Deploy the rebuilt site")).split("if: >-", 1)[1]
+                         .split("env:", 1)[0].split())
+    for part in ("always()", "steps.gate.outputs.deploy == 'true'",
+                 "steps.guard.outcome == 'success'", "steps.cachesave.outcome == 'success'"):
+        assert part in condition, part
+    assert "id: guard" in step("Guard rail on tonight's diff")
+    assert "id: cachesave" in step("Save data/ cache")
+
+
+def test_the_dispatch_time_leaves_the_job_as_an_output():
+    assert "dispatched_at: ${{ steps.dispatch.outputs.dispatched_at }}" in job("daily")
+    run = step("Deploy the rebuilt site")
+    assert "dispatched=$(date -u +%Y-%m-%dT%H:%M:%S+00:00)" in run
+    assert run.index("dispatched=$(date") < run.index("gh workflow run pages.yml")
+    assert 'echo "dispatched_at=$dispatched" >> "$GITHUB_OUTPUT"' in run
+
+
+def test_verify_deploy_waits_on_the_dispatched_run_and_reads_the_live_site():
+    verify = job("verify-deploy")
+    assert "    needs: daily" in verify
+    assert "    if: always() && needs.daily.outputs.dispatched_at != ''" in verify
+    found = step("Find the Pages run this night dispatched", "verify-deploy")
+    assert "--workflow pages.yml --event workflow_dispatch" in found
+    watch = step("Wait for it to build and deploy", "verify-deploy")
+    assert "gh run watch" in watch and "--exit-status" in watch
+    live = steps("verify-deploy")[-1]
+    assert "Check the live site is tonight's build" in live.splitlines()[0]
+    assert "if: always()" in live
+    assert 'run: python3 scripts/check_live_site.py --since "$DISPATCHED_AT"' in live
+
+
+def test_verify_deploy_can_only_read():
+    verify = job("verify-deploy")
+    perms = verify.split("    permissions:\n", 1)[1].split("\n    steps:", 1)[0]
+    assert not [line for line in perms.splitlines() if "write" in line.split("#")[0]]
+    assert "actions: read" in perms
+
+
+def test_no_expression_is_interpolated_into_a_run_line():
+    for job_id in ("daily", "verify-deploy"):
+        for s in steps(job_id):
+            if "run:" in s:
+                assert "${{" not in s.split("run:", 1)[1], s.splitlines()[0]

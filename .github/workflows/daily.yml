@@ -38,6 +38,8 @@ jobs:
                         # this job no longer commits to the tree
       actions: write    # gh cache delete, and gh workflow run pages.yml
     timeout-minutes: 180
+    outputs:
+      dispatched_at: ${{ steps.dispatch.outputs.dispatched_at }}
     env:
       # Line-by-line logs: without this, every progress line of a scrape step
       # reached the log in its last few milliseconds (scraper-09).
@@ -181,26 +183,13 @@ jobs:
       # which is the whole point: every published build used to add ~50 MB to
       # git history permanently.
       #
-      # This step still gates publishing, though: it fails the job, and the
-      # dispatch below sits after it. A scrape this rejects therefore never
+      # This step still gates publishing, though: the dispatch below runs
+      # only if this step succeeded. A scrape this rejects therefore never
       # reaches the site.
       - name: Guard rail on tonight's diff
+        id: guard
         if: steps.gate.outputs.publish == 'true'
         run: python3 scripts/check_daily_diff.py
-
-      # Publishing is a separate workflow now, and this is the only thing that
-      # asks it to run on a data change -- once a night now, at the end of the
-      # scrape that produced it. It sits after the guard rail on
-      # purpose: check_daily_diff.py fails the job, so a scrape it rejects
-      # never reaches this step and never reaches the site. dry_run stops here
-      # too, since it sets deploy=false.
-      - name: Deploy the rebuilt site
-        if: steps.gate.outputs.deploy == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh workflow run pages.yml --ref main
-          echo "dispatched pages.yml — it rebuilds the payload and deploys it"
 
       # Saving still runs on failure -- a scrape that died halfway has real
       # progress worth keeping, and --daily resumes from it. But it must never
@@ -221,11 +210,38 @@ jobs:
           fi
 
       - name: Save data/ cache
+        id: cachesave
         if: always() && steps.cachecheck.outputs.ok == 'true'
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
           path: data
           key: ne-contracts-data-${{ github.run_id }}-${{ github.run_attempt }}
+
+      # Publishing is a separate workflow, and this is the only thing that asks
+      # it to run on a data change -- once a night, at the end of the scrape
+      # that produced it. Two conditions, both explicit:
+      #   - the guard rail passed. Its step runs only when every step before it
+      #     did, so this also means the scrape and the drift check succeeded.
+      #     A scrape check_daily_diff.py rejects never reaches the site.
+      #   - the cache save above *finished*. pages.yml rebuilds from the newest
+      #     ne-contracts-data- cache, and this dispatch used to sit before the
+      #     save, landing 11-28 s ahead of it (fresh-09): a race the build won
+      #     only because it spends minutes on tests first.
+      # It comes before both prunes and the release, so none of them failing
+      # can stop a deploy. dry_run stops here too: it sets deploy=false.
+      # The time goes out as a job output: verify-deploy finds the run by it.
+      - name: Deploy the rebuilt site
+        id: dispatch
+        if: >-
+          always() && steps.gate.outputs.deploy == 'true'
+          && steps.guard.outcome == 'success' && steps.cachesave.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          dispatched=$(date -u +%Y-%m-%dT%H:%M:%S+00:00)
+          gh workflow run pages.yml --repo "$GITHUB_REPOSITORY" --ref main
+          echo "dispatched_at=$dispatched" >> "$GITHUB_OUTPUT"
+          echo "dispatched pages.yml at $dispatched — it rebuilds the payload and deploys it"
 
       # Only prune once this run has banked a good cache of its own, so a run
       # that saved nothing can never age out the baseline it failed to replace.
@@ -308,3 +324,64 @@ jobs:
         env:
           RUN_STARTED: ${{ steps.gate.outputs.started }}
         run: python3 scripts/check_scrape_stamps.py --since "$RUN_STARTED"
+
+  # The nightly used to dispatch pages.yml and never look back, so a Pages build
+  # that failed left the site frozen while every nightly stayed green (sc-01). This
+  # waits on the run it dispatched, then reads the live manifest.json. A separate
+  # job, so the scrape job's freshness check stays its last step and so this
+  # holds only read access. It runs whenever a dispatch happened, even if the
+  # scrape job went red afterwards.
+  verify-deploy:
+    needs: daily
+    if: always() && needs.daily.outputs.dispatched_at != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      actions: read     # gh run list and gh run watch on pages.yml
+      contents: read    # checkout, for scripts/check_live_site.py
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false   # nothing here pushes; gh gets its token from env
+
+      # `gh workflow run` prints no run id, so match on creation time: the
+      # earliest workflow_dispatch run of pages.yml created after the dispatch,
+      # less 30 s for clock skew. Nothing else dispatches pages.yml at night,
+      # and this workflow's concurrency group means no second nightly can.
+      - name: Find the Pages run this night dispatched
+        id: run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DISPATCHED_AT: ${{ needs.daily.outputs.dispatched_at }}
+        run: |
+          after=$(date -u -d "@$(( $(date -u -d "$DISPATCHED_AT" +%s) - 30 ))" +%Y-%m-%dT%H:%M:%SZ)
+          id=''
+          for attempt in $(seq 1 18); do
+            id=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow pages.yml --event workflow_dispatch \
+                   --limit 20 --json databaseId,createdAt \
+                   --jq "[.[] | select(.createdAt >= \"$after\")] | sort_by(.createdAt) | first | .databaseId // empty")
+            if [ -n "$id" ]; then break; fi
+            sleep 10
+          done
+          if [ -z "$id" ]; then
+            echo "::error title=Deploy not found::no pages.yml run was created after $after"
+            exit 1
+          fi
+          echo "id=$id" >> "$GITHUB_OUTPUT"
+          echo "pages.yml run $id: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$id"
+
+      # Fails if that run fails or is cancelled -- including when a push to
+      # main lands while it is still pending, since the `pages` concurrency
+      # group then replaces it with the push's run. The check below still runs
+      # and says whether the site ended up current anyway.
+      - name: Wait for it to build and deploy
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ steps.run.outputs.id }}
+        run: gh run watch "$RUN_ID" --repo "$GITHUB_REPOSITORY" --exit-status --interval 30
+
+      - name: Check the live site is tonight's build
+        if: always()
+        env:
+          DISPATCHED_AT: ${{ needs.daily.outputs.dispatched_at }}
+        run: python3 scripts/check_live_site.py --since "$DISPATCHED_AT"

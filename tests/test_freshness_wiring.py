@@ -36,7 +36,20 @@ def steps(text):
     return ["\n".join(block) for block in blocks]
 
 
-STEPS = steps(DAILY)
+def daily_job(text):
+    """The scrape job alone, from its id line to the next job. verify-deploy follows it in the
+    same file, and the freshness check must be the last step of *this* job."""
+    lines = text.split("\njobs:\n", 1)[1].splitlines()
+    start = lines.index("  daily:")
+    block = []
+    for line in lines[start + 1:]:
+        if re.match(r"^  \S", line):
+            break
+        block.append(line)
+    return "\n".join(block)
+
+
+STEPS = steps(daily_job(DAILY))
 
 
 def position(fragment):

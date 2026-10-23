@@ -13,7 +13,7 @@
 # Apple's Vision framework, through PyObjC. macOS only.
 ocrmac==1.0.1; sys_platform == "darwin"
 pyobjc-core==12.0; sys_platform == "darwin"
-pyobjc-framework-Cocoa==12.0; sys_platform == "darwin"
+pyobjc-framework-Cocoa==12.2.2; sys_platform == "darwin"
 pyobjc-framework-CoreML==12.0; sys_platform == "darwin"
 pyobjc-framework-Quartz==12.0; sys_platform == "darwin"
 pyobjc-framework-Vision==12.0; sys_platform == "darwin"

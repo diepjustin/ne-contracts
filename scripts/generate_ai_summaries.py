@@ -52,6 +52,10 @@ import time
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import ocr_io  # noqa: E402 -- torn-line-safe reading, the run lock, the exit rule
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 IN_JSONL = os.path.join(ROOT, "data", "ocr_pilot.jsonl")
@@ -128,19 +132,26 @@ def load_source_texts():
 
     Last entry wins per token, same rule as every other checkpoint reader in
     this pipeline -- ocr_pilot.jsonl is append-only too.
+
+    That file belongs to ocr_pilot.py, so a torn last line (one a killed OCR run
+    left, or one still being written) is skipped here, never parsed and never
+    cut: ocr_pilot.py repairs its own file the next time it loads it. It used
+    to be json.loads'd like any other line, and the whole step died on it.
     """
     texts = {}
     if not os.path.exists(IN_JSONL):
         raise SystemExit(f"missing {IN_JSONL} -- run scripts/ocr_pilot.py first")
-    with open(IN_JSONL, encoding="utf-8") as f:
-        for line in f:
-            if not line.strip():
-                continue
-            r = json.loads(line)
-            v = r.get("engines", {}).get("vision", {})
-            text = v.get("text")
-            if text:
-                texts[r["tok"]] = (r["doc"], text)
+
+    def torn(number, blob):
+        print(f"    Note: {IN_JSONL} ends mid-write (line {number}, {len(blob)} bytes); "
+              "skipping it. That document is summarized once its OCR record is whole.")
+
+    for _number, r in ocr_io.iter_jsonl(IN_JSONL, on_torn=torn):
+        tok = r.get("tok")
+        v = (r.get("engines") or {}).get("vision") or {}
+        text = v.get("text")
+        if tok and text:
+            texts[tok] = (r["doc"], text)
     return texts
 
 
@@ -178,13 +189,7 @@ def load_checkpoint():
 
 
 def append_checkpoint(records):
-    if not records:
-        return
-    os.makedirs(os.path.dirname(OUT_JSONL), exist_ok=True)
-    with open(OUT_JSONL, "a", encoding="utf-8") as f:
-        for rec in records:
-            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-        f.flush()
+    ocr_io.append_jsonl(OUT_JSONL, records)
 
 
 def shard_of(tok, n):
@@ -214,6 +219,9 @@ def summarize_one(tok, doc, text):
         "tok": tok, "doc": doc, "model": MODEL, "seconds": seconds,
         "unclear": unclear,
         "summary": None if unclear else response,
+        # When, not just which model: records written before 2026-10-23 have no
+        # date at all, and "how old is this summary" had no answer.
+        "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
 
 
@@ -230,6 +238,14 @@ def main():
                               "across machines, see module docstring")
     args = parser.parse_args()
 
+    # Held for the whole run, --status included: load_checkpoint() truncates a
+    # torn tail, which must never happen while another run is appending to it.
+    with ocr_io.lock_or_exit():
+        code = run(args)
+    sys.exit(code)
+
+
+def run(args):
     sources = load_source_texts()
     checkpoint = load_checkpoint()
     if args.shard is not None:
@@ -241,7 +257,7 @@ def main():
         shard_note = f" (shard {args.shard[0]}/{args.shard[1]})" if args.shard else ""
         print(f"TOTAL_OCR_TEXT={len(sources):,} documents{shard_note}")
         print(f"DONE={len(sources) - len(todo):,}  REMAINING={len(todo):,}")
-        return
+        return 0
 
     if todo and not ollama_available():
         print("ERROR: Ollama is not responding on localhost:11434. Start it with "
@@ -286,6 +302,15 @@ def main():
     print(f"\nFinished: {processed:,} documents processed this run "
           f"({errors:,} errors, {unclear_count:,} marked unclear).")
     print(f"Cumulative total on disk: {len(checkpoint) + processed:,} documents.")
+
+    # Exit 0 meant nothing: a night where Ollama answered every request with an
+    # error looked exactly like a good one to launchd and to the wrapper.
+    # "Unclear" is an answer, not a failure, so it does not count.
+    code = ocr_io.failed_run_exit(errors, processed)
+    if code:
+        print(f"ERROR: {errors:,} of {processed:,} summaries this run failed (more than "
+              f"half); exiting {code}.", file=sys.stderr)
+    return code
 
 
 if __name__ == "__main__":

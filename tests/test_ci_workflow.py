@@ -77,5 +77,5 @@ def test_it_runs_the_tests_and_the_page_lint_the_publish_job_runs():
 
 def test_the_publish_workflow_still_does_not_run_on_pull_requests():
     """Its deploy and cache-prune steps would run on PR refs."""
-    for name in ("pages.yml", "daily.yml", "rescue-cache.yml", "seed-cache.yml"):
+    for name in ("pages.yml", "daily.yml", "rescue-cache.yml", "seed-cache.yml", "keepalive.yml"):
         assert "pull_request" not in "\n".join(code_lines(workflow(name))), name

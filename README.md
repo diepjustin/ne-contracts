@@ -924,14 +924,29 @@ preview a change, and the result stays on your machine.
 | trigger | what happens |
 |---|---|
 | push to `main` | restores the last payload from the Actions cache and deploys it. No rebuild, so a portfolio edit does not need the CSVs. (True only from 9 Sep 2026 — see "The payload cache never once hit".) |
-| every night | `daily.yml` dispatches `pages.yml` **after** `check_daily_diff.py` passes, so it rebuilds from fresh data. |
+| every night | `daily.yml` dispatches `pages.yml` **after** `check_daily_diff.py` passes and the `data/` cache save has finished, so it rebuilds from fresh data. Its `verify-deploy` job then waits on that run and checks the live site (below). |
 
 The dispatch is deliberately not a `workflow_run` trigger, and staying that way is the
 point of the nightly change rather than an accident of it. `workflow_run` fires on any
 successful completion and cannot see what the run decided: it would deploy after a night
-the DST gate correctly skipped, and after a `dry_run`, neither of which produced anything
-to publish. The dispatch sits after the guard rail in the same job, so a scrape the guard
-rail rejects still never reaches the site.
+the gate skipped as already done, and after a `dry_run`, neither of which produced anything
+to publish. The dispatch runs only if the guard rail step succeeded, so a scrape the guard
+rail rejects still never reaches the site. It also waits for the cache save: `pages.yml`
+rebuilds from the newest `ne-contracts-data-` cache, and until Oct 2026 the dispatch landed
+11–28 s before the save did. It comes before the prunes and the release, so none of those
+failing can skip a deploy.
+
+**The nightly checks that the deploy happened.** It used to dispatch and never look back,
+so a failed Pages build left the site frozen while every nightly stayed green. The
+`verify-deploy` job in `daily.yml` finds the `pages.yml` run it dispatched (the earliest
+`workflow_dispatch` run created after the dispatch time; `gh workflow run` returns no id),
+waits on it with `gh run watch --exit-status`, then runs `scripts/check_live_site.py`
+against the published `manifest.json`. That passes only if the live `buildId` was stamped
+at or after the dispatch (it is runner time, UTC), retrying for about ten minutes through
+the CDN. A red `verify-deploy` beside a green scrape job means the data is fine and the
+site is not. One known false red: a push to `main` landing while the dispatched run is
+still queued replaces it in the `pages` concurrency group, so the watch fails even though
+the push's run deploys the same data; the live-site check still reports what is served.
 
 **Every night is a publish night as of Sep 2026.** It was Sunday only before that, which
 left the site up to six days behind a source the state updates daily, and left the guard
@@ -952,8 +967,9 @@ discovered later:
 - Seven 60 MB payload cache entries a week instead of one, which is why `pages.yml` prunes
   them to the newest three.
 
-Descriptions are built in CI from `scope.jsonl.gz`, downloaded from the newest
-`extraction-data-*` release, laid over the previous build's. `carry_descriptions_forward()`
+Descriptions are built in CI from `scope.jsonl.gz`, downloaded from the `scope-data`
+release (or, while that does not exist or lacks the asset, the newest `extraction-data-*`
+release), laid over the previous build's. `carry_descriptions_forward()`
 is not a fallback: `pages.yml` restores the build being replaced from the payload cache
 before every nightly dispatch, so every nightly build starts from it, and only a build
 whose restore missed — a push that moved the key — starts from `scope.jsonl` alone. So a
@@ -988,6 +1004,19 @@ becomes one unparseable line in the middle of the file, which `load_documents` r
 read past — and if the release were ever a single line, that fusion would instead be
 silently truncated, taking a real record with it.
 
+**AI summaries** come the same way, from `ai-summaries-data` with the same fallback; both
+fixed tags are updated in place by the Mac job, and the build warns when either asset is
+more than 14 days old. All three downloads go through `scripts/fetch_release_asset.py`,
+which tells "not published" (a warning; the build goes on without the file) apart from "the
+download broke" (an error; the build fails). Until Oct 2026 they ran with `2>/dev/null`, so
+a network failure looked like a missing asset and the site published without descriptions
+or summaries. A missing asset is looked for again after 10 s, and a failed download is
+retried once, because the publish script renames a new asset into place in two steps.
+
+**Only the site is deployed:** `index.html`, `manifest.json` and `d/` (the build the
+manifest names, and `d/rows/`). The artifact used to be the whole checkout minus an exclude
+list, which served `scripts/`, `tests/` and this README on the public site.
+
 `index.html` carries no build identity — it reads `manifest.json` with
 `cache: 'no-store'` — so a reader holding a stale page can never pair it with a different
 build's data.
@@ -1000,15 +1029,26 @@ every clone, so it remains a separate decision.
 
 ### Nightly automation
 
-`daily.yml` scrapes all three datasets with `--daily` every night, on a cron
-set for 10pm Central — though see the slippage below for when it actually runs. GitHub
-Actions cron has no DST awareness, so two entries fire daily and the gate compares
-`github.event.schedule` against the entry implied by the current offset, letting exactly
-one through. It gates on *which entry fired*, never on the wall clock, because an earlier
-hour-equals-22 check silently skipped entire nights, reporting success while scraping
-nothing. There is no weekday arithmetic left in the gate either: it rolled the weekday
-back for a run that landed before noon Central, purely so a delayed Sunday-night scrape
-still counted as Sunday and reached the publish leg. Nothing cares what day it is now.
+`daily.yml` scrapes all three datasets with `--daily` every night, from two cron entries
+set off the hour for the late evening, Central (`17 3` and `47 4` UTC) — though see the
+slippage below for when they actually run. Both fire every night, and the gate step makes
+the second a **backup**: a scheduled run proceeds unless every dataset already finished
+*tonight*, according to `scrape_meta.json` in the newest hub-data release. So the backup
+skips a night the first entry finished, and retries one it did not. A manual dispatch
+always runs, and any doubt — no release, a download error, an unreadable file — means run,
+because running twice is harmless and a skipped night is not. "Tonight" runs from noon to
+noon Central (`scripts/nightly_gate.py`): every run lands inside one such window whatever
+the delay, where "is there a release dated today" would skip an on-time 10pm run on a day
+whose release a late run cut at 3am. The gate this replaced let through only the entry
+matching the current UTC offset; at the delays below, both entries would have skipped the
+14 Mar 2027 spring-forward night. One consequence: a manual run after noon Central counts
+as that night's scrape — a `dry_run` too, which publishes the hub-data release but not the
+site — so the scheduled entries will skip it.
+
+Each scrape step has `--hours 0.75`, so the three stop cleanly, checkpointed, well inside
+the job's 180-minute limit (a normal night is about 16 minutes for all three), and
+`PYTHONUNBUFFERED=1` so progress reaches the log as it happens. A dataset cut short keeps
+its old stamp, so the run goes red and the backup entry resumes it.
 
 **The scheduler is hours late, not minutes.** This said "30–90 minutes" until 9 Sep 2026,
 which was wrong. Measured across all 28 nights from 13 Aug to 9 Sep, the live cron entry
@@ -1034,8 +1074,21 @@ gh api "/repos/diepjustin/ne-contracts/actions/workflows/daily.yml/runs?event=sc
   --jq '.workflow_runs[] | "\(.created_at)"' | sort
 ```
 
-Two runs land per night, one per cron entry; the earlier of each pair is the one that
-proceeds while Central is on CDT, and its slot is 03:00 UTC.
+Two runs land per night, one per cron entry; normally the first scrapes and the second
+skips in its gate step. Before Oct 2026 the slots were 03:00 and 04:00 UTC.
+
+**Keeping the schedule alive.** GitHub disables a public repository's scheduled workflows
+after 60 days without repository activity, and the nightly then stops without a failed run
+to email anyone. `keepalive.yml` runs on the 1st and 15th and calls the enable API for
+`daily.yml` and itself. If it has been disabled anyway, re-enable both from the Actions tab
+(or `gh workflow enable daily.yml`).
+
+**Workflow hardening.** Every action is pinned to a full commit SHA with its version in a
+comment, and Dependabot (configured in `.github/`) opens weekly PRs for the actions and for
+`requirements.txt`, each tested by `ci.yml`. Each job declares only the token permissions it
+uses; in `pages.yml` only the one-action deploy job holds `pages: write`. Checkouts keep no
+credentials, and every `run:` step is `bash -eo pipefail`. `tests/test_workflow_hardening.py`
+fails if any workflow, including a new one, drops one of these.
 
 **Runners are ephemeral and `data/*.csv` is gitignored**, so `data/` round-trips through
 `actions/cache`: restored under a `ne-contracts-data-` prefix, saved under a fresh
@@ -1083,8 +1136,12 @@ change on this side alone.
 - **The nightly data release.** `daily.yml` cuts a release tagged
   `ne-contracts-hub-data-YYYY-MM-DD`, the America/Chicago date, carrying four gzipped
   assets: `nu_contracts.csv.gz`, `nu_purchase_orders.csv.gz`, `state_agencies.csv.gz` and
-  `scrape_meta.json.gz`. The CSVs keep the eleven columns listed under "Running it". A
-  same-day re-run replaces that day's release, and only the newest three are kept.
+  `scrape_meta.json.gz`, plus `documents.jsonl.gz` when the nightly's `data/` has a document
+  log (the entries `--daily` has written since the cache was seeded, not the full backfill).
+  The CSVs keep the eleven columns listed under "Running it". A same-day re-run replaces
+  that day's assets in place (`--clobber`, then removes any it did not produce), so there is
+  no moment without a release. Only the newest three are kept, and pruning a release
+  deletes its tag too; a nightly step clears tags earlier prunes left behind.
   ne-connect's nightly picks the newest by **tag name**, never by `createdAt` (the date
   of the commit a tag points at, which ties across nights), and downloads `*.gz`. Its
   `ingest/sources.py` `CONTRACT_FILES` names the same three CSVs, and its

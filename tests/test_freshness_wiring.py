@@ -36,7 +36,20 @@ def steps(text):
     return ["\n".join(block) for block in blocks]
 
 
-STEPS = steps(DAILY)
+def daily_job(text):
+    """The scrape job alone, from its id line to the next job. verify-deploy follows it in the
+    same file, and the freshness check must be the last step of *this* job."""
+    lines = text.split("\njobs:\n", 1)[1].splitlines()
+    start = lines.index("  daily:")
+    block = []
+    for line in lines[start + 1:]:
+        if re.match(r"^  \S", line):
+            break
+        block.append(line)
+    return "\n".join(block)
+
+
+STEPS = steps(daily_job(DAILY))
 
 
 def position(fragment):
@@ -83,9 +96,10 @@ def test_it_runs_on_a_bad_night_and_depends_on_no_step_id_but_the_gate():
 
 
 def test_the_gate_step_records_when_the_run_began():
-    gate = STEPS[position("Pick the DST-correct cron entry")]
+    gate = STEPS[position("Decide whether tonight still needs a scrape")]
     assert "id: gate" in gate
-    assert 'echo "started=$(date -u +%Y-%m-%dT%H:%M:%S+00:00)" >> "$GITHUB_OUTPUT"' in gate
+    assert "started=$(date -u +%Y-%m-%dT%H:%M:%S+00:00)" in gate
+    assert 'echo "started=$started" >> "$GITHUB_OUTPUT"' in gate
 
 
 def test_the_format_the_gate_writes_is_one_the_check_reads():

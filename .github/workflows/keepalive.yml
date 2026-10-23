@@ -1,0 +1,44 @@
+name: Keep the nightly schedule enabled
+
+# GitHub disables a public repository's scheduled workflows after 60 days with no
+# repository activity, and then the nightly scrape simply stops: no run, no red X, no
+# email (ci-08; at the Oct 2026 pace of commits that would have been about 15 Dec). On the
+# 1st and 15th this calls the "enable workflow" API for daily.yml and for itself. The call
+# is harmless on an enabled workflow, and re-enables one that was disabled for inactivity.
+# Whether it also resets the 60-day clock is not documented by GitHub; if this workflow is
+# ever disabled itself, re-enable both from the Actions tab or with
+# `gh workflow enable daily.yml` / `gh workflow enable keepalive.yml`.
+
+on:
+  schedule:
+    - cron: '23 15 1,15 * *'
+  workflow_dispatch:
+
+permissions: {}
+
+defaults:
+  run:
+    # Declared, not left implicit: an explicit `shell: bash` runs each step as
+    # `bash --noprofile --norc -eo pipefail {0}`, while the implicit default is `bash -e {0}`.
+    shell: bash
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write    # PUT /repos/{repo}/actions/workflows/{id}/enable
+    steps:
+      - name: Enable the scheduled workflows
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for workflow in daily.yml keepalive.yml; do
+            gh api -X PUT "repos/$GITHUB_REPOSITORY/actions/workflows/$workflow/enable"
+            state=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/$workflow" --jq .state)
+            echo "$workflow: $state"
+            if [ "$state" != "active" ]; then
+              echo "::error::$workflow is $state after enabling"
+              exit 1
+            fi
+          done

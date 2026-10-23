@@ -2,12 +2,13 @@ name: NE Contracts daily scrape
 
 on:
   schedule:
-    # Both fire every day; the gate step below lets through only the entry
-    # matching the current UTC offset, so exactly one does anything on any
-    # given day. Two entries exist because GitHub Actions cron is UTC-only
-    # with no DST awareness.
-    - cron: '0 3 * * *'   # 10pm Central during CDT (UTC-5, 03:00 UTC next day)
-    - cron: '0 4 * * *'   # 10pm Central during CST (UTC-6, 04:00 UTC next day)
+    # Both fire every night. The first to get through scrapes; the gate step
+    # below makes the second a backup that skips once tonight's data is
+    # complete, and retries the night if it is not. Off the hour on purpose:
+    # the top of the hour is when GitHub's scheduler is most loaded, and runs
+    # here already start 4-5 hours late.
+    - cron: '17 3 * * *'   # 10:17pm CDT / 9:17pm CST
+    - cron: '47 4 * * *'   # backup: 11:47pm CDT / 10:47pm CST
   workflow_dispatch:
     inputs:
       dry_run:
@@ -15,10 +16,15 @@ on:
         type: boolean
         default: false
 
-permissions:
-  contents: write    # for `gh release create` below -- release creation needs
-                      # write even though this job no longer commits to the tree
-  actions: write     # for `gh cache delete` cleanup
+# Nothing at workflow level: each job asks for exactly what it uses.
+permissions: {}
+
+defaults:
+  run:
+    # Declared, not left implicit: an explicit `shell: bash` runs each step as
+    # `bash --noprofile --norc -eo pipefail {0}`, while the implicit default is `bash -e {0}`,
+    # under which a failing `gh ... | jq | xargs` prune exits 0 and is never noticed.
+    shell: bash
 
 concurrency:
   group: ne-contracts-daily
@@ -27,41 +33,62 @@ concurrency:
 jobs:
   daily:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write   # gh release create/upload/delete, and deleting orphaned hub-data tags;
+                        # this job no longer commits to the tree
+      actions: write    # gh cache delete, and gh workflow run pages.yml
     timeout-minutes: 180
+    outputs:
+      dispatched_at: ${{ steps.dispatch.outputs.dispatched_at }}
+    env:
+      # Line-by-line logs: without this, every progress line of a scrape step
+      # reached the log in its last few milliseconds (scraper-09).
+      PYTHONUNBUFFERED: '1'
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false   # nothing here pushes; gh gets its token from env
 
-      - name: Pick the DST-correct cron entry
+      - name: Decide whether tonight still needs a scrape
         id: gate
         env:
-          SCHEDULE: ${{ github.event.schedule }}
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
           DRY_RUN: ${{ github.event.inputs.dry_run }}
         run: |
-          # Gate on *which* cron entry fired, never on the wall clock. An
-          # hour-equals-22 check silently no-ops the whole night when the run
-          # slips -- Aug 13 and Aug 14 2026 both had every entry land outside
-          # hour 22, so no scrape ran at all and both runs still reported
-          # success. And it slips a long way: across the 28 nights to 9 Sep
-          # 2026 this entry was never once on time, median three hours late,
-          # worst 11.8 hours, and every night since 2 Sep between 4h20m and
-          # 4h50m. See "Nightly automation" in README.md.
+          # Idempotent, and never on the wall clock or on which cron entry
+          # fired. A scheduled run proceeds unless every dataset already
+          # finished tonight -- tonight being noon-to-noon Central -- according
+          # to the scrape_meta.json in the newest hub-data release, which every
+          # run with a usable data/ publishes. So the second entry is a backup:
+          # it skips a finished night and retries an unfinished one. Every
+          # doubt (no release, a download error, an unreadable file) means run:
+          # running twice is harmless, a skipped night is not. See
+          # scripts/nightly_gate.py for why the night starts at noon.
           #
-          # Exactly one entry matches the current UTC offset, which keeps this
-          # DST-correct without ever double-running.
-          offset=$(TZ=America/Chicago date +%z)
-          case "$offset" in
-            -0500) want='0 3 * * *' ;;   # CDT: 03:00 UTC == 22:00 Central
-            -0600) want='0 4 * * *' ;;   # CST: 04:00 UTC == 22:00 Central
-            *)     want='' ;;
-          esac
-
-          if [ "${{ github.event_name }}" = 'workflow_dispatch' ]; then
-            proceed=true
-          elif [ -n "$want" ] && [ "$SCHEDULE" = "$want" ]; then
-            proceed=true
-          else
-            proceed=false
-            echo "Central offset is $offset, so today's real run is cron '$want'; this run came from '$SCHEDULE'. Skipping."
+          # What this replaced gated on *which* entry fired, by the current UTC
+          # offset. With runs starting 4-5 hours late, both entries would have
+          # skipped the 14 Mar 2027 spring-forward night (sc-03, ci-07). An
+          # hour-equals-22 check before that silently no-oped whole nights.
+          started=$(date -u +%Y-%m-%dT%H:%M:%S+00:00)
+          proceed=true
+          if [ "$EVENT" = 'schedule' ]; then
+            gate="$RUNNER_TEMP/gate"
+            mkdir -p "$gate"
+            tag=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 100 --json tagName \
+                    --jq '[.[].tagName | select(startswith("ne-contracts-hub-data-"))] | sort | last // empty') \
+              || { echo "::warning::could not list releases -- scraping to be safe"; tag=''; }
+            if [ -n "$tag" ] && gh release download "$tag" --repo "$GITHUB_REPOSITORY" \
+                 --pattern 'scrape_meta.json.gz' --dir "$gate" --clobber \
+               && gunzip -f "$gate/scrape_meta.json.gz"; then
+              echo "newest hub-data release: $tag"
+              if python3 scripts/nightly_gate.py --meta "$gate/scrape_meta.json"; then
+                proceed=false
+                echo "Tonight is already complete; this entry is the backup. Skipping."
+              fi
+            else
+              echo "no usable scrape_meta.json from ${tag:-any hub-data release} -- scraping"
+            fi
           fi
 
           # Every night that scrapes also publishes. This used to be Sunday
@@ -86,10 +113,10 @@ jobs:
           echo "deploy=$deploy" >> "$GITHUB_OUTPUT"
           # When this run began, for the last step: a dataset's scrape stamp earlier
           # than this means tonight's scrape did not finish it.
-          echo "started=$(date -u +%Y-%m-%dT%H:%M:%S+00:00)" >> "$GITHUB_OUTPUT"
-          echo "Central offset $offset -> proceed=$proceed publish=$publish deploy=$deploy"
+          echo "started=$started" >> "$GITHUB_OUTPUT"
+          echo "$EVENT -> proceed=$proceed publish=$publish deploy=$deploy"
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         if: steps.gate.outputs.proceed == 'true'
         with:
           python-version: '3.11'
@@ -107,7 +134,7 @@ jobs:
 
       - name: Restore data/ cache
         if: steps.gate.outputs.proceed == 'true'
-        uses: actions/cache/restore@v5
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
           path: data
           key: ne-contracts-data-${{ github.run_id }}     # never pre-exists -- forces the restore-keys fallback below
@@ -122,17 +149,22 @@ jobs:
         if: steps.gate.outputs.proceed == 'true'
         run: ls -la data/*.csv 2>&1 || echo "no CSVs restored -- scrape.py --daily will refuse to run and fail this job"
 
+      # --hours: each dataset stops cleanly, checkpointed, after 45 minutes,
+      # so three of them can never reach the job's 180-minute hard kill. A
+      # normal night is about 16 minutes for all three. A dataset cut short
+      # keeps its old stamp, so the last step turns the run red, and the
+      # backup entry (or tomorrow) resumes where it stopped.
       - name: Daily scrape -- contract
         if: steps.gate.outputs.proceed == 'true'
-        run: python3 scripts/scrape.py contract --daily
+        run: python3 scripts/scrape.py contract --daily --hours 0.75
 
       - name: Daily scrape -- purchase-order
         if: steps.gate.outputs.proceed == 'true'
-        run: python3 scripts/scrape.py purchase-order --daily
+        run: python3 scripts/scrape.py purchase-order --daily --hours 0.75
 
       - name: Daily scrape -- state
         if: steps.gate.outputs.proceed == 'true'
-        run: python3 scripts/scrape.py state --daily
+        run: python3 scripts/scrape.py state --daily --hours 0.75
 
       # --- Publish leg: every night the scrape ran ---
       #
@@ -151,26 +183,13 @@ jobs:
       # which is the whole point: every published build used to add ~50 MB to
       # git history permanently.
       #
-      # This step still gates publishing, though: it fails the job, and the
-      # dispatch below sits after it. A scrape this rejects therefore never
+      # This step still gates publishing, though: the dispatch below runs
+      # only if this step succeeded. A scrape this rejects therefore never
       # reaches the site.
       - name: Guard rail on tonight's diff
+        id: guard
         if: steps.gate.outputs.publish == 'true'
         run: python3 scripts/check_daily_diff.py
-
-      # Publishing is a separate workflow now, and this is the only thing that
-      # asks it to run on a data change -- once a night now, at the end of the
-      # scrape that produced it. It sits after the guard rail on
-      # purpose: check_daily_diff.py fails the job, so a scrape it rejects
-      # never reaches this step and never reaches the site. dry_run stops here
-      # too, since it sets deploy=false.
-      - name: Deploy the rebuilt site
-        if: steps.gate.outputs.deploy == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh workflow run pages.yml --ref main
-          echo "dispatched pages.yml — it rebuilds the payload and deploys it"
 
       # Saving still runs on failure -- a scrape that died halfway has real
       # progress worth keeping, and --daily resumes from it. But it must never
@@ -191,11 +210,38 @@ jobs:
           fi
 
       - name: Save data/ cache
+        id: cachesave
         if: always() && steps.cachecheck.outputs.ok == 'true'
-        uses: actions/cache/save@v5
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
           path: data
           key: ne-contracts-data-${{ github.run_id }}-${{ github.run_attempt }}
+
+      # Publishing is a separate workflow, and this is the only thing that asks
+      # it to run on a data change -- once a night, at the end of the scrape
+      # that produced it. Two conditions, both explicit:
+      #   - the guard rail passed. Its step runs only when every step before it
+      #     did, so this also means the scrape and the drift check succeeded.
+      #     A scrape check_daily_diff.py rejects never reaches the site.
+      #   - the cache save above *finished*. pages.yml rebuilds from the newest
+      #     ne-contracts-data- cache, and this dispatch used to sit before the
+      #     save, landing 11-28 s ahead of it (fresh-09): a race the build won
+      #     only because it spends minutes on tests first.
+      # It comes before both prunes and the release, so none of them failing
+      # can stop a deploy. dry_run stops here too: it sets deploy=false.
+      # The time goes out as a job output: verify-deploy finds the run by it.
+      - name: Deploy the rebuilt site
+        id: dispatch
+        if: >-
+          always() && steps.gate.outputs.deploy == 'true'
+          && steps.guard.outcome == 'success' && steps.cachesave.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          dispatched=$(date -u +%Y-%m-%dT%H:%M:%S+00:00)
+          gh workflow run pages.yml --repo "$GITHUB_REPOSITORY" --ref main
+          echo "dispatched_at=$dispatched" >> "$GITHUB_OUTPUT"
+          echo "dispatched pages.yml at $dispatched — it rebuilds the payload and deploys it"
 
       # Only prune once this run has banked a good cache of its own, so a run
       # that saved nothing can never age out the baseline it failed to replace.
@@ -223,6 +269,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          rm -rf release
           mkdir -p release
           for f in data/nu_contracts.csv data/nu_purchase_orders.csv data/state_agencies.csv data/scrape_meta.json; do
             if [ -f "$f" ]; then
@@ -231,21 +278,54 @@ jobs:
               echo "::warning::$f missing -- skipping it in tonight's hub-data release"
             fi
           done
-          if ls release/*.gz >/dev/null 2>&1; then
-            tag="ne-contracts-hub-data-$(TZ=America/Chicago date +%Y-%m-%d)"
-            # Same-day re-run would otherwise hit "a release with the same
-            # tag name already exists" and silently keep serving the first
-            # run's stale data -- confirmed happening for real in ne-fec's
-            # identical pattern on 2026-09-19 -- delete any existing
-            # same-day release first so a re-run actually replaces it.
-            gh release delete "$tag" --repo diepjustin/ne-contracts --yes 2>/dev/null || true
+          # The nightly's own document log: one entry per record --daily has
+          # found since the cache was seeded, not the full backfill (that is
+          # documents.jsonl.gz on the extraction-data release). Optional, so
+          # a data/ without it publishes the other four as before.
+          if [ -f data/documents.jsonl ]; then
+            gzip -c data/documents.jsonl > release/documents.jsonl.gz
+          fi
+          if ! ls release/*.gz >/dev/null 2>&1; then
+            echo "::warning::nothing to release -- skipping"
+            exit 0
+          fi
+
+          repo="$GITHUB_REPOSITORY"
+          day=$(TZ=America/Chicago date +%Y-%m-%d)
+          tag="ne-contracts-hub-data-$day"
+          want=$(for f in release/*.gz; do basename "$f"; done | sort | paste -sd' ' -)
+          if gh release view "$tag" --repo "$repo" >/dev/null 2>&1; then
+            # A same-day re-run replaces that day's assets in place. Creating
+            # would fail with "already exists" and keep serving the first
+            # run's stale data (seen in ne-fec's identical pattern on
+            # 2026-09-19). This used to delete the release and create it again,
+            # which left a window with no release at all; --clobber replaces
+            # one asset at a time instead, and the tag stays where it was.
+            echo "$tag exists -- replacing its assets"
+            gh release upload "$tag" release/*.gz --repo "$repo" --clobber \
+              || echo "::warning::gh release upload failed -- $tag may still carry the earlier run's data"
+            # An asset this run did not produce would mix two runs' data.
+            for name in $(gh release view "$tag" --repo "$repo" --json assets --jq '.assets[].name'); do
+              if [ ! -f "release/$name" ]; then
+                echo "removing $name, which this run did not produce"
+                gh release delete-asset "$tag" "$name" --repo "$repo" --yes \
+                  || echo "::warning::could not remove stale asset $name from $tag"
+              fi
+            done
+          else
             gh release create "$tag" release/*.gz \
-              --repo diepjustin/ne-contracts \
-              --title "Contracts hub data — $(TZ=America/Chicago date +%Y-%m-%d)" \
+              --repo "$repo" \
+              --title "Contracts hub data — $day" \
               --notes "Automated data export for ne-connect-nightly.yml. See ne-connect's PLAN.md." \
               || echo "::warning::gh release create failed -- ne-connect will build from its previous release tonight"
+          fi
+
+          # Say so if the release does not now hold exactly what this run made.
+          have=$(gh release view "$tag" --repo "$repo" --json assets --jq '[.assets[].name] | sort | join(" ")') || have=''
+          if [ "$have" = "$want" ]; then
+            echo "$tag carries: $have"
           else
-            echo "::warning::nothing to release -- skipping"
+            echo "::warning::$tag carries [$have], expected [$want]"
           fi
 
       # Sorted by tag name, never createdAt. A release's createdAt is the date
@@ -262,9 +342,50 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release list --repo diepjustin/ne-contracts --json tagName --limit 100 \
+          # --cleanup-tag deletes the tag with the release (pr1-04). Without it
+          # every pruned release left its tag behind: 31 of 34 hub-data tags
+          # had no release by 22 Oct 2026.
+          gh release list --repo "$GITHUB_REPOSITORY" --json tagName --limit 1000 \
             | jq -r '[.[] | select(.tagName | startswith("ne-contracts-hub-data-"))] | sort_by(.tagName) | reverse | .[3:] | .[].tagName' \
-            | xargs -r -n1 -I{} gh release delete {} --repo diepjustin/ne-contracts --yes
+            | while read -r tag; do
+                echo "deleting release and tag $tag"
+                gh release delete "$tag" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag </dev/null
+              done
+
+      # The tags the prune above left behind before it had --cleanup-tag. Safe
+      # to run every night, and a no-op once they are gone: it deletes only a
+      # tag named exactly ne-contracts-hub-data-YYYY-MM-DD that has no release
+      # and is not among the three newest such tags -- the same three dates
+      # the prune keeps, so tonight's tag survives even if the release list is
+      # briefly behind. A tag that will not delete is a warning, not a failure.
+      - name: Delete orphaned hub-data tags (keep newest 3)
+        if: always() && steps.cachecheck.outputs.ok == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          repo="$GITHUB_REPOSITORY"
+          releases=$(gh release list --repo "$repo" --limit 1000 --json tagName --jq '.[].tagName')
+          tags=$(gh api --paginate "repos/$repo/git/matching-refs/tags/ne-contracts-hub-data-" \
+                   --jq '.[].ref | sub("^refs/tags/"; "") | select(test("^ne-contracts-hub-data-[0-9]{4}-[0-9]{2}-[0-9]{2}$"))' \
+                 | sort)
+          keep=$(tail -n 3 <<< "$tags")
+          deleted=0
+          # gh gets </dev/null inside these loops so it can never eat the list being read.
+          while read -r tag; do
+            [[ "$tag" =~ ^ne-contracts-hub-data-[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || continue
+            # Here-strings, not `printf | grep -q`: under pipefail an early
+            # grep exit can SIGPIPE the printf and invert the test.
+            if grep -qxF "$tag" <<< "$keep" || grep -qxF "$tag" <<< "$releases"; then
+              continue
+            fi
+            echo "deleting orphaned tag $tag"
+            if gh api -X DELETE "repos/$repo/git/refs/tags/$tag" </dev/null >/dev/null; then
+              deleted=$((deleted + 1))
+            else
+              echo "::warning::could not delete orphaned tag $tag"
+            fi
+          done <<< "$tags"
+          echo "deleted $deleted orphaned hub-data tag(s)"
 
       # Last, after the deploy dispatch, the cache save, the release and its prune, so it
       # can colour the run red without blocking any of them. scrape.py stamps a dataset
@@ -278,3 +399,64 @@ jobs:
         env:
           RUN_STARTED: ${{ steps.gate.outputs.started }}
         run: python3 scripts/check_scrape_stamps.py --since "$RUN_STARTED"
+
+  # The nightly used to dispatch pages.yml and never look back, so a Pages build
+  # that failed left the site frozen while every nightly stayed green (sc-01). This
+  # waits on the run it dispatched, then reads the live manifest.json. A separate
+  # job, so the scrape job's freshness check stays its last step and so this
+  # holds only read access. It runs whenever a dispatch happened, even if the
+  # scrape job went red afterwards.
+  verify-deploy:
+    needs: daily
+    if: always() && needs.daily.outputs.dispatched_at != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      actions: read     # gh run list and gh run watch on pages.yml
+      contents: read    # checkout, for scripts/check_live_site.py
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false   # nothing here pushes; gh gets its token from env
+
+      # `gh workflow run` prints no run id, so match on creation time: the
+      # earliest workflow_dispatch run of pages.yml created after the dispatch,
+      # less 30 s for clock skew. Nothing else dispatches pages.yml at night,
+      # and this workflow's concurrency group means no second nightly can.
+      - name: Find the Pages run this night dispatched
+        id: run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DISPATCHED_AT: ${{ needs.daily.outputs.dispatched_at }}
+        run: |
+          after=$(date -u -d "@$(( $(date -u -d "$DISPATCHED_AT" +%s) - 30 ))" +%Y-%m-%dT%H:%M:%SZ)
+          id=''
+          for attempt in $(seq 1 18); do
+            id=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow pages.yml --event workflow_dispatch \
+                   --limit 20 --json databaseId,createdAt \
+                   --jq "[.[] | select(.createdAt >= \"$after\")] | sort_by(.createdAt) | first | .databaseId // empty")
+            if [ -n "$id" ]; then break; fi
+            sleep 10
+          done
+          if [ -z "$id" ]; then
+            echo "::error title=Deploy not found::no pages.yml run was created after $after"
+            exit 1
+          fi
+          echo "id=$id" >> "$GITHUB_OUTPUT"
+          echo "pages.yml run $id: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$id"
+
+      # Fails if that run fails or is cancelled -- including when a push to
+      # main lands while it is still pending, since the `pages` concurrency
+      # group then replaces it with the push's run. The check below still runs
+      # and says whether the site ended up current anyway.
+      - name: Wait for it to build and deploy
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ steps.run.outputs.id }}
+        run: gh run watch "$RUN_ID" --repo "$GITHUB_REPOSITORY" --exit-status --interval 30
+
+      - name: Check the live site is tonight's build
+        if: always()
+        env:
+          DISPATCHED_AT: ${{ needs.daily.outputs.dispatched_at }}
+        run: python3 scripts/check_live_site.py --since "$DISPATCHED_AT"

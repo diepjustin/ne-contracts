@@ -2087,8 +2087,22 @@
   // ----------------------------------------------------------------- export
 
   // Type Code is the state's own value; Type is the category it files it under.
-  var CSV_HEAD = ["Document Number", "Type", "Type Code", "Vendor", "Amount",
-                  "Begin Date", "End Date", "Status", "Agency", "Documents", "URL"];
+  // The link column is named for what it holds, because the two exports hold
+  // different things there: a link back to this page's record, or the
+  // document's own address on the state's site. Both used to be "URL". The
+  // last column is when the data was collected, on every line, because an
+  // export is read away from the page and a reporter has to be able to say
+  // "as of" without the filename.
+  var LINK_HEAD = { page: "Record Link (this site)", source: "State Source URL" };
+  function csvHead(linkKind) {
+    return ["Document Number", "Type", "Type Code", "Vendor", "Amount",
+            "Begin Date", "End Date", "Status", "Agency", "Documents",
+            LINK_HEAD[linkKind], "Data As Of"];
+  }
+
+  // When the data was collected, as the state's timestamps say: the scrape
+  // time where the build recorded one, the build date where it did not.
+  function asOf() { return meta.scraped || meta.built || ""; }
 
   // How many documents the state publishes for a row, for the export. Blank
   // rather than a number where the backfill has not asked yet: an export is
@@ -2098,22 +2112,38 @@
     return docCount[id] === DOC_UNKNOWN ? "" : String(docCount[id]);
   }
 
+  // A text cell a spreadsheet would read as a formula -- =, +, -, @, or a
+  // leading tab or carriage return -- gets an apostrophe in front, the
+  // convention Excel, Numbers and Sheets all honour, so a vendor name can
+  // never run as =HYPERLINK(...) on a reporter's machine. Quoting alone does
+  // not stop that. Numbers are exempt: 56 amounts are negative, and an
+  // apostrophe would turn them into text. \r is quoted as well as \n, since a
+  // bare one ends the line in most readers. (frontend-10)
   function csvCell(c) {
+    if (typeof c === "number") return String(c);
     c = String(c);
-    return /[",\n]/.test(c) ? '"' + c.replace(/"/g, '""') + '"' : c;
+    if (/^[=+\-@\t\r]/.test(c)) c = "'" + c;
+    return /[",\n\r]/.test(c) ? '"' + c.replace(/"/g, '""') + '"' : c;
   }
+
+  // The inverse of the guard above, for the selftest's comparison of a
+  // rendered cell with its exported value.
+  function csvUnguard(c) { return /^'[=+\-@\t\r]/.test(c) ? c.slice(1) : c; }
 
   // Handed to Blob as an array of chunks rather than one join: 738k rows is
   // ~120 MB of CSV, and asking for that as a single string is how an export
   // turns into a tab crash.
-  function csvParts(ids, link) {
-    var parts = [CSV_HEAD.join(",")], buf = [];
+  // Values as the state published them: the raw vendor string, and end dates
+  // as recorded even where the table says "open-ended".
+  function csvParts(ids, link, linkKind) {
+    var parts = [csvHead(linkKind || "page").map(csvCell).join(",")], buf = [];
+    var stamp = asOf();
     for (var i = 0; i < ids.length; i++) {
       var id = ids[i], t = typeCol[id];
       buf.push("\n" + [docStr(id), meta.typeGroups[t], meta.types[t], vendors[vendorIdx[id]],
                        amount[id], fmtDate(begin[id]), fmtDate(end[id]),
                        meta.statuses[statusCol[id]], meta.entities[entityCol[id]],
-                       docCountCell(id), link(id)].map(csvCell).join(","));
+                       docCountCell(id), link(id), stamp].map(csvCell).join(","));
       if (buf.length === 5000) { parts.push(buf.join("")); buf = []; }
     }
     parts.push(buf.join(""));
@@ -2128,9 +2158,19 @@
     URL.revokeObjectURL(a.href);
   }
 
-  function csvName(ids) { return "nebraska-filtered-" + ids.length + "-records.csv"; }
+  // The data date and the build in the name, so this week's export and next
+  // week's are two files rather than one overwritten, and the two buttons'
+  // files are told apart by what their link column holds.
+  function csvName(ids, linkKind) {
+    var day = String(asOf()).slice(0, 10) || "undated";
+    return "nebraska-contracts_" + day + "_build-" + (meta.buildId || "unknown") + "_" +
+           ids.length + "-records_" + (linkKind === "source" ? "state-source-links" : "page-links") +
+           ".csv";
+  }
 
-  function exportPermalinks() { download(csvParts(view, permalink), csvName(view)); }
+  function exportPermalinks() {
+    download(csvParts(view, permalink, "page"), csvName(view, "page"));
+  }
 
   function exportStatus(text, cancellable) {
     $("exp").hidden = false;
@@ -2192,8 +2232,8 @@
 
     Promise.all(wants).then(function (got) {
       var held = got[0], vt = got[1];
-      download(csvParts(ids, function (id) { return buildUrl(id, held[blockOf(id)], vt); }),
-               csvName(ids));
+      download(csvParts(ids, function (id) { return buildUrl(id, held[blockOf(id)], vt); }, "source"),
+               csvName(ids, "source"));
       $("exp").hidden = true;
     }, function (e) {
       exportStatus(cancelled ? "Export cancelled." : "Export failed — " + e.message, false);
@@ -2211,9 +2251,9 @@
   // different function, so a disagreement between the table and the export is
   // one of them being wrong -- which is the check that was missing.
   //
-  // Field order follows CSV_HEAD.
+  // Field order follows csvHead().
   function csvFields(ids) {
-    var text = csvParts(ids, permalink).join(""), rows = [], row = [], cell = "";
+    var text = csvParts(ids, permalink, "page").join(""), rows = [], row = [], cell = "";
     var quoted = false, i = 0;
     while (i < text.length) {
       var c = text.charAt(i);
@@ -2223,11 +2263,11 @@
         quoted = false; i++; continue;
       }
       if (c === '"') { quoted = true; i++; continue; }
-      if (c === ",") { row.push(cell); cell = ""; i++; continue; }
-      if (c === "\n") { row.push(cell); rows.push(row); row = []; cell = ""; i++; continue; }
+      if (c === ",") { row.push(csvUnguard(cell)); cell = ""; i++; continue; }
+      if (c === "\n") { row.push(csvUnguard(cell)); rows.push(row); row = []; cell = ""; i++; continue; }
       cell += c; i++;
     }
-    row.push(cell);
+    row.push(csvUnguard(cell));
     rows.push(row);
     return rows.slice(1);          // drop the header line
   }
@@ -2326,6 +2366,10 @@
       if (row.href !== fields[10]) {
         bad.push("row " + row.id + " permalink: table \"" + row.href +
                  "\", export \"" + fields[10] + "\"");
+      }
+      if (fields[11] !== asOf()) {
+        bad.push("row " + row.id + " Data As Of: export \"" + fields[11] +
+                 "\", this build's data is as of \"" + asOf() + "\"");
       }
     }
     return { sampled: held.length, problems: bad };
@@ -2703,6 +2747,9 @@
       fmtDate: fmtDate,
       shortType: shortType,
       csvCell: csvCell,
+      csvUnguard: csvUnguard,
+      csvHead: csvHead,
+      csvName: csvName,
       csvParts: csvParts,
       docStr: docStr,
       docCountCell: docCountCell,

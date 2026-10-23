@@ -100,7 +100,24 @@ The scraper reproduces the state's records faithfully, including their errors.
   expired and $21,204,743 active. 176 triples repeat; 5 are two different documents.
 - **Document `41780` begins 09/28/2223** and ends 09/28/2023. Filter on begin > end to
   find that class of error — the page has a checkbox for it.
-- Open-ended records commonly carry an end date of `12/31/2099` or `01/01/2099`.
+- Open-ended records commonly carry an end date of `12/31/2099` or `01/01/2099` (and 19
+  carry `12/31/9999`). The page shows those three exact dates as *open-ended*, with the
+  date as recorded on hover; sorting and the CSV export use the recorded date.
+- **Some published values cannot be right as they stand**, and the page keeps them:
+  56 negative amounts (−$75.8M in all), 317 records that end before they begin, and 158
+  with a year before 1900 or after 2100 other than the placeholders above — 511 rows on
+  the 22 Oct 2026 data. Each carries a small ⚠ mark naming the problem, and every total
+  includes them as published; the record count says how many are in the current view.
+- Vendor names are displayed with runs of whitespace and control characters collapsed
+  (1,532 rows have a double space). The CSV export, the vendor groups and every join use
+  the state's exact string.
+- **CSV exports say when and what they are.** The file is named
+  `nebraska-contracts_<data date>_build-<build id>_<n>-records_page-links.csv` (Export CSV)
+  or `..._state-source-links.csv` (Export + source links); the link column is "Record
+  Link (this site)" or "State Source URL" accordingly, and every line ends with a "Data As
+  Of" column holding the scrape time. A text cell starting with `=`, `+`, `-`, `@`, a tab
+  or a CR is prefixed with an apostrophe so a spreadsheet shows it instead of evaluating
+  it; numbers, including negative amounts, are left as numbers.
 - Amounts are as recorded by the state and may not reflect amendments. `--daily` does not
   rewrite an amended row — the CSV keeps the value from the last full scrape — but it does
   record the movement to `data/changes.jsonl`. Only a full re-scrape updates the row
@@ -150,7 +167,8 @@ The scraper reproduces the state's records faithfully, including their errors.
 - **Some rows show an AI-generated summary, and it is not the state's words.** For
   scanned documents the site can show a one-sentence summary that a local language model
   wrote from OCR text. It sits in its own box under the label "AI-GENERATED SUMMARY",
-  says it is not verified, is not searchable and is not in the CSV export. It can be
+  says it is not verified, is not searchable and is not in the CSV export. It names the
+  document it summarizes, which is not always the one the row links to. It can be
   wrong, or say nothing about the document. See
   [Generated and OCR'd content](#generated-and-ocrd-content) before quoting one.
 
@@ -315,12 +333,22 @@ Where a summary goes:
   release whenever it rebuilds, beside `scope.jsonl.gz`; a release without it builds
   without summaries. Nothing in the repository produces or uploads that asset — it is a
   manual step after a local run.
-- `build_site.py` joins a summary to a row by the row's view token, so only a row's own
-  primary document can carry one. On 13 Oct 2026, 105,460 summaries had been generated,
-  104,174 of them with text, and 84,527 rows showed one (`meta.aiCount`).
+- `build_site.py` joins a summary to a row by the row's own view token first. Where the
+  row's own document has no summary (or only `UNCLEAR`), the first summarized of the
+  record's other documents, in the state's order, stands in — the same rule descriptions
+  follow — and a summary keyed on a view token several rows share reaches all of them.
+  Until Oct 2026 only the row's own document counted, and every summary of an amendment
+  or attachment (19,639 on 22 Oct) was dropped as "unmatched". On the 22 Oct data that
+  rule change took the rows showing a summary from 84,721 to 87,245, 2,504 of them from
+  another document.
 - The payload carries them as the `ai/` blocks, `aisrc.bin` (which model wrote each row's
-  summary) and `meta.aiModels` / `meta.aiCount`. A summary is not in the search index and
-  not in the CSV export.
+  summary), `aidoc.bin` (which of the record's documents was summarized, as a position in
+  the state's list; 255 = not known) and `meta.aiModels` / `meta.aiCount` /
+  `meta.aiFormatVersion` (2 since `aidoc.bin`; versioned apart from `formatVersion`
+  because `--ai-summaries-only` never touches a resident file). The panel says "Summary
+  of <file name> (document k of n)" above every summary and marks that document in the
+  list; a page meeting a newer `aiFormatVersion` than it knows shows no summaries. A
+  summary is not in the search index and not in the CSV export.
 - The row panel shows it in its own box, labelled "AI-GENERATED SUMMARY", with the note
   *Generated from OCR text and not verified. Meant to help you decide whether to open the
   source document, not to be relied on as fact — read the original before citing anything
@@ -767,7 +795,15 @@ display rather than by re-running the code that produced it — re-running it wo
 with itself no matter what it read. The amount is read back out of the formatted cell as
 a number (to the cent, since the formatter is capped at two fraction digits), and the
 type code is taken from the type cell's hover text, which is where a reader finds it.
-The permalink under the document number is checked against the export's URL column.
+The permalink under the document number is checked against the export's "Record Link
+(this site)" column, and every exported line's "Data As Of" against the build's. Three
+display rules are undone the same way: an *open-ended* End cell is compared through the
+recorded date its hover text leads with, a vendor name through the tidying the page
+applies to it, and the source-oddity mark (marked `data-extra`) is left out of the cell
+text. The export's formula guard (an apostrophe before a leading `= + - @`, tab or CR in
+a text cell) is stripped before comparing. The CRCs also cover `descsrc.bin`,
+`descdoc.bin`, `aisrc.bin` and `aidoc.bin`, and a build with `aiFormatVersion` 2 fails if
+`aidoc.bin` did not load.
 
 Rows are sampled from eight scroll positions rather than one screenful, because past
 `MAX_H` the scroller stops being a 1:1 map of the list and scroll position is scaled onto
@@ -784,7 +820,9 @@ no rendered table to read otherwise — and prints the report below the table.
 
 `?selftest=1` also publishes the page's pure functions on `window.neContracts`:
 `fmtDate`, `shortType`, `csvCell`, `csvParts`, `docStr`, `docCountCell`, `comparator`,
-`permalink`, `yearFloor`, `yearCeil`, `amountBound`, `crc32`, `queryFor` and `stateFrom`. Every one of them is a
+`permalink`, `yearFloor`, `yearCeil`, `amountBound`, `crc32`, `queryFor`, `stateFrom`,
+`csvUnguard`, `csvHead`, `csvName`, `comboFilter`, `isOpenEnded`, `endShown`, `oddity`,
+`oddityText`, `displayName`, `listedPositions` and `documentName`. Every one of them is a
 function of its arguments and the loaded payload, and every one was unreachable from
 outside the IIFE, which is most of why this page has never had a unit test.
 

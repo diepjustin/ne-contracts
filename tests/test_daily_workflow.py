@@ -202,7 +202,7 @@ def test_orphaned_tags_are_pruned_safely_after_the_release_prune():
     assert "keep=$(tail -n 3 <<< \"$tags\")" in orphan, "keep the same three dates the prune keeps"
     assert 'grep -qxF "$tag" <<< "$releases"' in orphan, "never delete a tag that has a release"
     assert "^ne-contracts-hub-data-[0-9]{4}-[0-9]{2}-[0-9]{2}$" in orphan
-    assert 'gh api -X DELETE "repos/$repo/git/refs/tags/$tag"' in orphan
+    assert 'gh api -X DELETE "repos/$repo/git/refs/tags/$tag" </dev/null' in orphan
     assert "printf" not in orphan or "| grep -q" not in orphan, "printf | grep -q can SIGPIPE under pipefail"
 
 

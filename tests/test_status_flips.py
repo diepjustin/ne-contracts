@@ -104,8 +104,11 @@ def listed(n, entity=CAMPUS, amount="$100.00"):
             "detail_url": f"https://example.test/detail?D={n}"}
 
 
-def night(monkeypatch, tmp_path, rows, search, entities=(CAMPUS, OTHER)):
+def night(monkeypatch, tmp_path, rows, search, entities=(CAMPUS, OTHER), only=None):
     """One `scrape.py contract --daily` over `rows`, the search answering `search`.
+
+    `entities` is the whole dataset (it stands in for HIGHER_ED_ENTITIES, so a night
+    that reads all of them is complete); `only` is an `--entity` subset, if any.
 
     The fake honours scrape_entity's contract, including asking record_filter
     twice per record -- once to choose what to fetch, once before writing.
@@ -135,7 +138,9 @@ def night(monkeypatch, tmp_path, rows, search, entities=(CAMPUS, OTHER)):
         return len(records), True
 
     monkeypatch.setattr(scrape, "scrape_entity", fake_scrape_entity)
-    scrape.run_daily(argparse.Namespace(dataset="contract", entity=list(entities), hours=None))
+    monkeypatch.setattr(scrape, "HIGHER_ED_ENTITIES", {e: e for e in entities})
+    scrape.run_daily(argparse.Namespace(dataset="contract", entity=list(only) if only else None,
+                                        hours=None))
 
     with open(csv_path, newline="", encoding="utf-8") as f:
         return list(csv.reader(f))[1:]

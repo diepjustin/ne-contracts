@@ -372,7 +372,7 @@ scratch instead, pass `--fresh` — 20+ hours.
 
 Once `data/` is restored, bring it up to date with `--daily`; a full scrape of a dataset
 whose combos are all done has nothing to fetch and leaves its recorded time alone (and
-`--entity X` finishing X does not stamp the whole dataset either). Restore
+`--entity X` finishing X, with or without `--daily`, does not stamp the whole dataset either). Restore
 `scrape_meta.json` with the CSVs so that time matches the data.
 
 ```bash

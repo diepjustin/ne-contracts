@@ -196,6 +196,8 @@ def daily(monkeypatch, tmp_path, search):
     monkeypatch.chdir(tmp_path)
     (tmp_path / "data").mkdir()
     monkeypatch.setattr(scrape, "document_service_healthy", lambda: True)
+    # The dataset is ENTITY alone, so a night that reads it is a complete one.
+    monkeypatch.setattr(scrape, "HIGHER_ED_ENTITIES", {ENTITY: "1"})
 
     def run(known, pages, statuses=None, tail=""):
         csv_path = tmp_path / "data" / "nu_contracts.csv"

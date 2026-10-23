@@ -1374,6 +1374,9 @@ def run_daily(args):
     entity_type, doc_type, output_csv = DATASETS[args.dataset]
     is_state = args.dataset == "state"
     entities = STATE_ENTITIES if is_state else HIGHER_ED_ENTITIES
+    # "Complete" means every entity of the dataset was read today, whatever subset this run
+    # is given: `--daily --entity X` finishing X used to stamp the whole dataset fresh.
+    dataset_entities = entities
 
     if args.entity:
         unknown = [e for e in args.entity if e not in entities]
@@ -1557,7 +1560,7 @@ def run_daily(args):
             if moved:
                 print(f"Recorded {moved:,} field change(s) to {CHANGES_JSONL} on records listed again.")
 
-    if all(e in done_today for e in entities):
+    if all(e in done_today for e in dataset_entities):
         stamp = record_scrape_time(args.dataset)
         append_daily_diff_report(args.dataset, report, stamp)
         if os.path.exists(progress_path):
@@ -1570,11 +1573,13 @@ def run_daily(args):
         # was not read.
         if report:
             append_daily_diff_report(args.dataset, report, local_timestamp(), complete=False)
-        remaining = sorted(set(entities) - done_today)
+        remaining = sorted(set(dataset_entities) - done_today)
         print(f"\nDaily scrape incomplete -- {len(remaining)} entit(y/ies) not finished today: "
               f"{remaining[:5]}{'...' if len(remaining) > 5 else ''}. The {len(report)} "
               "finished this run are patched and in the diff report; the scrape time is "
-              "recorded only once every entity finishes. Re-run to finish.")
+              "recorded only once every entity of the dataset finishes. "
+              + ("This run was limited by --entity, so the rest of the dataset was not read; "
+                 "a run without --entity finishes it." if args.entity else "Re-run to finish."))
 
 
 CSV_HEADER = [

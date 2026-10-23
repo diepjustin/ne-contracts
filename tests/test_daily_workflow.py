@@ -162,3 +162,49 @@ def test_no_expression_is_interpolated_into_a_run_line():
         for s in steps(job_id):
             if "run:" in s:
                 assert "${{" not in s.split("run:", 1)[1], s.splitlines()[0]
+
+
+# --- the hub-data release (pr1-04, and the same-day re-run) --------------------------------
+
+def test_the_release_adds_the_document_log_only_when_there_is_one():
+    release = code(step("Publish a data release for ne-connect"))
+    assert "if [ -f data/documents.jsonl ]; then\ngzip -c data/documents.jsonl > release/documents.jsonl.gz" \
+        in "\n".join(line.strip() for line in release.splitlines())
+    for name in ("nu_contracts.csv", "nu_purchase_orders.csv", "state_agencies.csv", "scrape_meta.json"):
+        assert "data/%s" % name in release
+
+
+def test_a_same_day_rerun_replaces_assets_in_place_rather_than_deleting_the_release():
+    release = code(step("Publish a data release for ne-connect"))
+    assert 'gh release upload "$tag" release/*.gz --repo "$repo" --clobber' in release
+    assert 'gh release delete "$tag"' not in release, "delete-then-create leaves a window with no release"
+    assert "gh release delete-asset" in release, "an asset this run did not make must not linger"
+    assert 'gh release create "$tag" release/*.gz' in release
+
+
+def test_the_release_is_checked_after_it_is_published():
+    release = code(step("Publish a data release for ne-connect"))
+    assert release.rindex("gh release view") > release.index("gh release create")
+    assert 'if [ "$have" = "$want" ]; then' in release
+
+
+def test_the_release_prune_takes_the_tag_with_it_and_keeps_three():
+    prune = code(step("Delete old hub-data releases"))
+    assert "--cleanup-tag" in prune
+    assert "sort_by(.tagName) | reverse | .[3:]" in prune
+    assert "createdAt" not in prune, "createdAt ties across nights; sort by tag name"
+
+
+def test_orphaned_tags_are_pruned_safely_after_the_release_prune():
+    orphan = code(step("Delete orphaned hub-data tags"))
+    assert index("Delete old hub-data releases") < index("Delete orphaned hub-data tags") \
+        < index("Check that every dataset finished tonight")
+    assert "keep=$(tail -n 3 <<< \"$tags\")" in orphan, "keep the same three dates the prune keeps"
+    assert 'grep -qxF "$tag" <<< "$releases"' in orphan, "never delete a tag that has a release"
+    assert "^ne-contracts-hub-data-[0-9]{4}-[0-9]{2}-[0-9]{2}$" in orphan
+    assert 'gh api -X DELETE "repos/$repo/git/refs/tags/$tag"' in orphan
+    assert "printf" not in orphan or "| grep -q" not in orphan, "printf | grep -q can SIGPIPE under pipefail"
+
+
+def test_the_repository_is_never_hard_coded():
+    assert "--repo diepjustin/ne-contracts" not in code(job("daily"))

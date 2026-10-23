@@ -269,6 +269,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          rm -rf release
           mkdir -p release
           for f in data/nu_contracts.csv data/nu_purchase_orders.csv data/state_agencies.csv data/scrape_meta.json; do
             if [ -f "$f" ]; then
@@ -277,21 +278,54 @@ jobs:
               echo "::warning::$f missing -- skipping it in tonight's hub-data release"
             fi
           done
-          if ls release/*.gz >/dev/null 2>&1; then
-            tag="ne-contracts-hub-data-$(TZ=America/Chicago date +%Y-%m-%d)"
-            # Same-day re-run would otherwise hit "a release with the same
-            # tag name already exists" and silently keep serving the first
-            # run's stale data -- confirmed happening for real in ne-fec's
-            # identical pattern on 2026-09-19 -- delete any existing
-            # same-day release first so a re-run actually replaces it.
-            gh release delete "$tag" --repo diepjustin/ne-contracts --yes 2>/dev/null || true
+          # The nightly's own document log: one entry per record --daily has
+          # found since the cache was seeded, not the full backfill (that is
+          # documents.jsonl.gz on the extraction-data release). Optional, so
+          # a data/ without it publishes the other four as before.
+          if [ -f data/documents.jsonl ]; then
+            gzip -c data/documents.jsonl > release/documents.jsonl.gz
+          fi
+          if ! ls release/*.gz >/dev/null 2>&1; then
+            echo "::warning::nothing to release -- skipping"
+            exit 0
+          fi
+
+          repo="$GITHUB_REPOSITORY"
+          day=$(TZ=America/Chicago date +%Y-%m-%d)
+          tag="ne-contracts-hub-data-$day"
+          want=$(for f in release/*.gz; do basename "$f"; done | sort | paste -sd' ' -)
+          if gh release view "$tag" --repo "$repo" >/dev/null 2>&1; then
+            # A same-day re-run replaces that day's assets in place. Creating
+            # would fail with "already exists" and keep serving the first
+            # run's stale data (seen in ne-fec's identical pattern on
+            # 2026-09-19). This used to delete the release and create it again,
+            # which left a window with no release at all; --clobber replaces
+            # one asset at a time instead, and the tag stays where it was.
+            echo "$tag exists -- replacing its assets"
+            gh release upload "$tag" release/*.gz --repo "$repo" --clobber \
+              || echo "::warning::gh release upload failed -- $tag may still carry the earlier run's data"
+            # An asset this run did not produce would mix two runs' data.
+            for name in $(gh release view "$tag" --repo "$repo" --json assets --jq '.assets[].name'); do
+              if [ ! -f "release/$name" ]; then
+                echo "removing $name, which this run did not produce"
+                gh release delete-asset "$tag" "$name" --repo "$repo" --yes \
+                  || echo "::warning::could not remove stale asset $name from $tag"
+              fi
+            done
+          else
             gh release create "$tag" release/*.gz \
-              --repo diepjustin/ne-contracts \
-              --title "Contracts hub data — $(TZ=America/Chicago date +%Y-%m-%d)" \
+              --repo "$repo" \
+              --title "Contracts hub data — $day" \
               --notes "Automated data export for ne-connect-nightly.yml. See ne-connect's PLAN.md." \
               || echo "::warning::gh release create failed -- ne-connect will build from its previous release tonight"
+          fi
+
+          # Say so if the release does not now hold exactly what this run made.
+          have=$(gh release view "$tag" --repo "$repo" --json assets --jq '[.assets[].name] | sort | join(" ")') || have=''
+          if [ "$have" = "$want" ]; then
+            echo "$tag carries: $have"
           else
-            echo "::warning::nothing to release -- skipping"
+            echo "::warning::$tag carries [$have], expected [$want]"
           fi
 
       # Sorted by tag name, never createdAt. A release's createdAt is the date
@@ -308,9 +342,49 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release list --repo diepjustin/ne-contracts --json tagName --limit 100 \
+          # --cleanup-tag deletes the tag with the release (pr1-04). Without it
+          # every pruned release left its tag behind: 31 of 34 hub-data tags
+          # had no release by 22 Oct 2026.
+          gh release list --repo "$GITHUB_REPOSITORY" --json tagName --limit 1000 \
             | jq -r '[.[] | select(.tagName | startswith("ne-contracts-hub-data-"))] | sort_by(.tagName) | reverse | .[3:] | .[].tagName' \
-            | xargs -r -n1 -I{} gh release delete {} --repo diepjustin/ne-contracts --yes
+            | while read -r tag; do
+                echo "deleting release and tag $tag"
+                gh release delete "$tag" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag
+              done
+
+      # The tags the prune above left behind before it had --cleanup-tag. Safe
+      # to run every night, and a no-op once they are gone: it deletes only a
+      # tag named exactly ne-contracts-hub-data-YYYY-MM-DD that has no release
+      # and is not among the three newest such tags -- the same three dates
+      # the prune keeps, so tonight's tag survives even if the release list is
+      # briefly behind. A tag that will not delete is a warning, not a failure.
+      - name: Delete orphaned hub-data tags (keep newest 3)
+        if: always() && steps.cachecheck.outputs.ok == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          repo="$GITHUB_REPOSITORY"
+          releases=$(gh release list --repo "$repo" --limit 1000 --json tagName --jq '.[].tagName')
+          tags=$(gh api --paginate "repos/$repo/git/matching-refs/tags/ne-contracts-hub-data-" \
+                   --jq '.[].ref | sub("^refs/tags/"; "") | select(test("^ne-contracts-hub-data-[0-9]{4}-[0-9]{2}-[0-9]{2}$"))' \
+                 | sort)
+          keep=$(tail -n 3 <<< "$tags")
+          deleted=0
+          while read -r tag; do
+            [[ "$tag" =~ ^ne-contracts-hub-data-[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || continue
+            # Here-strings, not `printf | grep -q`: under pipefail an early
+            # grep exit can SIGPIPE the printf and invert the test.
+            if grep -qxF "$tag" <<< "$keep" || grep -qxF "$tag" <<< "$releases"; then
+              continue
+            fi
+            echo "deleting orphaned tag $tag"
+            if gh api -X DELETE "repos/$repo/git/refs/tags/$tag" >/dev/null; then
+              deleted=$((deleted + 1))
+            else
+              echo "::warning::could not delete orphaned tag $tag"
+            fi
+          done <<< "$tags"
+          echo "deleted $deleted orphaned hub-data tag(s)"
 
       # Last, after the deploy dispatch, the cache save, the release and its prune, so it
       # can colour the run red without blocking any of them. scrape.py stamps a dataset

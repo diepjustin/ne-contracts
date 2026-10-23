@@ -19,6 +19,7 @@
        negative amount, an end before the begin, a year like 3011. Amber, so it
        reads as "look twice" rather than as the accent's "this is a link". */
     --warn: #8a4b00; --warn-soft: #fff4e0;
+    --mark: #fff1b8;
     --radius: 10px;
     --scroll-thumb: #c9cdd4; --scroll-track: transparent;
     --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
@@ -33,6 +34,7 @@
       --active: #3ecf82; --active-bg: #123420; --active-border: #235c39;
       --ai-accent: #c4b5fd; --ai-accent-soft: #241c33;
       --warn: #f5b55c; --warn-soft: #2b2112;
+      --mark: #3a3000;
       --scroll-thumb: #3a4048; --scroll-track: transparent;
     }
   }
@@ -274,18 +276,25 @@
     color: var(--muted); font-variant-numeric: tabular-nums;
     min-width: 3.5em;
   }
-  #detail .doc-row i { color: var(--muted); opacity: .85; }
+  /* Full text colour, no opacity: these two qualifiers -- which document the
+     words came from, and that a company total is ours -- are the page's
+     provenance, and at muted-and-faded they measured 3.37:1 and 3.70:1. (fe-07) */
+  #detail .doc-row i { color: var(--text); }
   #detail .doc-more { color: var(--muted); padding: 1px 0; }
   #detail .docs-all { display: inline-block; margin-top: 3px; font-size: 12px; }
   #detail .company {
     margin: 2px 0 5px; font-size: 12px; color: var(--muted);
   }
-  #detail .company i { opacity: .8; }
+  #detail .company i { color: var(--text); }
   #detail button {
     float: right; padding: 0 7px; font-size: 12px; font-weight: 500; color: var(--muted);
   }
   body.has-descriptions tbody tr[data-row], body.has-ai-summaries tbody tr[data-row] { cursor: pointer; }
-  tbody tr.picked { background: var(--accent-soft); }
+  /* The open row. Its tint alone was 1.14:1 against the others; the accent
+     bar down its left edge (5.7:1 light, 6.4:1 dark) is what marks it, and
+     it is drawn inside the row so the row's height never changes. Distinct
+     from the keyboard focus ring, which outlines the whole row. (fe-07) */
+  tbody tr.picked { background: var(--accent-soft); box-shadow: inset 4px 0 0 var(--accent); }
 
   #scroller { overflow: auto; height: calc(100vh - 218px); background: var(--bg); }
   /* The scroller's height is hand-computed against everything above it, so the
@@ -337,7 +346,13 @@
     color: var(--text); font-family: var(--sans); padding: 2px 8px; border-radius: 5px;
     background: var(--warn-soft); border-left: 3px solid var(--warn);
   }
-  mark { background: var(--accent-soft); color: inherit; padding: 0 1px; border-radius: 2px; }
+  /* A search hit: a yellow highlighter rather than the accent's pink, so it
+     is not confused with the open row, underlined so it does not rest on
+     colour alone. Accent text on it stays at or above 4.7:1 in both themes. */
+  mark {
+    background: var(--mark); color: inherit; padding: 0 1px; border-radius: 2px;
+    text-decoration: underline; text-decoration-thickness: 2px; text-underline-offset: 2px;
+  }
   .empty { padding: 50px 20px; text-align: center; color: var(--muted); }
   #load { padding: 50px 20px; text-align: center; color: var(--muted); background: var(--bg); }
   .bar {

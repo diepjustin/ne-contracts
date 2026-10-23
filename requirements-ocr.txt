@@ -1,0 +1,28 @@
+# The Mac's OCR job only (scripts/ocr_pilot.py, run by scripts/run_ocr_catchup.sh).
+# Install on top of requirements.txt, into the venv the job runs:
+#
+#     venv/bin/python3 -m pip install -r requirements.txt -r requirements-ocr.txt
+#
+# scripts/update_live_checkout.sh does this whenever either file changes. CI never
+# installs it: OCR does not run there.
+#
+# Pinned to what the job's venv actually ran on 23 Oct 2026 (Python 3.9.6), so a
+# rebuilt venv OCRs the same way. These used to be an unpinned
+# `pip install ocrmac pymupdf pillow` in the README.
+
+# Apple's Vision framework, through PyObjC. macOS only.
+ocrmac==1.0.1; sys_platform == "darwin"
+pyobjc-core==12.0; sys_platform == "darwin"
+pyobjc-framework-Cocoa==12.0; sys_platform == "darwin"
+pyobjc-framework-CoreML==12.0; sys_platform == "darwin"
+pyobjc-framework-Quartz==12.0; sys_platform == "darwin"
+pyobjc-framework-Vision==12.0; sys_platform == "darwin"
+click==8.1.8; sys_platform == "darwin"
+
+# Rendering PDF pages to images, for either engine.
+PyMuPDF==1.26.5
+pillow==11.3.0
+
+# The Tesseract engine (--engines tesseract); needs the tesseract binary too.
+pytesseract==0.3.13
+packaging==26.3

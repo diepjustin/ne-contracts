@@ -752,8 +752,7 @@ def main():
     # the --descriptions-only / --ai-summaries-only paths all follow it. So it moves
     # only once the build has been read back and verified. A verify failure
     # then leaves it naming the last build that passed, not this one.
-    with open(os.path.join(OUT_DIR, "manifest.json"), "w", encoding="utf-8") as f:
-        json.dump({"buildId": build_id, "dir": f"d/{build_id}"}, f)
+    write_manifest(build_id)
 
     resident = sum(os.path.getsize(os.path.join(outdir, p)) for p in
                    (ne_format.META, ne_format.COLS_I32, ne_format.COLS_F64,
@@ -780,6 +779,30 @@ def main():
     print(f"document lists: {xdoc / 1e6:6.2f} MB raw in {ne_format.block_count(n):,} blocks "
           f"({meta['docMultiRows']:,} rows publish more than one)")
     print(f"written to    : {outdir}")
+
+
+def write_manifest(build_id):
+    """Point manifest.json at a build, atomically.
+
+    Written beside the payload and moved into place with os.replace, so a
+    reader -- the page, or the next step of the workflow -- sees the old
+    manifest or the new one, never a truncated file. Writing it in place left
+    a window in which a kill or a full disk published an empty manifest.json,
+    which the page cannot load at all. The temporary sits in d/, which is
+    gitignored and on the same filesystem, and is a dotfile so pages.yml's
+    "keep only the build just made" loop never mistakes it for a build.
+    """
+    path = os.path.join(OUT_DIR, "manifest.json")
+    tmp = os.path.join(OUT_DIR, "d", f".manifest.{os.getpid()}.tmp")
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"buildId": build_id, "dir": f"d/{build_id}"}, f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
 
 
 def add_descriptions_to_build():

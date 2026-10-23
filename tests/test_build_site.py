@@ -827,3 +827,34 @@ def test_a_single_document_row_with_a_nonzero_stored_position_is_not_placed(monk
     descriptions, _sources, documents = _carry(monkeypatch, tmp_path, [_tok(9)], [], [])
     assert descriptions[0] == b"ORDINARY ROW"
     assert documents[0] == NO_DOCUMENT
+
+
+def test_the_manifest_is_replaced_atomically(tmp_path, monkeypatch):
+    """diff-04: manifest.json is what publishes a build, so it must never be seen half-written.
+    It is written to a temporary under d/ and moved over the old one; nothing is left behind."""
+    monkeypatch.setattr(build_site, "OUT_DIR", str(tmp_path))
+    (tmp_path / "d").mkdir()
+    (tmp_path / "manifest.json").write_text('{"buildId": "old", "dir": "d/old"}')
+    replaced = []
+    real = os.replace
+    monkeypatch.setattr(build_site.os, "replace", lambda a, b: (replaced.append((a, b)), real(a, b)))
+    build_site.write_manifest("20261023-010203")
+    assert json.loads((tmp_path / "manifest.json").read_text()) == {
+        "buildId": "20261023-010203", "dir": "d/20261023-010203"}
+    assert len(replaced) == 1 and replaced[0][1] == str(tmp_path / "manifest.json")
+    assert os.path.dirname(replaced[0][0]) == str(tmp_path / "d")
+    assert os.listdir(tmp_path / "d") == []
+
+
+def test_a_failed_manifest_write_leaves_the_old_one(tmp_path, monkeypatch):
+    monkeypatch.setattr(build_site, "OUT_DIR", str(tmp_path))
+    (tmp_path / "d").mkdir()
+    (tmp_path / "manifest.json").write_text('{"buildId": "old", "dir": "d/old"}')
+
+    def boom(*_a, **_k):
+        raise OSError("disk full")
+    monkeypatch.setattr(build_site.json, "dump", boom)
+    with pytest.raises(OSError):
+        build_site.write_manifest("new")
+    assert json.loads((tmp_path / "manifest.json").read_text())["buildId"] == "old"
+    assert os.listdir(tmp_path / "d") == []

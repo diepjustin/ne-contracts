@@ -143,3 +143,15 @@ def test_dependabot_watches_the_actions_and_the_python_requirements():
 def test_the_page_lint_runs_a_pinned_eslint():
     """The npx call in lint_page.py names an exact version, never a bare `eslint`."""
     assert re.search(r'ESLINT = "eslint@\d+\.\d+\.\d+"', read("scripts", "lint_page.py"))
+
+
+def test_the_keepalive_enables_the_nightly_and_itself_with_nothing_more_than_actions_write():
+    """ci-08: a scheduled workflow GitHub has auto-disabled never runs again on its own."""
+    text = read(".github", "workflows", "keepalive.yml")
+    assert re.search(r"- cron: '[^']+'", text) and "workflow_dispatch:" in text
+    assert "for workflow in daily.yml keepalive.yml; do" in text
+    assert 'gh api -X PUT "repos/$GITHUB_REPOSITORY/actions/workflows/$workflow/enable"' in text
+    perms = [line.split("#")[0].strip() for line in jobs(text)["keepalive"] if ": " in line]
+    assert "actions: write" in perms
+    assert not [p for p in perms if p.endswith(("write", "read")) and p != "actions: write"]
+    assert "actions/checkout" not in text, "it needs no code, so it should not fetch any"

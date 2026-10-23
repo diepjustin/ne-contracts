@@ -2,12 +2,13 @@ name: NE Contracts daily scrape
 
 on:
   schedule:
-    # Both fire every day; the gate step below lets through only the entry
-    # matching the current UTC offset, so exactly one does anything on any
-    # given day. Two entries exist because GitHub Actions cron is UTC-only
-    # with no DST awareness.
-    - cron: '0 3 * * *'   # 10pm Central during CDT (UTC-5, 03:00 UTC next day)
-    - cron: '0 4 * * *'   # 10pm Central during CST (UTC-6, 04:00 UTC next day)
+    # Both fire every night. The first to get through scrapes; the gate step
+    # below makes the second a backup that skips once tonight's data is
+    # complete, and retries the night if it is not. Off the hour on purpose:
+    # the top of the hour is when GitHub's scheduler is most loaded, and runs
+    # here already start 4-5 hours late.
+    - cron: '17 3 * * *'   # 10:17pm CDT / 9:17pm CST
+    - cron: '47 4 * * *'   # backup: 11:47pm CDT / 10:47pm CST
   workflow_dispatch:
     inputs:
       dry_run:
@@ -37,42 +38,55 @@ jobs:
                         # this job no longer commits to the tree
       actions: write    # gh cache delete, and gh workflow run pages.yml
     timeout-minutes: 180
+    env:
+      # Line-by-line logs: without this, every progress line of a scrape step
+      # reached the log in its last few milliseconds (scraper-09).
+      PYTHONUNBUFFERED: '1'
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           persist-credentials: false   # nothing here pushes; gh gets its token from env
 
-      - name: Pick the DST-correct cron entry
+      - name: Decide whether tonight still needs a scrape
         id: gate
         env:
-          SCHEDULE: ${{ github.event.schedule }}
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
           DRY_RUN: ${{ github.event.inputs.dry_run }}
         run: |
-          # Gate on *which* cron entry fired, never on the wall clock. An
-          # hour-equals-22 check silently no-ops the whole night when the run
-          # slips -- Aug 13 and Aug 14 2026 both had every entry land outside
-          # hour 22, so no scrape ran at all and both runs still reported
-          # success. And it slips a long way: across the 28 nights to 9 Sep
-          # 2026 this entry was never once on time, median three hours late,
-          # worst 11.8 hours, and every night since 2 Sep between 4h20m and
-          # 4h50m. See "Nightly automation" in README.md.
+          # Idempotent, and never on the wall clock or on which cron entry
+          # fired. A scheduled run proceeds unless every dataset already
+          # finished tonight -- tonight being noon-to-noon Central -- according
+          # to the scrape_meta.json in the newest hub-data release, which every
+          # run with a usable data/ publishes. So the second entry is a backup:
+          # it skips a finished night and retries an unfinished one. Every
+          # doubt (no release, a download error, an unreadable file) means run:
+          # running twice is harmless, a skipped night is not. See
+          # scripts/nightly_gate.py for why the night starts at noon.
           #
-          # Exactly one entry matches the current UTC offset, which keeps this
-          # DST-correct without ever double-running.
-          offset=$(TZ=America/Chicago date +%z)
-          case "$offset" in
-            -0500) want='0 3 * * *' ;;   # CDT: 03:00 UTC == 22:00 Central
-            -0600) want='0 4 * * *' ;;   # CST: 04:00 UTC == 22:00 Central
-            *)     want='' ;;
-          esac
-
-          if [ "${{ github.event_name }}" = 'workflow_dispatch' ]; then
-            proceed=true
-          elif [ -n "$want" ] && [ "$SCHEDULE" = "$want" ]; then
-            proceed=true
-          else
-            proceed=false
-            echo "Central offset is $offset, so today's real run is cron '$want'; this run came from '$SCHEDULE'. Skipping."
+          # What this replaced gated on *which* entry fired, by the current UTC
+          # offset. With runs starting 4-5 hours late, both entries would have
+          # skipped the 14 Mar 2027 spring-forward night (sc-03, ci-07). An
+          # hour-equals-22 check before that silently no-oped whole nights.
+          started=$(date -u +%Y-%m-%dT%H:%M:%S+00:00)
+          proceed=true
+          if [ "$EVENT" = 'schedule' ]; then
+            gate="$RUNNER_TEMP/gate"
+            mkdir -p "$gate"
+            tag=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 100 --json tagName \
+                    --jq '[.[].tagName | select(startswith("ne-contracts-hub-data-"))] | sort | last // empty') \
+              || { echo "::warning::could not list releases -- scraping to be safe"; tag=''; }
+            if [ -n "$tag" ] && gh release download "$tag" --repo "$GITHUB_REPOSITORY" \
+                 --pattern 'scrape_meta.json.gz' --dir "$gate" --clobber \
+               && gunzip -f "$gate/scrape_meta.json.gz"; then
+              echo "newest hub-data release: $tag"
+              if python3 scripts/nightly_gate.py --meta "$gate/scrape_meta.json"; then
+                proceed=false
+                echo "Tonight is already complete; this entry is the backup. Skipping."
+              fi
+            else
+              echo "no usable scrape_meta.json from ${tag:-any hub-data release} -- scraping"
+            fi
           fi
 
           # Every night that scrapes also publishes. This used to be Sunday
@@ -97,8 +111,8 @@ jobs:
           echo "deploy=$deploy" >> "$GITHUB_OUTPUT"
           # When this run began, for the last step: a dataset's scrape stamp earlier
           # than this means tonight's scrape did not finish it.
-          echo "started=$(date -u +%Y-%m-%dT%H:%M:%S+00:00)" >> "$GITHUB_OUTPUT"
-          echo "Central offset $offset -> proceed=$proceed publish=$publish deploy=$deploy"
+          echo "started=$started" >> "$GITHUB_OUTPUT"
+          echo "$EVENT -> proceed=$proceed publish=$publish deploy=$deploy"
 
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         if: steps.gate.outputs.proceed == 'true'
@@ -133,17 +147,22 @@ jobs:
         if: steps.gate.outputs.proceed == 'true'
         run: ls -la data/*.csv 2>&1 || echo "no CSVs restored -- scrape.py --daily will refuse to run and fail this job"
 
+      # --hours: each dataset stops cleanly, checkpointed, after 45 minutes,
+      # so three of them can never reach the job's 180-minute hard kill. A
+      # normal night is about 16 minutes for all three. A dataset cut short
+      # keeps its old stamp, so the last step turns the run red, and the
+      # backup entry (or tomorrow) resumes where it stopped.
       - name: Daily scrape -- contract
         if: steps.gate.outputs.proceed == 'true'
-        run: python3 scripts/scrape.py contract --daily
+        run: python3 scripts/scrape.py contract --daily --hours 0.75
 
       - name: Daily scrape -- purchase-order
         if: steps.gate.outputs.proceed == 'true'
-        run: python3 scripts/scrape.py purchase-order --daily
+        run: python3 scripts/scrape.py purchase-order --daily --hours 0.75
 
       - name: Daily scrape -- state
         if: steps.gate.outputs.proceed == 'true'
-        run: python3 scripts/scrape.py state --daily
+        run: python3 scripts/scrape.py state --daily --hours 0.75
 
       # --- Publish leg: every night the scrape ran ---
       #

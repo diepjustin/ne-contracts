@@ -83,9 +83,10 @@ def test_it_runs_on_a_bad_night_and_depends_on_no_step_id_but_the_gate():
 
 
 def test_the_gate_step_records_when_the_run_began():
-    gate = STEPS[position("Pick the DST-correct cron entry")]
+    gate = STEPS[position("Decide whether tonight still needs a scrape")]
     assert "id: gate" in gate
-    assert 'echo "started=$(date -u +%Y-%m-%dT%H:%M:%S+00:00)" >> "$GITHUB_OUTPUT"' in gate
+    assert "started=$(date -u +%Y-%m-%dT%H:%M:%S+00:00)" in gate
+    assert 'echo "started=$started" >> "$GITHUB_OUTPUT"' in gate
 
 
 def test_the_format_the_gate_writes_is_one_the_check_reads():

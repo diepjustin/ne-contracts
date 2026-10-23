@@ -219,6 +219,11 @@
   #detail.has-docs { height: auto; max-height: 42vh; }
   #detail .who { color: var(--muted); font-size: 12px; margin-bottom: 3px; font-family: var(--mono); }
   #detail .who b { color: var(--text); font-variant-numeric: tabular-nums; }
+  #detail .facts {
+    margin: 0 0 4px; font-size: 12.5px; font-family: var(--mono); color: var(--text);
+    font-variant-numeric: tabular-nums;
+  }
+  #detail .facts .pill { font-size: 10px; vertical-align: 1px; }
   #detail .words { white-space: pre-wrap; }
   #detail .none { color: var(--muted); font-style: italic; }
   /* Where the description came from. Muted and small: it frames the state's
@@ -241,6 +246,10 @@
     margin-bottom: 5px; font-size: 12px; font-weight: 600; color: var(--ai-accent);
     white-space: normal;
   }
+  #detail .ai-summary .aiof {
+    margin-bottom: 5px; font-size: 12px; font-weight: 600; color: var(--text);
+    white-space: normal;
+  }
   #detail .ai-summary .ainote {
     margin-bottom: 5px; font-size: 11.5px; color: var(--muted);
     white-space: normal; font-style: italic;
@@ -256,6 +265,7 @@
     display: flex; gap: 8px; align-items: baseline;
     padding: 1px 0; white-space: normal;
   }
+  #detail .doc-pos { color: var(--muted); min-width: 2.2em; text-align: right; font-variant-numeric: tabular-nums; }
   #detail .doc-row a { font-variant-numeric: tabular-nums; font-family: var(--mono); }
   #detail .doc-size {
     color: var(--muted); font-variant-numeric: tabular-nums;
@@ -549,6 +559,11 @@
   var DESC_SRC = "descsrc.bin";
   var DESC_DOC = "descdoc.bin";
   var AI_SRC = "aisrc.bin";
+  var AI_DOC = "aidoc.bin";
+  // The newest AI-summary format this page reads; see ne_format.AI_FORMAT_VERSION.
+  // A newer one is not guessed at: its summaries are left off rather than shown
+  // under a label that may no longer be true.
+  var AI_FORMAT = 2;
   var RESIDENT = [COLS_I32, COLS_F64, COLS_U8, DOCS, VENDORS];
 
   // --- payload ------------------------------------------------------------
@@ -571,8 +586,10 @@
   // payload built before descsrc.bin existed.
   var descSrc = null, descDoc = null;
   // One byte per row naming the model its AI summary came from; null on a
-  // payload built before aisrc.bin existed.
-  var aiSrc = null;
+  // payload built before aisrc.bin existed. aiDoc: which of the record's
+  // documents each summary is of (meta.aiFormatVersion 2), null on a build
+  // where every summary is of the row's own document.
+  var aiSrc = null, aiDoc = null;
   var vtokLoad = null;           // promise for vtok.bin, fetched only when needed
 
   // --- view state ---------------------------------------------------------
@@ -852,7 +869,8 @@
       .then(function (got) {
         RESIDENT.forEach(function (f, i) { files[f] = got[i]; });
         decode();
-        return Promise.all([loadVendorGroups(), loadDescSources(), loadDescDocuments(), loadAiSources()]);
+        return Promise.all([loadVendorGroups(), loadDescSources(), loadDescDocuments(),
+                            loadAiSources(), loadAiDocuments()]);
       });
   }
 
@@ -906,7 +924,7 @@
 
     hasDesc = (meta.descCount || 0) > 0;
     document.body.classList.toggle("has-descriptions", hasDesc);
-    hasAi = (meta.aiCount || 0) > 0;
+    hasAi = (meta.aiCount || 0) > 0 && (meta.aiFormatVersion || 1) <= AI_FORMAT;
     document.body.classList.toggle("has-ai-summaries", hasAi);
 
     viewBuf = new Int32Array(N);
@@ -988,6 +1006,27 @@
         aiSrc = new Uint8Array(ab);
       }, function () {
         aiSrc = null;
+      });
+  }
+
+  // Which of a record's documents each AI summary was generated from. Present
+  // from meta.aiFormatVersion 2, when summaries of a record's other documents
+  // began to stand in for one its own document lacks; before that every
+  // summary was of the row's own document, which is what null means here.
+  // aiDocFailed: the build has the file but it did not load, so the page
+  // knows only that it does not know which document was read.
+  var aiDocFailed = false;
+  function loadAiDocuments() {
+    if (!hasAi || (meta.aiFormatVersion || 1) < 2) return Promise.resolve();
+    return fetch(BASE + dir + AI_DOC).then(ok)
+      .then(function (r) { return r.arrayBuffer(); })
+      .then(function (ab) {
+        need(ab.byteLength === N,
+             AI_DOC + " is " + ab.byteLength + " bytes for " + N + " rows");
+        aiDoc = new Uint8Array(ab);
+      }, function () {
+        aiDoc = null;
+        aiDocFailed = true;
       });
   }
 
@@ -1730,8 +1769,11 @@
     // With the other documents listed right above, "this document" would read
     // as a claim about all of them. It is only ever about the one the
     // description is read from.
+    // Not "the first of these": the row's own document is not always first
+    // in the state's list (122 rows), and the others are read where it says
+    // nothing.
     if (hasDocuments(id)) {
-      return "No description could be read from the first of these documents.";
+      return "No description could be read from this record's documents.";
     }
     return "No description could be read from this document.";
   }
@@ -1750,9 +1792,40 @@
     return docCount[id] > 1 && docCount[id] !== DOC_UNKNOWN;
   }
 
-  function showDocuments(id) {
-    var wants = [documentsFor(id), viewPresent[id] ? sourceUrl(id) : Promise.resolve("")];
-    Promise.all(wants).then(function (got) {
+  // Does this row have a description? From descsrc.bin where the build has
+  // one; a build without it is taken at its word that the marker means one.
+  function hasDescription(id) { return descSrc ? descSrc[id] > 0 : true; }
+
+  // Which document, by position in the state's list, the row's AI summary is
+  // of: aidoc.bin where the build has it, otherwise the row's own document,
+  // found by its address. -1 when that cannot be said.
+  function aiPosition(id, documents, primaryUrl) {
+    if (aiDoc) return aiDoc[id] === DOC_UNKNOWN ? -1 : aiDoc[id];
+    if (aiDocFailed) return -1;
+    for (var i = 0; i < documents.length; i++) {
+      if (meta.viewBase + encodeURIComponent(documents[i].token) === primaryUrl) return i;
+    }
+    return documents.length ? -1 : 0;
+  }
+
+  // The first `shown` positions, with any of `pins` that fall past them put in
+  // place of the last few. A marker that names the source of the words on
+  // screen must never point at a document the list does not show: the three
+  // $6.65B Medicaid contracts were described from their 13th document, under
+  // "and 10 more". (fe-03)
+  function listedPositions(count, shown, pins) {
+    var extra = [];
+    pins.forEach(function (p) {
+      if (p >= shown && p < count && extra.indexOf(p) < 0) extra.push(p);
+    });
+    extra.sort(function (a, b) { return a - b; });
+    var out = [];
+    for (var i = 0; i < Math.min(count, shown - extra.length); i++) out.push(i);
+    return out.concat(extra);
+  }
+
+  function showDocuments(id, documentsP, primaryP) {
+    Promise.all([documentsP, primaryP]).then(function (got) {
       var documents = got[0], primaryUrl = got[1];
       var box = $("detail-docs");
       if (!box || picked !== id || !documents.length) return;
@@ -1767,19 +1840,29 @@
       // because that was the only one ever read; now a record whose first
       // document says nothing can be described by a later one, and the marker
       // has to follow -- a page that named the wrong source would be making a
-      // false statement about its own provenance.
-      var from = descDoc ? descDoc[id] : 0;
-      var html = documents.slice(0, SHOWN).map(function (d, i) {
+      // false statement about its own provenance. A row with no description
+      // gets no marker at all: it used to sit on the first document of 19,394
+      // rows that had nothing to show.
+      var from = !hasDescription(id) ? -1 : descDoc ? descDoc[id] : -2;
+      var ai = aiSrc && aiSrc[id] ? aiPosition(id, documents, primaryUrl) : -1;
+      var positions = listedPositions(documents.length, SHOWN, [from, ai]);
+      var html = positions.map(function (i, k) {
+        var d = documents[i];
         var url = meta.viewBase + encodeURIComponent(d.token);
-        var note = (descDoc ? i === from : url === primaryUrl)
-          ? '<i>description read from this one</i>' : "";
-        return '<div class="doc-row"><a href="' + esc(url) + '" target="_blank" ' +
-               'rel="noopener">' + esc(d.name) + "</a>" +
-               '<span class="doc-size">' + esc(d.size) + "</span>" + note + "</div>";
+        var isDesc = from === -2 ? url === primaryUrl : i === from;
+        var notes = [];
+        if (isDesc) notes.push("description read from this one");
+        if (i === ai) notes.push("AI summary is of this one");
+        var gap = k > 0 && positions[k - 1] !== i - 1
+          ? '<div class="doc-more">… ' + (i - positions[k - 1] - 1) + " not shown …</div>" : "";
+        return gap + '<div class="doc-row' + (notes.length ? " doc-marked" : "") + '">' +
+               '<span class="doc-pos">' + (i + 1) + ".</span>" +
+               '<a href="' + esc(url) + '" target="_blank" rel="noopener">' + esc(d.name) + "</a>" +
+               '<span class="doc-size">' + esc(d.size) + "</span>" +
+               (notes.length ? "<i>" + esc(notes.join(" · ")) + "</i>" : "") + "</div>";
       }).join("");
-      if (documents.length > SHOWN) {
-        html += '<div class="doc-more">and ' + (documents.length - SHOWN) + " more</div>";
-      }
+      var rest = documents.length - 1 - positions[positions.length - 1];
+      if (rest > 0) html += '<div class="doc-more">and ' + rest + " more</div>";
 
       box.innerHTML = '<div class="docs-head">' + documents.length +
         " documents at statecontracts.nebraska.gov</div>" + html;
@@ -1806,6 +1889,35 @@
     });
   }
 
+  // The name of the document at `position` for the AI box and the
+  // description label: the state's file name and its place in the list for a
+  // record publishing several, the row's own document otherwise.
+  function documentName(id, documents, position) {
+    if (position < 0) return "";
+    if (documents.length && position < documents.length) {
+      return documents[position].name + " (document " + (position + 1) + " of " +
+             documents.length + ")";
+    }
+    return position === 0 ? "this record's document, " + docStr(id) : "";
+  }
+
+  // The record's figures, in the panel as well as the row: on a phone the
+  // row is a card with no room for everything, and a reader who opened a row
+  // to quote it should not have to look back at the table for the amount.
+  function factsLine(id) {
+    var e = end[id];
+    var ends = isOpenEnded(e)
+      ? '<span title="' + esc(endTitle(e)) + '">open-ended</span>' : esc(fmtDate(e) || "—");
+    return '<div class="facts"><b>' + esc(fmtMoney.format(amount[id])) + "</b> · begins " +
+      esc(fmtDate(begin[id]) || "—") + " · ends " + ends + ' · <span class="pill ' +
+      (statusCol[id] === 0 ? "active" : "expired") + '">' + esc(meta.statuses[statusCol[id]]) +
+      "</span></div>" +
+      (oddCol[id] ? '<div class="oddity">The state published this record with ' +
+        esc(oddityText(oddCol[id], begin[id], end[id])) +
+        ". Shown and counted as published; check the source document before relying on it.</div>"
+        : "");
+  }
+
   function showDetail(id) {
     picked = id;
     var el = $("detail"), t = typeCol[id];
@@ -1818,6 +1930,7 @@
       '<div class="who"><b>' + esc(docStr(id)) + "</b> · " +
       esc(vname[vendorIdx[id]]) + " · " + esc(meta.entities[entityCol[id]]) +
       " · " + esc(shortType(meta.typeGroups[t])) + "</div>" +
+      factsLine(id) +
       companyLine(id) +
       (hasDocuments(id)
         ? '<div class="docs" id="detail-docs">' + docCount[id] +
@@ -1827,9 +1940,17 @@
       (hasAi ? '<div class="ai-summary" id="detail-ai" hidden></div>' : "");
     $("detail-close").addEventListener("click", closeDetail);
     el.classList.toggle("has-docs", hasDocuments(id));
-    if (hasDocuments(id)) showDocuments(id);
 
-    descFor(id).then(function (text) {
+    // Fetched once and shared: the list, the description's source line and the
+    // AI box all name documents out of it. A failure leaves the list saying so
+    // and the other two without a name, never without their text.
+    var documentsP = hasDocuments(id) ? documentsFor(id) : Promise.resolve([]);
+    var primaryP = viewPresent[id] ? sourceUrl(id) : Promise.resolve("");
+    var named = Promise.all([documentsP, primaryP])["catch"](function () { return [[], ""]; });
+    if (hasDocuments(id)) showDocuments(id, documentsP, primaryP);
+
+    Promise.all([descFor(id), named]).then(function (got) {
+      var text = got[0], documents = got[1][0];
       if (picked !== id) return;   // reader moved on before this landed
       // Not `words`: that is the module-level description search index. This
       // is the panel element. Harmless as it stood, and exactly the shape of
@@ -1840,13 +1961,18 @@
         // part numbers and a scope of work look identical in a bare paragraph,
         // and a reader who does not know which one they are reading cannot
         // judge either -- "Itemised in the document's line-item table" is the difference
-        // between odd-looking prose and a list of what was bought.
+        // between odd-looking prose and a list of what was bought. On a record
+        // publishing several documents it also names which one, so the source
+        // is on screen even when the list is cut short. (fe-03)
         var from = descLabel(id);
+        var source = documents.length && descDoc && descDoc[id] !== DOC_UNKNOWN
+          ? documentName(id, documents, descDoc[id]) : "";
         panel.textContent = "";
-        if (from) {
+        if (from || source) {
           var tag = document.createElement("div");
           tag.className = "descfrom";
-          tag.textContent = from;
+          tag.textContent = from && source ? from + " — read from " + source
+            : from || "Read from " + source;
           panel.appendChild(tag);
         }
         panel.appendChild(document.createTextNode(text));
@@ -1872,7 +1998,8 @@
     // almost every row will never have one, and saying so on each would be
     // noise, not honesty.
     if (hasAi) {
-      aiFor(id).then(function (text) {
+      Promise.all([aiFor(id), named]).then(function (got) {
+        var text = got[0], documents = got[1][0], primaryUrl = got[1][1];
         if (picked !== id) return;
         var panel = $("detail-ai");
         if (!panel) return;   // reader closed the row before this landed
@@ -1886,8 +2013,18 @@
           note.textContent = "Generated from OCR text and not verified. Meant to help " +
             "you decide whether to open the source document, not to be relied on as " +
             "fact — read the original before citing anything here.";
+          // Which document the model read. Since summaries of a record's other
+          // documents stand in where its own has none, this is not always the
+          // document the row links to, and an amendment's summary must not
+          // read as the contract's. (fe-04, ai-01)
+          var of = document.createElement("div");
+          of.className = "aiof";
+          var name = documentName(id, documents, aiPosition(id, documents, primaryUrl));
+          of.textContent = name ? "Summary of " + name
+            : "Summary of one of this record's documents; which one was not recorded.";
           panel.appendChild(tag);
           panel.appendChild(note);
+          panel.appendChild(of);
           panel.appendChild(document.createTextNode(text));
           panel.hidden = false;
         } else {
@@ -2564,6 +2701,24 @@
       say(dsWant === undefined || dsGot === dsWant, "crc32 " + DESC_SRC + " = " + dsGot +
           (dsWant === undefined ? " (no digest in meta)" : dsGot === dsWant ? "" : " — expected " + dsWant));
     }
+    [[descDoc, DESC_DOC], [aiDoc, AI_DOC]].forEach(function (pair) {
+      if (!pair[0]) return;
+      var got = crc32(pair[0]), want = meta.digests[pair[1]];
+      say(want === undefined || got === want, "crc32 " + pair[1] + " = " + got +
+          (want === undefined ? " (no digest in meta)" : got === want ? "" : " — expected " + want));
+    });
+    // A v2 build names the document each summary is of. One whose aidoc.bin
+    // did not load would label none of them, so that is a failure, not a skip.
+    if (hasAi && (meta.aiFormatVersion || 1) >= 2) {
+      say(!!aiDoc, AI_DOC + (aiDoc ? " loaded: every AI summary names its document"
+                                    : " did not load — AI summaries would not say what they summarize"));
+      if (aiDoc && aiSrc) {
+        var stray = 0;
+        for (var r = 0; r < N; r++) if (!aiSrc[r] && aiDoc[r]) stray++;
+        say(stray === 0, AI_DOC + " names a document only for rows with a summary" +
+            (stray ? " — " + stray + " rows without one name a document" : ""));
+      }
+    }
     if (aiSrc) {
       var asGot = crc32(aiSrc), asWant = meta.digests[AI_SRC];
       say(asWant === undefined || asGot === asWant, "crc32 " + AI_SRC + " = " + asGot +
@@ -2898,7 +3053,9 @@
       endShown: endShown,
       oddity: oddity,
       oddityText: oddityText,
-      displayName: displayName
+      displayName: displayName,
+      listedPositions: listedPositions,
+      documentName: documentName
     };
   }
 

@@ -16,7 +16,7 @@ pyobjc-core==12.0; sys_platform == "darwin"
 pyobjc-framework-Cocoa==12.0; sys_platform == "darwin"
 pyobjc-framework-CoreML==12.0; sys_platform == "darwin"
 pyobjc-framework-Quartz==12.0; sys_platform == "darwin"
-pyobjc-framework-Vision==12.0; sys_platform == "darwin"
+pyobjc-framework-Vision==12.2.2; sys_platform == "darwin"
 click==8.1.8; sys_platform == "darwin"
 
 # Rendering PDF pages to images, for either engine.

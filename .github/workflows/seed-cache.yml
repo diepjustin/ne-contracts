@@ -19,15 +19,25 @@ on:
         type: string
         required: false
 
-permissions:
-  contents: read
-  actions: read   # to download an artifact from another run
+permissions: {}
+
+defaults:
+  run:
+    # Declared, not left implicit: an explicit `shell: bash` runs each step as
+    # `bash --noprofile --norc -eo pipefail {0}`, while the implicit default is `bash -e {0}`,
+    # under which a failing `gh ... | jq | xargs` prune exits 0 and is never noticed.
+    shell: bash
 
 jobs:
   seed:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read    # checkout
+      actions: read     # gh run download from another run, and gh cache list
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false   # nothing here pushes; gh gets its token from env
 
       - name: Download data/ from the rescue run
         if: inputs.artifact_run_id != ''
@@ -54,7 +64,7 @@ jobs:
           du -sh data
 
       - name: Save the cache under this ref
-        uses: actions/cache/save@v5
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
           path: data
           key: ne-contracts-data-seed-${{ github.run_id }}-${{ github.run_attempt }}

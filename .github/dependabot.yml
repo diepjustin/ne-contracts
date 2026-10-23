@@ -1,0 +1,17 @@
+# Weekly update PRs for the two things this repository pins: the GitHub Actions in
+# .github/workflows (pinned by commit SHA, with the version in a trailing comment that
+# Dependabot keeps in step) and the Python packages in requirements.txt. Every PR it opens
+# runs ci.yml, so a bump is tested before it can merge.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly

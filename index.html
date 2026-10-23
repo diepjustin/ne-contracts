@@ -154,7 +154,7 @@
   }
   input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
   #q { min-width: 260px; }
-  /* Typing to filter 101 agencies. The list floats over the table rather than
+  /* Typing to filter the agencies (92 on 22 Oct 2026). The list floats over the table rather than
      pushing it down, so the rows behind stay where the reader left them. */
   .combo { position: relative; display: flex; }
   #entity-q { min-width: 210px; width: 100%; }
@@ -1835,14 +1835,20 @@
 
   // ------------------------------------------------------------ agency combo
   //
-  // 101 agencies is too many to scroll for, so the Agency control is a text box
-  // that filters them. The <select> behind it stays the value holder: every
+  // Ninety-odd agencies (92 on 22 Oct 2026; meta.entities is the list) are too
+  // many to find by scrolling alone, so the Agency control is a text box that
+  // filters them. The <select> behind it stays the value holder: every
   // reader of this filter, the reset button and the permalink loader all go on
   // asking it for a value, and its options are indices into meta.entities.
   // Keeping it means this box is a way of setting that value, not a second
   // source of truth to be kept in step with the first.
 
-  var COMBO_SHOWN = 40;    // enough to scroll, few enough to render on a keystroke
+  // Every match is listed. This was capped at the first 40, with nothing saying
+  // so: opened empty, the list ended at "Insurance, Department of", and UNL,
+  // UNMC, Roads and 49 others -- 79% of all rows -- could be found only by
+  // already knowing to type their names, while the arrow keys stopped at the
+  // same 40. A hundred short <li>s render in well under a millisecond, so the
+  // cap bought nothing. (fe-02)
   var comboOpen = false, comboActive = -1, comboMatches = [];
 
   function comboClose() {
@@ -1855,14 +1861,13 @@
 
   // Substring, not prefix: someone looking for the Department of Roads is far
   // likelier to type "roads" than "department". The description index answers
-  // a different question and is deliberately prefix-only; this list is 101
-  // strings in memory, so it can afford to be generous.
+  // a different question and is deliberately prefix-only; this list is under
+  // a hundred strings in memory, so it can afford to be generous.
   function comboFilter(query) {
     var q = query.trim().toLowerCase();
     var out = [];
     for (var i = 0; i < meta.entities.length; i++) {
       if (!q || meta.entities[i].toLowerCase().indexOf(q) !== -1) out.push(i);
-      if (out.length >= COMBO_SHOWN) break;
     }
     return out;
   }
@@ -2760,7 +2765,8 @@
       amountBound: amountBound,
       crc32: crc32,
       queryFor: queryFor,
-      stateFrom: stateFrom
+      stateFrom: stateFrom,
+      comboFilter: comboFilter
     };
   }
 

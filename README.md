@@ -385,7 +385,7 @@ python3 scripts/scrape.py state             # -> data/state_agencies.csv
 python3 scripts/scrape.py state --status    # progress, no network
 python3 scripts/scrape.py state --hours 3   # stop cleanly after 3h
 python3 scripts/scrape.py state --entity "Roads, Department of"
-python3 scripts/check_entity_drift.py       # has the state's entity list changed?
+python3 scripts/check_entity_drift.py --strict   # has the state's entity list changed? (exit 1 if so)
 
 python3 scripts/backfill_documents.py       # -> data/documents.jsonl (the 33h one)
 python3 scripts/backfill_documents.py --dataset contract   # one dataset at a time
@@ -847,8 +847,11 @@ discovered later:
   a silent stop is this project's characteristic failure, and a site that rebuilds
   unconditionally cannot go quietly stale.
 - `check_entity_drift.py` now asks the state for its entity lists nightly rather than
-  weekly — two requests, but a drift it finds blocks publishing every night until the
-  committed lists are updated.
+  weekly — two requests, retried once. A drift it finds, or a failure to ask, is a
+  `::warning` annotation every night until the committed lists are updated, not a failed
+  step: it used to exit 1, which stopped the deploy for something `--daily` does not even
+  read (a new agency is simply not scraped until it is added). Run it with `--strict`
+  before a full re-scrape to get the exit 1 back.
 - Seven 60 MB payload cache entries a week instead of one, which is why `pages.yml` prunes
   them to the newest three.
 

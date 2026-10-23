@@ -15,6 +15,10 @@
        own emphasis" (links, focus rings, status pills), and an AI-generated
        summary is a different kind of claim that must never blend into it. */
     --ai-accent: #6d28d9; --ai-accent-soft: #f3ecfd;
+    /* A value the state published that cannot be right as it stands: a
+       negative amount, an end before the begin, a year like 3011. Amber, so it
+       reads as "look twice" rather than as the accent's "this is a link". */
+    --warn: #8a4b00; --warn-soft: #fff4e0;
     --radius: 10px;
     --scroll-thumb: #c9cdd4; --scroll-track: transparent;
     --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
@@ -28,6 +32,7 @@
       --row-alt: #181c20; --shadow: 0 1px 2px rgba(0,0,0,.5), 0 6px 14px rgba(0,0,0,.42);
       --active: #3ecf82; --active-bg: #123420; --active-border: #235c39;
       --ai-accent: #c4b5fd; --ai-accent-soft: #241c33;
+      --warn: #f5b55c; --warn-soft: #2b2112;
       --scroll-thumb: #3a4048; --scroll-track: transparent;
     }
   }
@@ -301,6 +306,19 @@
   }
   .pill.active { color: var(--active); border-color: var(--active-border); background: var(--active-bg); }
   .pill.expired { color: var(--muted); }
+  /* Marks a row whose published values cannot all be right. Part of the
+     document cell but not of its text: data-extra keeps it out of what the
+     selftest compares against the export. */
+  .odd-flag {
+    display: inline-block; margin-left: 5px; padding: 0 4px; border-radius: 4px;
+    font: 700 10.5px/1.45 var(--mono); color: var(--warn); background: var(--warn-soft);
+    border: 1px solid var(--warn); vertical-align: 1px; cursor: help;
+  }
+  #detail .oddity {
+    margin: 2px 0 5px; padding: 3px 8px; border-radius: 5px; font-size: 12px;
+    color: var(--text); background: var(--warn-soft); border-left: 3px solid var(--warn);
+  }
+  .oddnote { color: var(--text); }
   mark { background: var(--accent-soft); color: inherit; padding: 0 1px; border-radius: 2px; }
   .empty { padding: 50px 20px; text-align: center; color: var(--muted); }
   #load { padding: 50px 20px; text-align: center; color: var(--muted); background: var(--bg); }
@@ -352,6 +370,17 @@
             renewals, the signed contract — and clicking the row lists all of them. Those files
             are served by the state, not copied here, so a link will not open while that
             service is down.
+          </p>
+          <p>
+            Amounts and dates are the state's, exactly as published, and every total on this page
+            adds them up as they are — including the few that cannot be right as they stand: negative
+            amounts, records that end before they begin, and years such as 3011. Those rows carry a
+            <span class="odd-flag" aria-hidden="true">⚠&#xFE0E;</span> mark saying what is odd about them,
+            and the count says how many are in what you are looking at. An end date shown as
+            <i>open-ended</i> is the state's own placeholder for "no fixed end" (12/31/2099, 01/01/2099
+            or 12/31/9999); hover it for the date as recorded, which is also what the CSV export carries.
+            Vendor names are shown with stray spaces and control characters tidied; the export keeps
+            the state's exact spelling.
           </p>
         </details>
       </div>
@@ -532,7 +561,8 @@
   var statusCol, entityCol, typeCol, adnIdx, viewPresent, docLen, docCount;  // Uint8Array
   var docs, docOff;              // packed ASCII document numbers + their offsets
   var files = {};                // the raw file bytes, kept for ?selftest=1
-  var vendors = [], vlow = [];
+  var vendors = [], vname = [], vlow = [];
+  var oddCol = null;             // per row: the oddity() mask, 0 for almost all
   // Which reviewed company each vendor spelling belongs to (-1 for most), and
   // the canonical names. Optional: a build made before the review existed, or
   // with an empty vendor_groups.json, simply has neither.
@@ -595,6 +625,59 @@
     if (!n) return "";
     var s = String(n);
     return s.slice(4, 6) + "/" + s.slice(6, 8) + "/" + s.slice(0, 4);
+  }
+
+  // The end dates the state uses for "no fixed end". 29,149 rows carry one --
+  // 26,905 of them Active, and $43 billion, 40% of the headline total -- and
+  // shown as dates they read as eighty-year contracts. Exact values only: a
+  // 2099 date with any other day, or a year-9999 date that is not 12/31, is
+  // shown as recorded and flagged as an oddity below. (fe-09)
+  var OPEN_ENDED = { 20990101: true, 20991231: true, 99991231: true };
+  function isOpenEnded(n) { return OPEN_ENDED[n] === true; }
+  var OPEN_TITLE = " as recorded — the state's placeholder for no fixed end date";
+
+  // An End cell's text and hover. The raw date always leads the title, which
+  // is what the selftest reads back to compare with the export.
+  function endShown(n) { return isOpenEnded(n) ? "open-ended" : fmtDate(n); }
+  function endTitle(n) { return isOpenEnded(n) ? fmtDate(n) + OPEN_TITLE : ""; }
+
+  // Values the state published that cannot all be right as they stand. They
+  // stay in every total and in the export -- this page reports the state's
+  // numbers, it does not correct them -- but a row carrying one says so.
+  // Counted on 22 Oct 2026: 56 negative amounts (-$75.8M), 317 records that
+  // end before they begin, 158 with a year before 1900 or after 2100 other
+  // than the open-ended placeholders above; 511 rows in all. (sc-05)
+  var ODD_NEGATIVE = 1, ODD_ORDER = 2, ODD_YEAR = 4;
+  function implausibleYear(n, isEnd) {
+    if (!n || (isEnd && isOpenEnded(n))) return false;
+    var y = Math.floor(n / 10000);
+    return y < 1900 || y > 2100;
+  }
+  function oddity(amt, b, e) {
+    return (amt < 0 ? ODD_NEGATIVE : 0) |
+           (b && e && b > e ? ODD_ORDER : 0) |
+           (implausibleYear(b, false) || implausibleYear(e, true) ? ODD_YEAR : 0);
+  }
+  function oddityText(mask, b, e) {
+    var out = [];
+    if (mask & ODD_NEGATIVE) out.push("a negative amount");
+    if (mask & ODD_ORDER) out.push("an end date before its begin date");
+    if (mask & ODD_YEAR) {
+      var years = [b, e].filter(function (n, i) { return implausibleYear(n, i === 1); })
+        .map(function (n) { return Math.floor(n / 10000); });
+      out.push("a date in the year " + years.join(" and "));
+    }
+    return out.join(", ");
+  }
+
+  // A vendor name as shown: control characters become spaces and runs of
+  // whitespace collapse to one. 1,532 rows' names carry a double space and two
+  // carry control bytes (\x11, \x0f), which only make two spellings of one
+  // company look like different strings. Display only: the export, the
+  // vendor groups and every join keep the state's exact string.
+  function displayName(raw) {
+    return String(raw).replace(/[\u0000-\u001f\u007f-\u009f]/g, " ")
+      .replace(/\s+/g, " ").trim();
   }
 
   function showUpdated() {
@@ -807,13 +890,19 @@
     var V = meta.vendorCount, vb = files[VENDORS];
     var lens = vb.subarray(0, V), blob = vb.subarray(V), dec = new TextDecoder();
     vendors = new Array(V);
+    vname = new Array(V);
     vlow = new Array(V);
     for (var v = 0, p = 0; v < V; v++) {
       vendors[v] = dec.decode(blob.subarray(p, p + lens[v]));
-      vlow[v] = vendors[v].toLowerCase();
+      vname[v] = displayName(vendors[v]);
+      // Searched as shown, so a highlight lands on the text on screen.
+      vlow[v] = vname[v].toLowerCase();
       p += lens[v];
     }
     need(p === blob.length, VENDORS + " has " + (blob.length - p) + " bytes past the last name");
+
+    oddCol = new Uint8Array(N);
+    for (i = 0; i < N; i++) oddCol[i] = oddity(amount[i], begin[i], end[i]);
 
     hasDesc = (meta.descCount || 0) > 0;
     document.body.classList.toggle("has-descriptions", hasDesc);
@@ -964,7 +1053,7 @@
   function comparator(k) {
     var r;
     if (k === 1) {
-      r = rankOf(vendors);
+      r = rankOf(vname);
       return function (a, b) { return r[vendorIdx[a]] - r[vendorIdx[b]] || a - b; };
     }
     if (k === 2) return function (a, b) { return amount[a] - amount[b] || a - b; };
@@ -1117,7 +1206,7 @@
     var d0 = yearFloor($("y0").value), d1 = yearCeil($("y1").value);
     var hasMn = !isNaN(mn), hasMx = !isNaN(mx);
 
-    var order = orderFor(sortKey), out = viewBuf, count = 0, total = 0;
+    var order = orderFor(sortKey), out = viewBuf, count = 0, total = 0, odd = 0;
     var p = sortDir > 0 ? 0 : N - 1, stop = sortDir > 0 ? N : -1;
     for (; p !== stop; p += sortDir) {
       var j = order[p];
@@ -1135,11 +1224,12 @@
           !(dhit && dhit.has(j))) continue;
       out[count++] = j;
       total += amount[j];
+      if (oddCol[j]) odd++;
     }
 
     view = out.subarray(0, count);
     render();
-    summarize(total);
+    summarize(total, odd);
     writeState();
   }
 
@@ -1151,10 +1241,16 @@
   // is doing work: the largest values are not-to-exceed ceilings on multi-year
   // programs, and the footer links to the caveats that say so. Summed in the
   // filter loop, so it costs nothing a keystroke was not already paying.
-  function summarize(total) {
+  // When the rows include values that cannot be right, the sentence says the
+  // total includes them -- it is the state's arithmetic, not a corrected one.
+  function summarize(total, odd) {
     $("count").innerHTML =
       "<b>" + view.length.toLocaleString() + "</b> of " + N.toLocaleString() + " records" +
-      (view.length ? " · <b>" + fmtTotal.format(total) + "</b> in recorded amounts" : "");
+      (view.length ? " · <b>" + fmtTotal.format(total) + "</b> in recorded amounts" : "") +
+      (odd ? ' · <span class="oddnote" title="Negative amounts, end dates before begin dates or ' +
+             'impossible years, as the state published them. Each such row is marked; see ' +
+             '&quot;How this page works&quot;.">includes ' + odd.toLocaleString() + " row" +
+             (odd === 1 ? "" : "s") + " with odd source values, counted as published</span>" : "");
   }
 
   // Only the visible slice is in the DOM; spacer rows hold the scrollbar height.
@@ -1203,13 +1299,17 @@
         ((hasDesc || hasAi) ? ' tabindex="0" role="button" aria-expanded="' +
                    (id === picked ? 'true' : 'false') + '"' : '') + ">" +
         '<td class="doc"><a data-row="' + id + '" href="' + esc(permalink(id)) +
-          '" target="_blank" rel="noopener">' + highlight(docStr(id)) + "</a></td>" +
+          '" target="_blank" rel="noopener">' + highlight(docStr(id)) + "</a>" +
+          (oddCol[id] ? '<span class="odd-flag" data-extra role="img" aria-label="Source oddity: ' +
+            esc(oddityText(oddCol[id], begin[id], end[id])) + '" title="As published by the state: ' +
+            esc(oddityText(oddCol[id], begin[id], end[id])) + '">⚠\uFE0E</span>' : "") + "</td>" +
         '<td class="hide-sm" title="' + esc(meta.types[t]) + '">' +
           esc(shortType(meta.typeGroups[t])) + "</td>" +
-        '<td class="vendor">' + highlight(vendors[vendorIdx[id]]) + "</td>" +
+        '<td class="vendor">' + highlight(vname[vendorIdx[id]]) + "</td>" +
         '<td class="amt">' + fmtMoney.format(amount[id]) + "</td>" +
         '<td class="dt">' + fmtDate(begin[id]) + "</td>" +
-        '<td class="dt hide-sm">' + fmtDate(end[id]) + "</td>" +
+        '<td class="dt hide-sm"' + (isOpenEnded(end[id]) ? ' title="' + esc(endTitle(end[id])) + '"' : "") +
+          ">" + endShown(end[id]) + "</td>" +
         '<td><span class="pill ' + (statusCol[id] === 0 ? "active" : "expired") + '">' +
           esc(meta.statuses[statusCol[id]]) + "</span></td>" +
         '<td class="hide-sm">' + esc(meta.entities[entityCol[id]]) + "</td>" +
@@ -1716,7 +1816,7 @@
     el.innerHTML =
       '<button type="button" id="detail-close">Close</button>' +
       '<div class="who"><b>' + esc(docStr(id)) + "</b> · " +
-      esc(vendors[vendorIdx[id]]) + " · " + esc(meta.entities[entityCol[id]]) +
+      esc(vname[vendorIdx[id]]) + " · " + esc(meta.entities[entityCol[id]]) +
       " · " + esc(shortType(meta.typeGroups[t])) + "</div>" +
       companyLine(id) +
       (hasDocuments(id)
@@ -2284,13 +2384,24 @@
   var RENDERED = [
     { td: 0, col: 0, name: "Document #" },
     { td: 1, col: 1, name: "Type", show: function (v) { return shortType(v); } },
-    { td: 2, col: 3, name: "Vendor" },
+    // Shown tidied, exported as the state spelled it; see displayName.
+    { td: 2, col: 3, name: "Vendor", show: function (v) { return displayName(v); } },
     { td: 3, col: 4, name: "Amount", money: true },
     { td: 4, col: 5, name: "Begins" },
-    { td: 5, col: 6, name: "Ends" },
+    // "open-ended" is undone from the cell's own title, which leads with the
+    // date as recorded.
+    { td: 5, col: 6, name: "Ends", openEnded: true },
     { td: 6, col: 7, name: "Status" },
     { td: 7, col: 8, name: "Agency" }
   ];
+
+  // A cell's text without its annotations: anything marked data-extra, such
+  // as the source-oddity flag, is not a value and has no column in the export.
+  function cellText(td) {
+    var copy = td.cloneNode(true);
+    copy.querySelectorAll("[data-extra]").forEach(function (x) { x.parentNode.removeChild(x); });
+    return copy.textContent;
+  }
 
   // Rows are sampled from several scroll positions, not one screenful. Past
   // MAX_H the scroller stops being a 1:1 map of the list and scroll position is
@@ -2310,12 +2421,16 @@
         // The cell text is copied out now: the next render() replaces every
         // one of these elements, and a detached node reads back whatever it
         // held when it was dropped.
-        var tds = trs[i].children, cells = [];
-        for (var c = 0; c < tds.length; c++) cells.push(tds[c].textContent);
+        var tds = trs[i].children, cells = [], titles = [];
+        for (var c = 0; c < tds.length; c++) {
+          cells.push(cellText(tds[c]));
+          titles.push(tds[c].getAttribute("title"));
+        }
         var link = trs[i].querySelector("a[data-row]");
         held.push({
           id: id,
           cells: cells,
+          titles: titles,
           type: tds[1] ? tds[1].getAttribute("title") : null,
           href: link ? link.getAttribute("href") : null
         });
@@ -2356,6 +2471,18 @@
           continue;
         }
         if (spec.show) want_ = spec.show(want_);
+        if (spec.openEnded && shown === "open-ended") {
+          var raw = row.titles[spec.td] || "";
+          if (raw.indexOf(OPEN_TITLE) < 0) {
+            bad.push("row " + row.id + " " + spec.name + ": shown open-ended with no recorded date");
+            continue;
+          }
+          shown = raw.slice(0, raw.indexOf(OPEN_TITLE));
+          if (!isOpenEnded(Number(shown.slice(6) + shown.slice(0, 2) + shown.slice(3, 5)))) {
+            bad.push("row " + row.id + " " + spec.name + ": " + shown + " shown open-ended");
+            continue;
+          }
+        }
         if (shown === want_) continue;
         bad.push("row " + row.id + " " + spec.name + ": table \"" + shown +
                  "\", export \"" + want_ + "\"");
@@ -2766,7 +2893,12 @@
       crc32: crc32,
       queryFor: queryFor,
       stateFrom: stateFrom,
-      comboFilter: comboFilter
+      comboFilter: comboFilter,
+      isOpenEnded: isOpenEnded,
+      endShown: endShown,
+      oddity: oddity,
+      oddityText: oddityText,
+      displayName: displayName
     };
   }
 

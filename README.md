@@ -372,7 +372,7 @@ scratch instead, pass `--fresh` — 20+ hours.
 
 Once `data/` is restored, bring it up to date with `--daily`; a full scrape of a dataset
 whose combos are all done has nothing to fetch and leaves its recorded time alone (and
-`--entity X` finishing X does not stamp the whole dataset either). Restore
+`--entity X` finishing X, with or without `--daily`, does not stamp the whole dataset either). Restore
 `scrape_meta.json` with the CSVs so that time matches the data.
 
 ```bash
@@ -385,7 +385,7 @@ python3 scripts/scrape.py state             # -> data/state_agencies.csv
 python3 scripts/scrape.py state --status    # progress, no network
 python3 scripts/scrape.py state --hours 3   # stop cleanly after 3h
 python3 scripts/scrape.py state --entity "Roads, Department of"
-python3 scripts/check_entity_drift.py       # has the state's entity list changed?
+python3 scripts/check_entity_drift.py --strict   # has the state's entity list changed? (exit 1 if so)
 
 python3 scripts/backfill_documents.py       # -> data/documents.jsonl (the 33h one)
 python3 scripts/backfill_documents.py --dataset contract   # one dataset at a time
@@ -490,12 +490,22 @@ and those are flipped the next night, once the state answers.
 
 **A record that comes back is flipped back, not appended.** Every record `--daily` flips
 to `Expired` is noted in `data/<dataset>_daily_flips.json`, beside the CSV in the Actions
-cache. When the Active search lists one again — after a night it was missed, or after an
-empty night like the one above — its row is flipped back to `Active` in the same rewrite
-that applies the night's endings, and nothing is fetched or appended. Any amendment it
-picked up while off the list goes to `data/changes.jsonl` like any other. A record the CSV
-holds as Expired is never appended by `--daily` any more, which is what keeps every Detail
-URL to one row.
+cache: a hash of its Detail URL and the date flipped. An entry is dropped once its record
+is no longer Expired in the CSV, and after 365 days, since most flips are real endings that
+never come back and the file otherwise grew by about 80,000 entries a year.
+
+When the Active search lists one again — after a night it was missed, or after an empty
+night like the one above — its row is flipped back to `Active` in the same rewrite that
+applies the night's endings, and nothing is appended. The row is rewritten the way a new
+record's is: vendor, amount and dates from tonight's listing, and a detail fetch for its
+View URL and its `documents.jsonl` entry, made once the night has been judged (below), so
+a leaking search costs no fetches. Until late Oct 2026 only the Status moved, so a contract
+extended while it was off the list came back Active with its old end date: 12 of the 13
+records restored in the 20–22 Oct releases were Active with an end date already passed. A
+record whose detail page cannot be read stays Expired for the night and is restored the
+next. Whatever moved while it was off the list goes to `data/changes.jsonl`, dated that
+night. A record the CSV holds as Expired is never appended by `--daily` any more, which is
+what keeps every Detail URL to one row.
 
 Until Oct 2026 such a record was unknown, fetched and appended as a new `Active` row beside
 the stale one, and the site listed it twice, once falsely Expired, adding its amount into
@@ -512,12 +522,40 @@ flipped* — the full scrape read those from the Expired search, and they outnum
 Active rows about sixteen to one, so a leaking filter cannot hide. Five or more such
 strays that are also more than 5% of what an entity listed, or of what the whole dataset
 listed, and nothing is flipped back that night, for that entity or for the dataset, with
-an `::warning` line naming it. A handful below that line is a contract genuinely
+an `::warning` line naming it. Nor is anything appended: a leaking filter lists Expired
+records the CSV has never seen as readily as ones it has, so each entity's new rows (and
+their `documents.jsonl` entries) are held until both verdicts are in, and a leaky night's
+are dropped, counted as `held_back` in the diff report instead of `newly_active`. They are
+fetched and judged again the next night, and appended then if the filter holds. A handful below that line is a contract genuinely
 re-opened, and is flipped back too. How many of `--daily`'s own flips came back is never
 part of the test: after an outage spread over two nights all of them come back at once,
 and refusing that would turn the outage into a permanent freeze. A leaky night still
 finishes and stamps, because what it lists can only add to what was seen, so its endings
 are as sound as any night's.
+
+**Strays that never go away turn the run red.** Not every stray is a broken filter. A
+record `--daily` flipped before the ledger existed, or one the ledger lost (a cache rebuilt
+from release CSVs, a ledger set aside as corrupt, an entry past 365 days), reads as a stray
+when it is listed again — and it is listed every night. Six such records at an agency of a
+hundred is a leak, so that agency's flip-backs and new records were held back night after
+night with a warning and a green run. Persistence cannot tell the two apart (a filter that
+stays broken lists the same strays every night too), so it is not taken as proof either way.
+Instead `data/<dataset>_daily_leaks.json` counts each entity's leak nights in a row, and the
+dataset's own: a clean night ends a streak, and a night that judged nothing (the entity
+refused or unfinished, the dataset-wide breaker tripped, a same-day re-run) leaves it alone.
+On the third, the run prints an `::error` naming the entity and a few of its strays'
+document numbers, and the dataset is left unstamped, so the last step of `daily.yml` turns
+the run red. Nothing else is blocked, but the site's "last updated" date for that dataset
+stays where it was for as long as the run is red. Look the strays up on the state's site; if
+they really are Active again:
+
+```bash
+python3 scripts/scrape.py state --daily --entity "Military Department" --accept-strays
+```
+
+That re-reads the named entities, takes their strays as re-opened, restores them as above,
+and ends their streaks (and the dataset's). If the filter is genuinely leaking, leave it:
+the run stays red until it stops.
 
 **Amendments are recorded rather than discarded.** Amount, vendor, begin and end date are
 compared against what the CSV already held, and any move is appended to
@@ -847,8 +885,11 @@ discovered later:
   a silent stop is this project's characteristic failure, and a site that rebuilds
   unconditionally cannot go quietly stale.
 - `check_entity_drift.py` now asks the state for its entity lists nightly rather than
-  weekly — two requests, but a drift it finds blocks publishing every night until the
-  committed lists are updated.
+  weekly — two requests, retried once. A drift it finds, or a failure to ask, is a
+  `::warning` annotation every night until the committed lists are updated, not a failed
+  step: it used to exit 1, which stopped the deploy for something `--daily` does not even
+  read (a new agency is simply not scraped until it is added). Run it with `--strict`
+  before a full re-scrape to get the exit 1 back.
 - Seven 60 MB payload cache entries a week instead of one, which is why `pages.yml` prunes
   them to the newest three.
 
@@ -965,8 +1006,8 @@ the whole time, just permanently out of scope.
 ### A night that did not finish
 
 A dataset's scrape time is recorded only when every entity in it was read, so a night that
-does not finish — an entity refused, a deadline, a crash after the other datasets were done —
-leaves that time where it was and exits 0, and left alone the job ends green while the
+does not finish — an entity refused, a deadline, a crash after the other datasets were done,
+or a leak streak at its third night (see "Strays that never go away") — leaves that time where it was and exits 0, and left alone the job ends green while the
 page's "Last updated" date stops moving (as it did from 24 Sep 2026). The last step of
 `daily.yml`, `scripts/check_scrape_stamps.py`, compares each dataset's recorded time with
 the moment the run began and turns the run red, with an `::error` line for each dataset that

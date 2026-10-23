@@ -1968,6 +1968,12 @@
       return documents[position].name + " (document " + (position + 1) + " of " +
              documents.length + ")";
     }
+    // A record publishing several whose list did not load: position 0 is the
+    // state's first document, which need not be the one the row links to.
+    if (hasDocuments(id)) {
+      return "document " + (position + 1) + " of this record's " + docCount[id] +
+             " (the list could not be loaded)";
+    }
     return position === 0 ? "this record's document, " + docStr(id) : "";
   }
 
@@ -2715,7 +2721,9 @@
             continue;
           }
           shown = raw.slice(0, raw.indexOf(OPEN_TITLE));
-          if (!isOpenEnded(Number(shown.slice(6) + shown.slice(0, 2) + shown.slice(3, 5)))) {
+          // Spelled out here rather than asking isOpenEnded, which is the
+          // code under test: a rule widened to a real date must fail this.
+          if (["01/01/2099", "12/31/2099", "12/31/9999"].indexOf(shown) < 0) {
             bad.push("row " + row.id + " " + spec.name + ": " + shown + " shown open-ended");
             continue;
           }

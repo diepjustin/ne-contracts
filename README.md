@@ -490,7 +490,9 @@ and those are flipped the next night, once the state answers.
 
 **A record that comes back is flipped back, not appended.** Every record `--daily` flips
 to `Expired` is noted in `data/<dataset>_daily_flips.json`, beside the CSV in the Actions
-cache. When the Active search lists one again — after a night it was missed, or after an
+cache: a hash of its Detail URL and the date flipped. An entry is dropped once its record
+is no longer Expired in the CSV, and after 365 days, since most flips are real endings that
+never come back and the file otherwise grew by about 80,000 entries a year. When the Active search lists one again — after a night it was missed, or after an
 empty night like the one above — its row is flipped back to `Active` in the same rewrite
 that applies the night's endings, and nothing is fetched or appended. Any amendment it
 picked up while off the list goes to `data/changes.jsonl` like any other. A record the CSV

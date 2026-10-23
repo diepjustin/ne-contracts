@@ -45,3 +45,55 @@ def test_a_subset_that_finishes_the_rest_of_the_day_does_stamp(monkeypatch, tmp_
     assert stamped(tmp_path)
     [entry] = report(tmp_path)
     assert entry["complete"] is True and set(entry["entities"]) == {CAMPUS, OTHER}
+
+
+# --- diff-03: the flip ledger is hashed and pruned ------------------------------------------
+
+def _url(n):
+    return f"https://example.test/detail?D={n}"
+
+
+def test_a_ledger_of_raw_urls_loads_under_hashed_keys(tmp_path):
+    path = tmp_path / "flips.json"
+    path.write_text(json.dumps({_url(1): "2026-10-20", scrape.ledger_key(_url(2)): "2026-10-21"}),
+                    encoding="utf-8")
+    assert scrape.load_flip_ledger(str(path)) == {scrape.ledger_key(_url(1)): "2026-10-20",
+                                                  scrape.ledger_key(_url(2)): "2026-10-21"}
+
+
+def test_ledger_keys_are_the_expired_only_keys():
+    assert scrape.ledger_key(_url(1)) == scrape.document_key(_url(1))
+    assert scrape.ledger_key(scrape.ledger_key(_url(1))) == scrape.ledger_key(_url(1))
+
+
+def test_pruning_drops_old_entries_and_ones_no_longer_expired_only(tmp_path):
+    import datetime
+
+    today = datetime.date(2026, 10, 23)
+    path = tmp_path / "flips.json"
+    path.write_text(json.dumps({
+        _url(1): "2026-10-22",                     # owed, recent: kept
+        _url(2): "2025-10-22",                     # 366 days old: dropped
+        _url(3): "2025-10-23",                     # exactly the limit: kept
+        _url(4): "2026-10-22",                     # its row is Active again: dropped
+        _url(5): "not a date",                     # unreadable date: kept, doubt keeps it
+    }), encoding="utf-8")
+    expired_only = {scrape.document_key(_url(n)) for n in (1, 2, 3, 5)}
+    pruned = scrape.load_flip_ledger(str(path), expired_only, today=today)
+    assert set(pruned) == {scrape.ledger_key(_url(n)) for n in (1, 3, 5)}
+
+
+def test_a_night_saves_the_pruned_ledger(monkeypatch, tmp_path):
+    """Record 19 was flipped and then re-read Active by hand: the next night's ledger drops it."""
+    from test_status_flips import keys, ledger
+
+    rows = [row(n) for n in range(20)]
+    night(monkeypatch, tmp_path, rows, {CAMPUS: [listed(n) for n in range(19)]}, entities=(CAMPUS,))
+    assert set(ledger(tmp_path)) == keys(19)
+
+    csv_path = tmp_path / "data" / "nu_contracts.csv"
+    text = csv_path.read_text(encoding="utf-8").replace(",Expired,", ",Active,")
+    csv_path.write_text(text, encoding="utf-8")            # row 19 Active again, outside --daily
+    night(monkeypatch, tmp_path, None, {CAMPUS: [listed(n) for n in range(18)] + [listed(19)]},
+          entities=(CAMPUS,))
+    assert set(ledger(tmp_path)) == keys(18), "19's stale entry pruned, tonight's flip of 18 added"

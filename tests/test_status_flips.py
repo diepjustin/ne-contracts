@@ -512,6 +512,11 @@ def ledger(tmp_path):
     return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
 
 
+def keys(*names):
+    """The ledger's keys for these records: hashed, like load_expired_only's."""
+    return {scrape.ledger_key(u) for u in urls(*names)}
+
+
 def urls_with_both(rows):
     statuses = {}
     for r in rows:
@@ -524,7 +529,7 @@ def test_a_record_missed_one_night_is_flipped_back_not_appended(monkeypatch, tmp
     out = night(monkeypatch, tmp_path, rows, {CAMPUS: [listed(n) for n in range(9)],
                                               OTHER: [listed(99, OTHER)]})
     assert status_of(out, 9) == ["Expired"]
-    assert set(ledger(tmp_path)) == urls(9)
+    assert set(ledger(tmp_path)) == keys(9)
 
     out = night(monkeypatch, tmp_path, None, {CAMPUS: [listed(n) for n in range(10)],
                                               OTHER: [listed(99, OTHER)]})
@@ -567,7 +572,7 @@ def test_a_leaking_status_filter_flips_nothing_back_and_appends_nothing(monkeypa
             + [row(99, OTHER)])
     night(monkeypatch, tmp_path, rows, {CAMPUS: [listed(n) for n in range(19)],
                                         OTHER: [listed(99, OTHER)]})
-    assert set(ledger(tmp_path)) == urls(19)
+    assert set(ledger(tmp_path)) == keys(19)
     capsys.readouterr()
 
     leaking = [listed(n) for n in range(20)] + [listed(500 + n) for n in range(40)]
@@ -582,7 +587,7 @@ def test_a_leaking_status_filter_flips_nothing_back_and_appends_nothing(monkeypa
     assert stamped(tmp_path), "a leak adds to what was seen; the night's endings stand and it finishes"
     assert report(tmp_path)[-1]["entities"][CAMPUS]["flipped_back"] == 0
     assert report(tmp_path)[-1]["entities"][CAMPUS]["newly_active"] == 0, "the leaked records were not appended"
-    assert set(ledger(tmp_path)) == urls(19), "still owed a flip back"
+    assert set(ledger(tmp_path)) == keys(19), "still owed a flip back"
 
     out = night(monkeypatch, tmp_path, None, {CAMPUS: [listed(n) for n in range(20)],
                                               OTHER: [listed(99, OTHER)]})
@@ -627,7 +632,10 @@ def test_its_own_flips_coming_back_never_count_as_a_leak(monkeypatch, tmp_path):
     night(monkeypatch, tmp_path, rows, {CAMPUS: [listed(n) for n in range(60)]}, entities=(CAMPUS,))
     ledger_path = tmp_path / "data" / "contract_daily_flips.json"
     scrape.patch_status_to_expired(str(tmp_path / "data" / "nu_contracts.csv"), urls(*range(10, 60)))
-    ledger_path.write_text(json.dumps({u: "2026-10-01" for u in urls(*range(10, 60))}), encoding="utf-8")
+    # Raw Detail URLs, as the ledger was written before it was hashed: they still count as owed.
+    import datetime
+    ledger_path.write_text(json.dumps({u: datetime.date.today().isoformat() for u in urls(*range(10, 60))}),
+                           encoding="utf-8")
 
     out = night(monkeypatch, tmp_path, None, {CAMPUS: [listed(n) for n in range(60)]}, entities=(CAMPUS,))
     assert all(r[8] == "Active" for r in out) and len(out) == 60
@@ -661,9 +669,9 @@ def test_an_outage_night_flips_nothing_back_either(monkeypatch, tmp_path):
     rows = [row(n) for n in range(60)] + [row(900 + n, OTHER) for n in range(3)]
     night(monkeypatch, tmp_path, rows, {CAMPUS: [listed(n) for n in range(60)],
                                         OTHER: [listed(900, OTHER), listed(901, OTHER)]})
-    assert set(ledger(tmp_path)) == urls(902)
+    assert set(ledger(tmp_path)) == keys(902)
     out = night(monkeypatch, tmp_path, None, {OTHER: [listed(900 + n, OTHER) for n in range(3)]})
-    assert status_of(out, 902) == ["Expired"] and set(ledger(tmp_path)) == urls(902)
+    assert status_of(out, 902) == ["Expired"] and set(ledger(tmp_path)) == keys(902)
 
 
 @pytest.mark.parametrize("strays, listed_count, leak", [

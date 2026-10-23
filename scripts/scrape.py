@@ -13,6 +13,7 @@ import threading
 import time
 import csv
 import os
+import re
 import shutil
 from urllib.parse import parse_qs, urlsplit
 
@@ -1233,14 +1234,45 @@ def flip_ledger_file(dataset):
     return f"data/{dataset}_daily_flips.json"
 
 
-def load_flip_ledger(path):
-    """{detail_url: date flipped} for every record --daily itself flipped to Expired.
+# A ledger entry older than this is dropped at load. A record --daily flipped that long ago
+# and listed again is judged as a stray (see leak_suspected) instead of as a return it owes;
+# at a handful per night that is under the leak line, and a stray that keeps being listed
+# is reported (see LEAK_NIGHTS_LIMIT). Most flips are real endings that never come back, so
+# without a limit the ledger only grew: about 80,000 entries a year (audit diff-03).
+LEDGER_MAX_AGE_DAYS = 365
 
-    Unlike the day's progress file this persists across nights: it is how a
-    record listed again is told apart from one the Status filter let through
-    (see leak_suspected). Losing it costs no data -- a returning record it no
-    longer names counts as unexpected, which only weighs toward judging a night
-    leaky -- so an unreadable one is kept aside and started fresh.
+_DIGEST = re.compile(r"[0-9a-f]{24}")
+
+
+def ledger_key(detail_url_or_key):
+    """The ledger's key for a record: its document_key, like load_expired_only's set.
+
+    The ledger held raw Detail URLs until Oct 2026, ~290 characters each. A key that is
+    already a digest is returned as it is, so a ledger written before the change loads
+    under the new keys instead of being lost -- losing it would make every record it owes
+    a flip back look like a stray.
+    """
+    if _DIGEST.fullmatch(detail_url_or_key):
+        return detail_url_or_key
+    return document_key(detail_url_or_key)
+
+
+def load_flip_ledger(path, expired_only=None, today=None):
+    """{ledger_key: date flipped} for the records --daily itself flipped to Expired.
+
+    Unlike the day's progress file this persists across nights: it is how a record listed
+    again is told apart from one the Status filter let through (see leak_suspected).
+    Losing it costs no rows, but it is not free: every record it owed a flip back then
+    counts as a stray, and enough strays at one entity hold back its flip-backs as a leak
+    -- night after night, since they do not go away. That is what LEAK_NIGHTS_LIMIT turns
+    into a red run. An unreadable ledger is kept aside and started fresh.
+
+    Pruned as it loads, when `expired_only` (load_expired_only, read at the start of the
+    same run) is given: an entry whose record the CSV no longer holds as Expired-only is
+    owed nothing -- it was flipped back, re-read Active by a full scrape, or is what a kill
+    between the ledger write and the CSV patch left -- and an entry older than
+    LEDGER_MAX_AGE_DAYS is dropped. Never prune after tonight's flips are added: their
+    records were Active when expired_only was read.
     """
     if not os.path.exists(path):
         return {}
@@ -1252,7 +1284,15 @@ def load_flip_ledger(path):
     except (OSError, ValueError) as e:
         set_aside_unreadable(path, e)
         return {}
-    return raw
+    ledger = {ledger_key(k): v for k, v in raw.items()}
+    if expired_only is None:
+        return ledger
+    today = today or datetime.date.today()
+    oldest = (today - datetime.timedelta(days=LEDGER_MAX_AGE_DAYS)).isoformat()
+    # An unreadable date is kept: the age limit is housekeeping, and dropping an entry
+    # costs a stray, so doubt keeps it.
+    return {k: v for k, v in ledger.items()
+            if k in expired_only and not (isinstance(v, str) and len(v) == 10 and v < oldest)}
 
 
 def save_flip_ledger(path, ledger):
@@ -1415,8 +1455,8 @@ def run_daily(args):
     progress_path = daily_progress_file(args.dataset)
     done_today = load_daily_progress(progress_path)
     ledger_path = flip_ledger_file(args.dataset)
-    ledger = load_flip_ledger(ledger_path)
     expired_only = load_expired_only(output_csv)
+    ledger = load_flip_ledger(ledger_path, expired_only)
 
     write_header = not os.path.exists(output_csv) or os.path.getsize(output_csv) == 0
     start = time.time()
@@ -1488,7 +1528,7 @@ def run_daily(args):
                 print(f"  {entity_name}: {refusal}")
                 continue
 
-            strays = sum(1 for u in returned if u not in ledger)
+            strays = sum(1 for u in returned if ledger_key(u) not in ledger)
             listed_total += len(seen)
             strays_total += strays
             appended = seen - known - set(returned)
@@ -1546,7 +1586,7 @@ def run_daily(args):
         # ledger forgot, which would count against the next night as a stray.
         today = datetime.date.today().isoformat()
         if all_flip_urls:
-            ledger.update((u, today) for u in all_flip_urls)
+            ledger.update((ledger_key(u), today) for u in all_flip_urls)
             save_flip_ledger(ledger_path, ledger)
         patched, restored = patch_statuses(output_csv, all_flip_urls, set(all_backs))
         if all_flip_urls:
@@ -1554,7 +1594,7 @@ def run_daily(args):
         if all_backs:
             print(f"Patched {len(restored):,} row(s) Expired -> Active: listed again tonight.")
             for url in restored:
-                ledger.pop(url, None)
+                ledger.pop(ledger_key(url), None)
             save_flip_ledger(ledger_path, ledger)
             moved = sum(record_changes(all_backs[u], restored) for u in restored)
             if moved:

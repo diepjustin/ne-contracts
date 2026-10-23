@@ -31,7 +31,8 @@ data/*_daily_progress.json*
 
 # Which records --daily itself flipped to Expired, so one listed again can be flipped
 # back rather than appended (see scrape.py's leak_suspected). Rides the Actions cache
-# with the CSV it describes; losing it costs no data.
+# with the CSV it describes. Losing it costs no rows, but every record it owed a flip
+# back then counts as a stray (see scrape.py's load_flip_ledger).
 data/*_daily_flips.json*
 
 # The amendment log. Append-only, grows slowly, and is the one file here that

@@ -330,17 +330,17 @@ Summary records written since 23 Oct 2026 carry `generated_at`; older ones have 
 
 Where a summary goes:
 
-- `pages.yml` downloads `ai_summaries.jsonl.gz` from the newest `extraction-data-*`
-  release whenever it rebuilds, beside `scope.jsonl.gz`; a release without it builds
-  without summaries.
+- `pages.yml` downloads `ai_summaries.jsonl.gz` from the `ai-summaries-data` release
+  whenever it rebuilds (falling back to the newest `extraction-data-*` release while that
+  one is missing), and warns when the asset is more than 14 days old; with neither, it
+  builds without summaries.
 - `scripts/publish_ai_summaries.sh`, run by hand on the Mac, publishes the file to one
   stable release, `ai-summaries-data` (asset `ai_summaries.jsonl.gz`), and
   `scripts/publish_scope.sh` does the same for `scope.jsonl` (`scope-data`,
   `scope.jsonl.gz`). Each refuses a file that does not parse, names a model
   `build_site.AI_MODELS` does not list, or holds less than the copy already published,
-  and records the count and sha256 in the release notes. `pages.yml` does not read
-  those two releases yet; until it does, getting a summary onto the site still means
-  putting the asset on the `extraction-data-*` release by hand.
+  and records the count and sha256 in the release notes. `pages.yml` reads
+  those two releases first.
 - `build_site.py` joins a summary to a row by the row's own view token first. Where the
   row's own document has no summary (or only `UNCLEAR`), the first summarized of the
   record's other documents, in the state's order, stands in — the same rule descriptions

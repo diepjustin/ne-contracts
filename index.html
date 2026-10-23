@@ -332,6 +332,11 @@
     color: var(--text); background: var(--warn-soft); border-left: 3px solid var(--warn);
   }
   .oddnote { color: var(--text); }
+  /* Something a link asked for that this build could not do. */
+  .url-note {
+    color: var(--text); font-family: var(--sans); padding: 2px 8px; border-radius: 5px;
+    background: var(--warn-soft); border-left: 3px solid var(--warn);
+  }
   mark { background: var(--accent-soft); color: inherit; padding: 0 1px; border-radius: 2px; }
   .empty { padding: 50px 20px; text-align: center; color: var(--muted); }
   #load { padding: 50px 20px; text-align: center; color: var(--muted); background: var(--bg); }
@@ -2340,6 +2345,33 @@
     return hits;
   }
 
+  // What to say when a ?doc= link does not name exactly one row here. It used
+  // to say nothing: a record no longer in the build showed "0 of 747,295
+  // records", and a link whose agency had been renamed dropped the agency
+  // silently and showed every agency's rows under that number -- 12 rows and
+  // $23.8M for "45500" -- which is the wrong total under the right heading.
+  // The table below still shows the document-number search, because that is
+  // the reader's best way to find the record again; this says what it is not.
+  // (fe-08)
+  var permalinkMiss = "";
+  function permalinkNote(doc, agency, type, count) {
+    var day = String(asOf()).slice(0, 10);
+    var when = day ? " (data as of " + day + ")" : "";
+    var named = "document " + doc + (agency ? " at " + agency : "") + (type ? ", type " + type : "");
+    if (count > 1) {
+      return "That link matches " + count + " records in this build" + when +
+        ", so none was opened: " + named + ". Records whose number contains " + doc +
+        " are listed below; check the agency and type before quoting one.";
+    }
+    var unknown = [];
+    if (agency && meta.entities.indexOf(agency) < 0) unknown.push("agency “" + agency + "”");
+    if (type && meta.types.indexOf(type) < 0) unknown.push("type code “" + type + "”");
+    return "That link's record — " + named + " — was not found in this build" + when + "." +
+      (unknown.length ? " This build has no " + unknown.join(" and no ") + "; it may have been renamed, so the link was not limited to it." : "") +
+      " Listed below are records whose number contains " + doc +
+      ", which are not necessarily the one linked.";
+  }
+
   // Returns true if it is redirecting, in which case the caller should not pay
   // for a sort of the whole table on the way out the door.
   function openPermalink(params) {
@@ -2366,7 +2398,10 @@
       var bare = hits.filter(function (id) { return !meta.ambiguous[id]; });
       if (bare.length === 1) hits = bare;
     }
-    if (hits.length !== 1) return false;
+    if (hits.length !== 1) {
+      permalinkMiss = permalinkNote(doc, params.get("agency"), params.get("type"), hits.length);
+      return false;
+    }
 
     $("count").textContent = "Opening that document at statecontracts.nebraska.gov…";
     sourceUrl(hits[0]).then(function (u) { location.replace(u); }, function (e) {
@@ -3049,6 +3084,13 @@
       // "type=CN" is a code the Type select does not offer, and the document
       // number would be lost from the box in favour of a q= that is not there.
       apply();
+      if (permalinkMiss) {
+        var miss = document.createElement("span");
+        miss.id = "url-note";
+        miss.className = "url-note";
+        miss.textContent = permalinkMiss;
+        $("status-bar").appendChild(miss);
+      }
       requestAnimationFrame(render);
       return Promise.resolve();
     }
@@ -3062,6 +3104,7 @@
     if (read.ignored.length) {
       var note = document.createElement("span");
       note.id = "url-note";
+      note.className = "url-note";
       note.textContent = "Not applied from the link: " + read.ignored.join(", ") + ".";
       $("status-bar").appendChild(note);
     }

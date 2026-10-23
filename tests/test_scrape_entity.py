@@ -238,8 +238,8 @@ def test_known_records_that_are_all_still_listed_flip_nothing_and_cost_no_fetch(
     assert stamp_written(daily.tmp), "a night that read everything finishes and stamps"
     [entry] = json.loads((daily.tmp / "data" / "daily_diff_report.json").read_text(encoding="utf-8"))
     assert entry["entities"][ENTITY] == {"previously_active": 30, "still_active": 30,
-                                         "newly_active": 0, "flipped_to_expired": 0,
-                                         "flipped_back": 0}
+                                         "newly_active": 0, "held_back": 0,
+                                         "flipped_to_expired": 0, "flipped_back": 0}
 
 
 def test_a_new_record_is_appended_and_a_vanished_one_flips(daily, search):
@@ -265,6 +265,35 @@ def test_an_empty_answer_for_five_known_records_is_refused_end_to_end(daily):
 
     assert [status_of(rows, i) for i in range(5)] == [["Active"]] * 5
     assert not stamp_written(daily.tmp), "a refused entity holds the night open"
+
+
+def test_a_record_listed_again_is_restored_through_the_real_scrape_entity(daily, search):
+    """The flip-back path end to end: D9 is Expired and owed (in the ledger). Tonight it is
+    listed with a new amount. It costs no fetch during the scrape -- the CSV holds it -- and
+    one detail fetch once the night is judged, and its row comes back with tonight's values."""
+    url9 = rec(9)["detail_url"]
+    (daily.tmp / "data" / "contract_daily_flips.json").write_text(
+        json.dumps({scrape.ledger_key(url9): "2026-10-22"}), encoding="utf-8")
+    rows = daily(range(10), [([rec(i) for i in range(9)] + [dict(rec(9), amount="$7.00")], 1)],
+                 statuses={9: "Expired"})
+
+    assert len(rows) == 10, "restored in place"
+    [r9] = [r for r in rows if r[0] == "D9"]
+    assert (r9[5], r9[8], r9[10]) == ("$7.00", "Active", scrape.view_url_for([{"token": "TD9"}]))
+    assert search.fetched == [[], ["D9"]], "no fetch while scraping, one for the restore"
+    assert json.loads((daily.tmp / "data" / "contract_daily_flips.json").read_text(encoding="utf-8")) == {}
+
+
+def test_a_leaky_night_writes_neither_rows_nor_documents_for_records_it_never_saw(daily, search, monkeypatch):
+    written = []
+    monkeypatch.setattr(scrape, "append_documents", lambda entries, path=None: written.extend(entries) or len(entries))
+    statuses = {i: "Expired" for i in range(20, 60)}
+    rows = daily(range(60), [([rec(i) for i in range(65)], 1)], statuses=statuses)
+
+    assert len(rows) == 60, "the five never-seen records are held back"
+    assert written == [], "and so are their documents entries, so the two files still agree"
+    [entry] = json.loads((daily.tmp / "data" / "daily_diff_report.json").read_text(encoding="utf-8"))
+    assert entry["entities"][ENTITY]["held_back"] == 5
 
 
 # --- the checkpoints ---------------------------------------------------------------

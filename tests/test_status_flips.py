@@ -88,6 +88,10 @@ CAMPUS = "Chadron State College"
 OTHER = "Peru State College"
 OLD_VIEW = "https://example.test/view?D=first"
 NEW_VIEW = "https://example.test/view?D=fetched-tonight"
+# What a record flipped back is given: run_daily fetches its detail page itself, through
+# fetch_documents_parallel, which night() answers with this one document.
+RESTORED_DOCUMENTS = [{"name": "DOC", "size": "1Mb", "token": "restored-tonight"}]
+RESTORED_VIEW = scrape.view_url_for(RESTORED_DOCUMENTS)
 
 
 def row(n, entity=CAMPUS, status="Active", amount="$100.00"):
@@ -104,11 +108,20 @@ def listed(n, entity=CAMPUS, amount="$100.00"):
             "detail_url": f"https://example.test/detail?D={n}"}
 
 
-def night(monkeypatch, tmp_path, rows, search, entities=(CAMPUS, OTHER), only=None):
+class NoNetwork:
+    def __init__(self, *a, **k):
+        raise AssertionError("a test reached for the network")
+
+
+def night(monkeypatch, tmp_path, rows, search, entities=(CAMPUS, OTHER), only=None,
+          documents=None):
     """One `scrape.py contract --daily` over `rows`, the search answering `search`.
 
     `entities` is the whole dataset (it stands in for HIGHER_ED_ENTITIES, so a night
     that reads all of them is complete); `only` is an `--entity` subset, if any.
+    `documents` answers run_daily's own detail fetches, {detail_url: list or None},
+    RESTORED_DOCUMENTS for any URL it does not name. Every documents.jsonl entry the
+    night writes is collected in night.documents.
 
     The fake honours scrape_entity's contract, including asking record_filter
     twice per record -- once to choose what to fetch, once before writing.
@@ -124,6 +137,15 @@ def night(monkeypatch, tmp_path, rows, search, entities=(CAMPUS, OTHER), only=No
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(scrape, "document_service_healthy", lambda: True)
     monkeypatch.setattr(scrape, "build_session", lambda: None)
+    # Nothing here may reach the state: a detail fetch that got past the fakes fails the test.
+    monkeypatch.setattr(scrape, "detail_session", NoNetwork)
+    monkeypatch.setattr(scrape.requests, "Session", NoNetwork)
+    answers = documents or {}
+    monkeypatch.setattr(scrape, "fetch_documents_parallel",
+                        lambda records: [answers.get(r["detail_url"], RESTORED_DOCUMENTS) for r in records])
+    night.documents = []
+    monkeypatch.setattr(scrape, "append_documents",
+                        lambda entries, path=None: night.documents.extend(entries) or len(entries))
 
     def fake_scrape_entity(session, entity_name, entity_val, status, entity_type, doc_type,
                            writer, deadline=None, record_filter=None, on_record_seen=None, **_):
@@ -195,8 +217,8 @@ def test_an_unfinished_night_still_reports_what_it_patched(monkeypatch, tmp_path
     assert entry["complete"] is False
     assert entry["timestamp"]
     assert entry["entities"] == {CAMPUS: {"previously_active": 10, "still_active": 4,
-                                          "newly_active": 0, "flipped_to_expired": 6,
-                                          "flipped_back": 0}}
+                                          "newly_active": 0, "held_back": 0,
+                                          "flipped_to_expired": 6, "flipped_back": 0}}
 
     monkeypatch.setattr(check_daily_diff, "REPORT", str(tmp_path / "data" / "daily_diff_report.json"))
     assert check_daily_diff.main() == 1
@@ -536,7 +558,7 @@ def test_a_record_missed_one_night_is_flipped_back_not_appended(monkeypatch, tmp
 
     assert status_of(out, 9) == ["Active"], "flipped back, and the only row it has"
     assert len(out) == 11, "nothing appended"
-    assert out[9][10] == OLD_VIEW, "the row kept, not a fresh one"
+    assert out[9][10] == RESTORED_VIEW, "the same row, restored with tonight's detail fetch"
     assert ledger(tmp_path) == {}
     entry = report(tmp_path)[-1]
     assert entry["entities"][CAMPUS]["flipped_back"] == 1

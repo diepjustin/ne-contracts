@@ -393,9 +393,32 @@ def parse_results_page(soup):
     return records, last_page
 
 
+def record_row(record, entity_name, status, view_url):
+    """The CSV row for one record as the search grid listed it."""
+    return [
+        record["doc_number"],
+        record["doc_type"],
+        record["entity_code"],
+        # The canonical dropdown name, not the site's rendering of it
+        # (State grids shout it in caps: "DRY BEAN COMMISSION"). Two
+        # things downstream match on this exact string: the resume
+        # checkpoint, and build_site.py's ENTITIES guard, which
+        # hard-exits on any name it doesn't recognize. The agency code
+        # column still carries the site's own identifier.
+        entity_name,
+        record["vendor"],
+        record["amount"],
+        record["begin_date"],
+        record["end_date"],
+        status,
+        record["detail_url"],
+        view_url,
+    ]
+
+
 def scrape_entity(session, entity_name, entity_val, status, entity_type, doc_type, writer,
                   start_page=1, on_page=None, deadline=None,
-                  record_filter=None, on_record_seen=None):
+                  record_filter=None, on_record_seen=None, on_documents=None):
     """Scrape one (entity, status) combo. Returns (rows_written, finished).
 
     `finished` is False when a deadline cut the combo short; the caller records
@@ -410,6 +433,8 @@ def scrape_entity(session, entity_name, entity_val, status, entity_type, doc_typ
     record so the caller can diff what's on the page against what it already
     knew, independent of what got written. Both default to None, which
     reproduces the original "write every record" behaviour exactly.
+    `on_documents`, when given, receives each page's documents.jsonl entries
+    instead of their being appended -- --daily buffers them with the rows.
     """
     label = f"{entity_name} | {status}" + (f" | {doc_type}" if doc_type else "")
     print(f"\nScraping: {label}" + (f"  (resuming at page {start_page:,})" if start_page > 1 else ""))
@@ -525,32 +550,18 @@ def scrape_entity(session, entity_name, entity_val, status, entity_type, doc_typ
                 # so the next run picks it up again and asks properly.
                 deferred += 1
                 continue
-            writer.writerow([
-                record["doc_number"],
-                record["doc_type"],
-                record["entity_code"],
-                # The canonical dropdown name, not the site's rendering of it
-                # (State grids shout it in caps: "DRY BEAN COMMISSION"). Two
-                # things downstream match on this exact string: the resume
-                # checkpoint here, and build_site.py's ENTITIES guard, which
-                # hard-exits on any name it doesn't recognize. The agency code
-                # column still carries the site's own identifier.
-                entity_name,
-                record["vendor"],
-                record["amount"],
-                record["begin_date"],
-                record["end_date"],
-                status,
-                record["detail_url"],
-                view_url,
-            ])
+            writer.writerow(record_row(record, entity_name, status, view_url))
             document_entries.append(documents_entry(
                 record["doc_number"], entity_name, record["detail_url"],
                 documents_by_detail.get(record["detail_url"], [])))
 
         # Written only for rows that made it into the CSV, so the two files can
-        # never disagree about which records were read.
-        append_documents(document_entries, os.path.join(ROOT, DOCUMENTS_JSONL))
+        # never disagree about which records were read. --daily holds both back
+        # until it has judged the night (see run_daily), so it takes them instead.
+        if on_documents is not None:
+            on_documents(document_entries)
+        else:
+            append_documents(document_entries, os.path.join(ROOT, DOCUMENTS_JSONL))
 
         total += len(records)
         if page % 20 == 0 or page == last_page or page == start_page:
@@ -1067,9 +1078,14 @@ def patch_statuses(csv_path, to_expired, to_active):
     """Flip Active -> Expired for rows whose Detail URL is in to_expired, and
     Expired -> Active for one row of each URL in to_active.
 
+    `to_active` is a set of URLs, whose row only has its Status flipped, or a
+    {url: row} dict, whose row is replaced by the one given -- --daily passes
+    tonight's listing and View URL, so a record restored does not come back with
+    the amount and end date it had when it left the list.
+
     Returns (rows flipped to Expired, {url: values of its row flipped back}),
-    the values being the WATCHED_FIELDS columns as they stood, so the caller can
-    record what moved while the record was off the list.
+    the values being the WATCHED_FIELDS columns as they stood before the patch,
+    so the caller can record what moved while the record was off the list.
 
     One full rewrite, same shape as drop_unfinished_rows -- there is no index
     to seek by. Called once per dataset per --daily run, after every entity
@@ -1100,10 +1116,13 @@ def patch_statuses(csv_path, to_expired, to_active):
         elif r[8] == "Expired" and r[9] in to_active:
             last_expired[r[9]] = i
 
+    replacements = to_active if isinstance(to_active, dict) else {}
     restored = {}
     for url, i in last_expired.items():
-        body[i][8] = "Active"
         restored[url] = tuple(body[i][column] for _key, column, _label in WATCHED_FIELDS)
+        if replacements.get(url):
+            body[i] = list(replacements[url])
+        body[i][8] = "Active"
 
     if patched or restored:
         tmp = csv_path + ".tmp"
@@ -1144,8 +1163,8 @@ def load_expired_only(csv_path):
 DAILY_DIFF_REPORT = "data/daily_diff_report.json"
 
 # The per-entity counts --daily reports, each summed into an entry's totals.
-REPORT_COUNTS = ("previously_active", "still_active", "newly_active", "flipped_to_expired",
-                 "flipped_back")
+REPORT_COUNTS = ("previously_active", "still_active", "newly_active", "held_back",
+                 "flipped_to_expired", "flipped_back")
 
 
 def append_daily_diff_report(dataset, entity_report, stamp, complete=True):
@@ -1401,7 +1420,8 @@ def leak_suspected(strays, listed):
     if strays >= LEAK_FLOOR and strays > listed * LEAK_SHARE:
         return (f"the Active search listed {strays:,} record(s) the state had already filed as "
                 f"Expired, of {listed:,} listed -- its Status filter is letting Expired records "
-                "through. Flipping nothing back and appending none of them. Will re-check next run.")
+                "through. Flipping nothing back, and holding back the records the CSV has never seen "
+                "rather than appending them as Active. Will re-check next run.")
     return None
 
 
@@ -1459,98 +1479,107 @@ def run_daily(args):
     ledger = load_flip_ledger(ledger_path, expired_only)
 
     write_header = not os.path.exists(output_csv) or os.path.getsize(output_csv) == 0
+    if write_header:
+        with open(output_csv, "a", newline="", encoding="utf-8") as f:
+            csv.writer(f).writerow(CSV_HEADER)
     start = time.time()
     deadline = start + args.hours * 3600 if args.hours else None
 
     flips = {}    # entity_name -> set(detail_url) flipped to Expired
     backs = {}    # entity_name -> {detail_url: record} flipped back to Active
+    pending = {}  # entity_name -> (rows, documents entries, new-record count, leaky), held until the night is judged
     report = {}   # entity_name -> counts dict
     amended = 0   # watched fields seen to have moved, written to changes.jsonl
     scanned_known = scanned_vanished = 0   # every entity read tonight, refused ones too
     listed_total = strays_total = 0        # every entity finished and not refused tonight
 
-    with open(output_csv, "a", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        if write_header:
-            writer.writerow(CSV_HEADER)
+    session = build_session()
+    for entity_name in ordered_entities(entities):
+        if entity_name in done_today:
+            continue
+        if deadline and time.time() >= deadline:
+            print(f"\n{args.hours}h time limit reached -- stopping cleanly.")
+            break
 
-        session = build_session()
-        for entity_name in ordered_entities(entities):
-            if entity_name in done_today:
-                continue
-            if deadline and time.time() >= deadline:
-                print(f"\n{args.hours}h time limit reached -- stopping cleanly.")
-                break
+        entity_val = entities[entity_name]
+        known = known_active.get(entity_name, set())
+        seen = set()
+        returned = {}   # detail_url -> record, for listed records the CSV holds only as Expired
+        rows = HeldRows()
+        documents = []
 
-            entity_val = entities[entity_name]
-            known = known_active.get(entity_name, set())
-            seen = set()
-            returned = {}   # detail_url -> record, for listed records the CSV holds only as Expired
+        def note_change(record):
+            nonlocal amended
+            amended += record_changes(record, baseline)
 
-            def note_change(record):
-                nonlocal amended
-                amended += record_changes(record, baseline)
+        def note_seen(record, _seen=seen, _returned=returned):
+            _seen.add(record["detail_url"])
+            if document_key(record["detail_url"]) in expired_only:
+                _returned[record["detail_url"]] = record
+            else:
+                note_change(record)
 
-            def note_seen(record, _seen=seen, _returned=returned):
-                _seen.add(record["detail_url"])
-                if document_key(record["detail_url"]) in expired_only:
-                    _returned[record["detail_url"]] = record
-                else:
-                    note_change(record)
+        count, finished = scrape_entity(
+            session, entity_name, entity_val, "Active", entity_type, doc_type, rows,
+            deadline=deadline,
+            # Neither a known Active record nor one the CSV holds as Expired is
+            # fetched or appended: the first is unchanged, the second is flipped
+            # back below -- fetched then, once the night is judged -- or, on a
+            # leaky night, left alone. Either way its URL keeps exactly one row.
+            record_filter=lambda r, _k=known: (r["detail_url"] not in _k
+                                               and document_key(r["detail_url"]) not in expired_only),
+            on_record_seen=note_seen,
+            on_documents=documents.extend,
+        )
 
-            count, finished = scrape_entity(
-                session, entity_name, entity_val, "Active", entity_type, doc_type, writer,
-                deadline=deadline,
-                # Neither a known Active record nor one the CSV holds as Expired is
-                # fetched or appended: the first is unchanged, the second is flipped
-                # back below or, on a leaky night, left alone. Either way its URL keeps
-                # exactly one row.
-                record_filter=lambda r, _k=known: (r["detail_url"] not in _k
-                                                   and document_key(r["detail_url"]) not in expired_only),
-                on_record_seen=note_seen,
-            )
-            f.flush()
+        if not finished:
+            # Deadline or a recovery failure -- don't mark done, don't compute
+            # flips off an incomplete "seen" set. It retries from page 1 next
+            # run (today's retry, or tomorrow's fresh run). Its new rows go too:
+            # half a listing cannot be judged for a leak, and the re-scan finds them again.
+            print(f"  {entity_name}: not finished this run, will re-scan from the top later."
+                  + (f" Its {len(rows):,} new record(s) are not written yet." if rows else ""))
+            continue
 
-            if not finished:
-                # Deadline or a recovery failure -- don't mark done, don't compute
-                # flips off an incomplete "seen" set. It retries from page 1 next
-                # run (today's retry, or tomorrow's fresh run).
-                print(f"  {entity_name}: not finished this run, will re-scan from the top later.")
-                continue
+        scanned_known += len(known)
+        scanned_vanished += len(known - seen)
 
-            scanned_known += len(known)
-            scanned_vanished += len(known - seen)
+        strays = sum(1 for u in returned if ledger_key(u) not in ledger)
+        appended = seen - known - set(returned)
+        leak = leak_suspected(strays, len(seen))
+        # Its new rows wait for both leak verdicts, this entity's and the dataset's: a leaking
+        # filter lists Expired records the CSV has never seen as readily as ones it has, and
+        # appending those would publish them as Active (audit sc-04).
+        pending[entity_name] = (rows, documents, len(appended), bool(leak))
 
-            # A refused entity is re-scanned next run, and nothing of it is
-            # patched or reported tonight.
-            refusal = refuse_flips(known, seen)
-            if refusal:
-                print(f"  {entity_name}: {refusal}")
-                continue
+        # A refused entity is re-scanned next run, and nothing of it is
+        # patched or reported tonight.
+        refusal = refuse_flips(known, seen)
+        if refusal:
+            print(f"  {entity_name}: {refusal}")
+            continue
 
-            strays = sum(1 for u in returned if ledger_key(u) not in ledger)
-            listed_total += len(seen)
-            strays_total += strays
-            appended = seen - known - set(returned)
-            leak = leak_suspected(strays, len(seen))
-            if leak:
-                print(f"::warning title=Daily scrape: the Active search is listing Expired records::"
-                      f"{args.dataset}: {entity_name}: {leak}")
-                returned = {}
+        listed_total += len(seen)
+        strays_total += strays
+        if leak:
+            print(f"::warning title=Daily scrape: the Active search is listing Expired records::"
+                  f"{args.dataset}: {entity_name}: {leak}")
+            returned = {}
 
-            vanished = known - seen
-            report[entity_name] = {
-                "previously_active": len(known),
-                "still_active": len(seen & known),
-                "newly_active": len(appended),
-                "flipped_to_expired": len(vanished),
-                "flipped_back": len(returned),
-            }
-            flips[entity_name] = vanished
-            backs[entity_name] = returned
+        vanished = known - seen
+        report[entity_name] = {
+            "previously_active": len(known),
+            "still_active": len(seen & known),
+            "newly_active": len(appended),
+            "held_back": 0,
+            "flipped_to_expired": len(vanished),
+            "flipped_back": len(returned),
+        }
+        flips[entity_name] = vanished
+        backs[entity_name] = returned
 
-            done_today.add(entity_name)
-            save_daily_progress(progress_path, done_today)
+        done_today.add(entity_name)
+        save_daily_progress(progress_path, done_today)
 
     if amended:
         print(f"Recorded {amended:,} field change(s) to {CHANGES_JSONL}.")
@@ -1569,34 +1598,46 @@ def run_daily(args):
         report.clear()
 
     # The same leak test across the dataset, for a filter leaking a few records into each of
-    # many entities. The entities stay finished, as a leaky entity does; only their flip-backs go.
-    leak = leak_suspected(strays_total, listed_total)
-    if leak and any(backs.values()):
+    # many entities. The entities stay finished, as a leaky entity does; only their flip-backs
+    # and new rows go.
+    dataset_leak = leak_suspected(strays_total, listed_total)
+    if dataset_leak and (any(backs.values()) or any(p[2] for p in pending.values())):
         print(f"::warning title=Daily scrape: the Active search is listing Expired records::"
-              f"{args.dataset}: across the dataset, {leak}")
+              f"{args.dataset}: across the dataset, {dataset_leak}")
         for name in backs:
             report[name]["flipped_back"] = 0
         backs.clear()
 
+    write_new_rows(output_csv, pending, report, held=lambda name: pending[name][3] or bool(dataset_leak))
+
     all_flip_urls = {u for s in flips.values() for u in s}
-    all_backs = {u: r for b in backs.values() for u, r in b.items()}
+    all_backs = {u: (name, r) for name, b in backs.items() for u, r in b.items()}
     if all_flip_urls or all_backs:
+        # A returning record is restored as tonight's listing shows it, with a fresh detail
+        # fetch, the same as a new record: until Oct 2026 only its Status moved, so it came
+        # back with the amount, end date and View URL it had when it left (audit diff-02).
+        fresh, fresh_documents = fresh_rows(all_backs)
         # Into the ledger before the CSV, out of it after: a kill in between leaves a ledger
-        # entry with no Expired row, which is never consulted, rather than an Expired row the
-        # ledger forgot, which would count against the next night as a stray.
+        # entry with no Expired row, which is pruned at the next load, rather than an Expired
+        # row the ledger forgot, which would count against the next night as a stray.
         today = datetime.date.today().isoformat()
         if all_flip_urls:
             ledger.update((ledger_key(u), today) for u in all_flip_urls)
             save_flip_ledger(ledger_path, ledger)
-        patched, restored = patch_statuses(output_csv, all_flip_urls, set(all_backs))
+        patched, restored = patch_statuses(output_csv, all_flip_urls, fresh)
         if all_flip_urls:
             print(f"Patched {patched:,} row(s) Active -> Expired.")
         if all_backs:
-            print(f"Patched {len(restored):,} row(s) Expired -> Active: listed again tonight.")
+            print(f"Patched {len(restored):,} row(s) Expired -> Active: listed again tonight, "
+                  "with tonight's values and documents.")
+            for name, b in backs.items():
+                report[name]["flipped_back"] = sum(1 for u in b if u in restored)
             for url in restored:
                 ledger.pop(ledger_key(url), None)
             save_flip_ledger(ledger_path, ledger)
-            moved = sum(record_changes(all_backs[u], restored) for u in restored)
+            append_documents([e for u, e in fresh_documents.items() if u in restored],
+                             os.path.join(ROOT, DOCUMENTS_JSONL))
+            moved = sum(record_changes(all_backs[u][1], restored) for u in restored)
             if moved:
                 print(f"Recorded {moved:,} field change(s) to {CHANGES_JSONL} on records listed again.")
 
@@ -1620,6 +1661,68 @@ def run_daily(args):
               "recorded only once every entity of the dataset finishes. "
               + ("This run was limited by --entity, so the rest of the dataset was not read; "
                  "a run without --entity finishes it." if args.entity else "Re-run to finish."))
+
+
+class HeldRows(list):
+    """A csv.writer stand-in that keeps an entity's new rows until the night is judged."""
+
+    def writerow(self, row):
+        self.append(row)
+
+
+def write_new_rows(csv_path, pending, report, held):
+    """Append the new rows of every entity whose listing passed the leak checks.
+
+    `pending` is run_daily's {entity: (rows, documents entries, new records, leaky)} and
+    `held(entity)` says whether that entity's rows are held back tonight. A held entity's
+    new records are reported as held_back rather than newly_active; they are not written,
+    so they are unknown to the CSV tomorrow and fetched and judged again then.
+    """
+    rows, documents, held_back = [], [], 0
+    for name, (entity_rows, entity_documents, new, _leaky) in pending.items():
+        if held(name):
+            held_back += new
+            if name in report:
+                report[name]["newly_active"] = 0
+                report[name]["held_back"] = new
+        else:
+            rows.extend(entity_rows)
+            documents.extend(entity_documents)
+    if held_back:
+        print(f"Held back {held_back:,} record(s) the CSV has never seen, listed by an Active search "
+              "that is letting Expired records through: not appended tonight, judged again next run.")
+    if rows:
+        with open(csv_path, "a", newline="", encoding="utf-8") as f:
+            csv.writer(f).writerows(rows)
+            f.flush()
+            os.fsync(f.fileno())
+    # After the rows, as scrape_entity does: a documents entry never names a row that is not there.
+    append_documents(documents, os.path.join(ROOT, DOCUMENTS_JSONL))
+    return len(rows), held_back
+
+
+def fresh_rows(backs):
+    """Tonight's CSV row and documents entry for each record to flip back.
+
+    `backs` is {detail_url: (entity_name, record as listed)}. Returns ({url: row}, {url:
+    documents entry}); a record whose detail page could not be read is left out of both,
+    so it stays Expired and owed tonight and is retried next run, the same as a new record
+    whose detail page fails is not written.
+    """
+    if not backs:
+        return {}, {}
+    items = list(backs.items())
+    rows, entries, deferred = {}, {}, 0
+    for (url, (name, record)), docs in zip(items, fetch_documents_parallel([r for _u, (_n, r) in items])):
+        if docs is None:
+            deferred += 1
+            continue
+        rows[url] = record_row(record, name, "Active", view_url_for(docs))
+        entries[url] = documents_entry(record["doc_number"], name, url, docs)
+    if deferred:
+        print(f"  {deferred:,} record(s) listed again could not have their detail pages read: "
+              "left Expired tonight, retried next run.")
+    return rows, entries
 
 
 CSV_HEADER = [

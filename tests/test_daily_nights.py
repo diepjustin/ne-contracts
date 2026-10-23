@@ -97,3 +97,167 @@ def test_a_night_saves_the_pruned_ledger(monkeypatch, tmp_path):
     night(monkeypatch, tmp_path, None, {CAMPUS: [listed(n) for n in range(18)] + [listed(19)]},
           entities=(CAMPUS,))
     assert set(ledger(tmp_path)) == keys(18), "19's stale entry pruned, tonight's flip of 18 added"
+
+
+# --- diff-02: a record flipped back carries tonight's listing --------------------------------
+
+def _changes(tmp_path):
+    path = tmp_path / "data" / "changes.jsonl"
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+
+def test_a_restored_record_takes_tonights_amount_end_date_and_view_url(monkeypatch, tmp_path):
+    """The 20-22 Oct 2026 shape: 12 of 13 restored records were published Active with an end
+    date already passed, because only their Status moved. Contract 9 is extended while it is
+    off the list; when it returns, its row has to say so."""
+    from test_status_flips import RESTORED_VIEW, ledger
+
+    rows = [row(n) for n in range(10)]
+    night(monkeypatch, tmp_path, rows, {CAMPUS: [listed(n) for n in range(9)]}, entities=(CAMPUS,))
+    extended = dict(listed(9, amount="$250.00"), end_date="06/30/2028", vendor="ACME SUPPLY LLC")
+    out = night(monkeypatch, tmp_path, None, {CAMPUS: [listed(n) for n in range(9)] + [extended]},
+                entities=(CAMPUS,))
+
+    [r9] = [r for r in out if r[0] == "9"]
+    assert r9 == ["9", "Contract", "050", CAMPUS, "ACME SUPPLY LLC", "$250.00", "07/01/2026",
+                  "06/30/2028", "Active", "https://example.test/detail?D=9", RESTORED_VIEW]
+    assert len(out) == 10, "restored in place, not appended"
+    assert ledger(tmp_path) == {}
+    assert {(c["doc"], c["field"], c["from"], c["to"]) for c in _changes(tmp_path)} == {
+        ("9", "amount", "$100.00", "$250.00"), ("9", "end date", "06/30/2027", "06/30/2028"),
+        ("9", "vendor", "ACME SUPPLY", "ACME SUPPLY LLC")}
+    assert all(c["seen"] == scrape.datetime.date.today().isoformat() for c in _changes(tmp_path))
+    [entry] = night.documents
+    assert entry["k"] == scrape.document_key("https://example.test/detail?D=9") and entry["n"] == 1
+
+
+def test_a_restore_whose_detail_page_fails_waits_a_night(monkeypatch, tmp_path, capsys):
+    """Like a new record whose detail page cannot be read: nothing unknown is written as fact."""
+    from test_status_flips import keys, ledger
+
+    url9 = "https://example.test/detail?D=9"
+    rows = [row(n) for n in range(10)]
+    everything = {CAMPUS: [listed(n) for n in range(10)]}
+    night(monkeypatch, tmp_path, rows, {CAMPUS: [listed(n) for n in range(9)]}, entities=(CAMPUS,))
+    capsys.readouterr()
+
+    out = night(monkeypatch, tmp_path, None, everything, entities=(CAMPUS,), documents={url9: None})
+    assert status_of(out, 9) == ["Expired"] and set(ledger(tmp_path)) == keys(9), "still owed"
+    assert report(tmp_path)[-1]["entities"][CAMPUS]["flipped_back"] == 0
+    assert night.documents == []
+    assert "could not have their detail pages read" in capsys.readouterr().out
+
+    out = night(monkeypatch, tmp_path, None, everything, entities=(CAMPUS,))
+    assert status_of(out, 9) == ["Active"] and ledger(tmp_path) == {}
+
+
+def test_twins_end_with_one_active_row_carrying_tonights_values(monkeypatch, tmp_path):
+    """A URL the full scrape read Active and then Expired, flipped by --daily and listed again:
+    whichever row is restored, the URL is listed Active once, with tonight's values."""
+    from test_status_flips import RESTORED_VIEW
+
+    rows = [row(n) for n in range(9)] + [row(9), row(9, status="Expired", amount="$999.00")]
+    night(monkeypatch, tmp_path, rows, {CAMPUS: [listed(n) for n in range(9)]}, entities=(CAMPUS,))
+    out = night(monkeypatch, tmp_path, None,
+                {CAMPUS: [listed(n) for n in range(9)] + [listed(9, amount="$300.00")]}, entities=(CAMPUS,))
+
+    active9 = [r for r in out if r[0] == "9" and r[8] == "Active"]
+    assert len(active9) == 1
+    assert (active9[0][5], active9[0][10]) == ("$300.00", RESTORED_VIEW)
+
+
+def test_a_genuinely_reopened_stray_is_restored_with_tonights_values(monkeypatch, tmp_path):
+    from test_status_flips import RESTORED_VIEW, full_scrape_expired
+
+    rows = [row(n) for n in range(100)] + [full_scrape_expired(500)]
+    out = night(monkeypatch, tmp_path, rows,
+                {CAMPUS: [listed(n) for n in range(100)] + [dict(listed(500), end_date="12/31/2027")]},
+                entities=(CAMPUS,))
+    [r500] = [r for r in out if r[0] == "500"]
+    assert (r500[7], r500[8], r500[10]) == ("12/31/2027", "Active", RESTORED_VIEW)
+
+
+# --- sc-04: a leaky night appends nothing it has never seen ------------------------------------
+
+def _leaky_night(monkeypatch, tmp_path):
+    """CAMPUS lists its 20 Active records, the 40 Expired ones the CSV holds, and 10 Expired
+    ones the CSV never held -- POs the state published already expired, say."""
+    from test_status_flips import full_scrape_expired
+
+    rows = [row(n) for n in range(20)] + [full_scrape_expired(500 + n) for n in range(40)] + [row(99, OTHER)]
+    leaking = ([listed(n) for n in range(20)] + [listed(500 + n) for n in range(40)]
+               + [listed(800 + n) for n in range(10)])
+    return night(monkeypatch, tmp_path, rows, {CAMPUS: leaking, OTHER: [listed(99, OTHER)]})
+
+
+def test_a_leaky_night_holds_back_records_it_has_never_seen(monkeypatch, tmp_path, capsys):
+    out = _leaky_night(monkeypatch, tmp_path)
+
+    assert all(status_of(out, 800 + n) == [] for n in range(10)), "not appended as Active"
+    assert len(out) == 61
+    counts = report(tmp_path)[-1]["entities"][CAMPUS]
+    assert (counts["newly_active"], counts["held_back"]) == (0, 10)
+    assert report(tmp_path)[-1]["totals"]["held_back"] == 10
+    printed = capsys.readouterr().out
+    assert "appending none" not in printed
+    assert "holding back the records the CSV has never seen" in printed
+    assert "Held back 10 record(s) the CSV has never seen" in printed
+    assert stamped(tmp_path), "the night's endings stand and it finishes, as before"
+
+
+def test_held_back_records_are_appended_once_the_filter_holds(monkeypatch, tmp_path):
+    """If the state really does list them Active, the first clean night appends them."""
+    _leaky_night(monkeypatch, tmp_path)
+    search = {CAMPUS: [listed(n) for n in range(20)] + [listed(800 + n) for n in range(10)],
+              OTHER: [listed(99, OTHER)]}
+    out = night(monkeypatch, tmp_path, None, search)
+    assert all(status_of(out, 800 + n) == ["Active"] for n in range(10))
+    assert report(tmp_path)[-1]["entities"][CAMPUS]["newly_active"] == 10
+
+
+def test_another_entitys_new_rows_are_written_on_its_leak_free_night(monkeypatch, tmp_path):
+    from test_status_flips import full_scrape_expired
+
+    rows = [row(n) for n in range(20)] + [full_scrape_expired(500 + n) for n in range(40)] + [row(99, OTHER)]
+    leaking = [listed(n) for n in range(20)] + [listed(500 + n) for n in range(40)] + [listed(800)]
+    out = night(monkeypatch, tmp_path, rows,
+                {CAMPUS: leaking, OTHER: [listed(99, OTHER)] + [listed(1000 + n, OTHER) for n in range(1000)]})
+    assert status_of(out, 800) == []
+    assert all(status_of(out, 1000 + n) == ["Active"] for n in range(1000)), \
+        "40 strays are not a leak across 1,061 listed, so OTHER's new rows stand"
+
+
+def test_a_thin_leak_across_the_dataset_holds_back_every_entitys_new_rows(monkeypatch, tmp_path):
+    from test_status_flips import full_scrape_expired
+
+    rows = ([row(n) for n in range(3)] + [full_scrape_expired(500 + n) for n in range(10)]
+            + [row(900 + n, OTHER) for n in range(3)] + [full_scrape_expired(600 + n, OTHER) for n in range(10)])
+    search = {CAMPUS: [listed(n) for n in range(3)] + [listed(500 + n) for n in range(4)] + [listed(800)],
+              OTHER: [listed(900 + n, OTHER) for n in range(3)] + [listed(600 + n, OTHER) for n in range(4)]
+              + [listed(801, OTHER)]}
+    out = night(monkeypatch, tmp_path, rows, search)
+    assert status_of(out, 800) == [] and status_of(out, 801) == []
+    assert report(tmp_path)[-1]["totals"]["held_back"] == 2
+
+
+def test_a_refused_entity_flips_nothing_back_but_keeps_its_new_rows(monkeypatch, tmp_path):
+    """Refused: 40 of 60 vanished. A record it flipped earlier is listed again, and a new one
+    appears. Nothing of a refused entity is patched -- the flip-back included, which stays
+    owed -- but what it lists that the CSV has never seen is written, as it always was."""
+    from test_status_flips import keys, ledger
+
+    # OTHER is large enough that 40 vanishing is not the dataset-wide breaker.
+    rows = [row(n) for n in range(61)] + [row(1000 + n, OTHER) for n in range(100)]
+    other = [listed(1000 + n, OTHER) for n in range(100)]
+    night(monkeypatch, tmp_path, rows, {CAMPUS: [listed(n) for n in range(60)], OTHER: other})
+    assert set(ledger(tmp_path)) == keys(60)
+
+    out = night(monkeypatch, tmp_path, None,
+                {CAMPUS: [listed(n) for n in range(20)] + [listed(60), listed(700)], OTHER: other})
+    assert status_of(out, 60) == ["Expired"] and set(ledger(tmp_path)) == keys(60)
+    assert all(status_of(out, n) == ["Active"] for n in range(60)), "refused: nothing expired"
+    assert status_of(out, 700) == ["Active"]
+    entry = report(tmp_path)[-1]
+    assert entry["complete"] is False and CAMPUS not in entry["entities"]

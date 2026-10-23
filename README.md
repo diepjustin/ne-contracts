@@ -492,12 +492,20 @@ and those are flipped the next night, once the state answers.
 to `Expired` is noted in `data/<dataset>_daily_flips.json`, beside the CSV in the Actions
 cache: a hash of its Detail URL and the date flipped. An entry is dropped once its record
 is no longer Expired in the CSV, and after 365 days, since most flips are real endings that
-never come back and the file otherwise grew by about 80,000 entries a year. When the Active search lists one again — after a night it was missed, or after an
-empty night like the one above — its row is flipped back to `Active` in the same rewrite
-that applies the night's endings, and nothing is fetched or appended. Any amendment it
-picked up while off the list goes to `data/changes.jsonl` like any other. A record the CSV
-holds as Expired is never appended by `--daily` any more, which is what keeps every Detail
-URL to one row.
+never come back and the file otherwise grew by about 80,000 entries a year.
+
+When the Active search lists one again — after a night it was missed, or after an empty
+night like the one above — its row is flipped back to `Active` in the same rewrite that
+applies the night's endings, and nothing is appended. The row is rewritten the way a new
+record's is: vendor, amount and dates from tonight's listing, and a detail fetch for its
+View URL and its `documents.jsonl` entry, made once the night has been judged (below), so
+a leaking search costs no fetches. Until late Oct 2026 only the Status moved, so a contract
+extended while it was off the list came back Active with its old end date: 12 of the 13
+records restored in the 20–22 Oct releases were Active with an end date already passed. A
+record whose detail page cannot be read stays Expired for the night and is restored the
+next. Whatever moved while it was off the list goes to `data/changes.jsonl`, dated that
+night. A record the CSV holds as Expired is never appended by `--daily` any more, which is
+what keeps every Detail URL to one row.
 
 Until Oct 2026 such a record was unknown, fetched and appended as a new `Active` row beside
 the stale one, and the site listed it twice, once falsely Expired, adding its amount into
@@ -514,7 +522,11 @@ flipped* — the full scrape read those from the Expired search, and they outnum
 Active rows about sixteen to one, so a leaking filter cannot hide. Five or more such
 strays that are also more than 5% of what an entity listed, or of what the whole dataset
 listed, and nothing is flipped back that night, for that entity or for the dataset, with
-an `::warning` line naming it. A handful below that line is a contract genuinely
+an `::warning` line naming it. Nor is anything appended: a leaking filter lists Expired
+records the CSV has never seen as readily as ones it has, so each entity's new rows (and
+their `documents.jsonl` entries) are held until both verdicts are in, and a leaky night's
+are dropped, counted as `held_back` in the diff report instead of `newly_active`. They are
+fetched and judged again the next night, and appended then if the filter holds. A handful below that line is a contract genuinely
 re-opened, and is flipped back too. How many of `--daily`'s own flips came back is never
 part of the test: after an outage spread over two nights all of them come back at once,
 and refusing that would turn the outage into a permanent freeze. A leaky night still

@@ -13,6 +13,8 @@ import json
 import os
 import sys
 
+import pytest
+
 TESTS = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, TESTS)
 sys.path.insert(0, os.path.join(os.path.dirname(TESTS), "scripts"))
@@ -445,3 +447,64 @@ def test_accept_strays_is_refused_without_daily_and_an_entity(monkeypatch, capsy
         else:
             raise AssertionError(f"{argv} was accepted")
     assert "--accept-strays needs --daily and at least one --entity" in capsys.readouterr().err
+
+
+# --- review 2026-10-23: an entity is done only once its rows and patches are written --------
+
+class _DiesAt(dict):
+    """A scripted search whose runner is killed when it reaches `entity`."""
+
+    def __init__(self, search, entity):
+        super().__init__(search)
+        self.entity = entity
+
+    def get(self, key, default=None):
+        if key == self.entity:
+            raise KeyboardInterrupt(f"runner killed while reading {key}")
+        return super().get(key, default)
+
+
+def _kill_and_rerun_search():
+    # Tonight CAMPUS lists a new record, 7, and no longer lists 3.
+    return {CAMPUS: [listed(n) for n in range(3)] + [listed(7)], OTHER: [listed(99, OTHER)]}
+
+
+def _progress(tmp_path):
+    path = tmp_path / "data" / "contract_daily_progress.json"
+    return json.loads(path.read_text(encoding="utf-8"))["done_entities"] if path.exists() else []
+
+
+def test_a_kill_after_one_entity_leaves_it_to_a_same_day_rerun(monkeypatch, tmp_path):
+    assert scrape.daily_progress_file("contract") == "data/contract_daily_progress.json"
+    rows = [row(n) for n in range(4)] + [row(99, OTHER)]
+    first, second = scrape.ordered_entities({CAMPUS: CAMPUS, OTHER: OTHER})
+    assert first == CAMPUS
+    search = _kill_and_rerun_search()
+    with pytest.raises(KeyboardInterrupt):
+        night(monkeypatch, tmp_path, rows, _DiesAt(search, second))
+    assert CAMPUS not in _progress(tmp_path), "its new row and its flip were never written"
+
+    out = night(monkeypatch, tmp_path, None, search)
+    assert status_of(out, 7) == ["Active"], "the rerun re-reads CAMPUS and appends its new row"
+    assert status_of(out, 3) == ["Expired"]
+    assert stamped(tmp_path)
+
+
+def test_a_kill_after_the_rows_are_written_does_not_append_them_twice(monkeypatch, tmp_path):
+    rows = [row(n) for n in range(4)] + [row(99, OTHER)]
+    search = _kill_and_rerun_search()
+    real = scrape.patch_statuses
+
+    def killed(*a, **k):
+        raise KeyboardInterrupt("runner killed while patching statuses")
+
+    monkeypatch.setattr(scrape, "patch_statuses", killed)
+    with pytest.raises(KeyboardInterrupt):
+        night(monkeypatch, tmp_path, rows, search)
+    assert _progress(tmp_path) == [] and not stamped(tmp_path)
+
+    monkeypatch.setattr(scrape, "patch_statuses", real)
+    out = night(monkeypatch, tmp_path, None, search)
+    assert status_of(out, 7) == ["Active"], "appended once, by the killed run"
+    assert status_of(out, 3) == ["Expired"]
+    assert stamped(tmp_path)

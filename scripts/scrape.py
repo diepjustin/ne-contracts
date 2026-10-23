@@ -1130,6 +1130,9 @@ def patch_statuses(csv_path, to_expired, to_active):
             writer = csv.writer(f)
             writer.writerow(header)
             writer.writerows(body)
+            # On disk before run_daily records the night's entities done (see there).
+            f.flush()
+            os.fsync(f.fileno())
         os.replace(tmp, csv_path)  # atomic, same reasoning as save_progress
     return patched, restored
 
@@ -1661,8 +1664,11 @@ def run_daily(args):
         flips[entity_name] = vanished
         backs[entity_name] = returned
 
+        # Done in memory only. Its new rows and status patches are written after the loop,
+        # once the night is judged, so recording it done here let a kill before those writes
+        # leave it skipped by a same-day re-run, which then stamped the dataset over rows and
+        # flips never written. Progress is saved below, after them.
         done_today.add(entity_name)
-        save_daily_progress(progress_path, done_today)
 
     if amended:
         print(f"Recorded {amended:,} field change(s) to {CHANGES_JSONL}.")
@@ -1675,7 +1681,6 @@ def run_daily(args):
         # it would be skipped by a same-day re-run, which could then finish the night and stamp
         # it complete over flips that were never made.
         done_today.difference_update(flips)
-        save_daily_progress(progress_path, done_today)
         flips.clear()
         backs.clear()
         report.clear()
@@ -1746,6 +1751,12 @@ def run_daily(args):
             moved = sum(record_changes(all_backs[u][1], restored) for u in restored)
             if moved:
                 print(f"Recorded {moved:,} field change(s) to {CHANGES_JSONL} on records listed again.")
+
+    # Only now, with every finished entity's new rows appended and fsynced and its statuses
+    # patched, is it done for a same-day re-run to skip. A kill before this re-reads those
+    # entities: their written rows are known by then and not appended twice, and patches
+    # already made are no-ops.
+    save_daily_progress(progress_path, done_today)
 
     if all(e in done_today for e in dataset_entities) and persistent:
         # Every entity was read, but the run has to go red: check_scrape_stamps.py is the only

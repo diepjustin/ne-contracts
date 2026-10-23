@@ -167,21 +167,33 @@ jobs:
       # distilled output of long downloads against the state's servers -- 19
       # hours and ~23 hours -- so neither will ever be produced in CI, and both
       # are small enough to fetch once they exist.
-      - name: Fetch descriptions, document lists, and AI summaries from the extraction release
+      #
+      # Each file comes from its own fixed release when the Mac job has
+      # published one (scope-data, ai-summaries-data, updated in place), else
+      # from the newest extraction-data-* release, which is where all three
+      # lived before. scripts/fetch_release_asset.py tells "not published"
+      # (a ::warning::, and the build goes on without it) apart from "the
+      # download broke" (an ::error::, and the step fails): these used to be
+      # fetched with 2>/dev/null, so a network or auth failure published a
+      # site without descriptions or summaries and said nothing (fresh-10).
+      # It retries once after 10 s, because the publish script renames a new
+      # asset into place with one API call between, and it warns when
+      # descriptions or summaries are over 14 days old.
+      - name: Fetch descriptions, document lists, and AI summaries
         if: steps.decide.outputs.build == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          tag=$(gh release list --limit 20 --json tagName \
-                  --jq '[.[] | select(.tagName | startswith("extraction-data-"))] | sort_by(.tagName) | last | .tagName')
-          if [ -z "$tag" ]; then
-            echo "::warning::no extraction-data release found — building without descriptions"
-            exit 0
+          fetch() {
+            python3 scripts/fetch_release_asset.py --repo "$GITHUB_REPOSITORY" --dir data \
+              --fallback-prefix extraction-data- "$@"
+          }
+
+          fetch --asset scope.jsonl.gz --tag scope-data --max-age-days 14
+          if [ -f data/scope.jsonl.gz ]; then
+            gunzip -f data/scope.jsonl.gz
+            echo "descriptions: $(wc -l < data/scope.jsonl) records"
           fi
-          echo "using release $tag"
-          gh release download "$tag" --pattern 'scope.jsonl.gz' --dir data --clobber
-          gunzip -f data/scope.jsonl.gz
-          wc -l < data/scope.jsonl
 
           # Absent on releases made before Aug 2026. Missing it is not a build
           # failure: build_site.py then marks every row's document count
@@ -199,23 +211,22 @@ jobs:
           # key both hold, since load_documents folds last-entry-wins and the
           # release is the authoritative backfill. Records only the nightly has
           # seen are unique keys and survive either way.
+          fetch --asset documents.jsonl.gz
           cached=data/documents.jsonl
-          keep=""
-          if [ -f "$cached" ]; then
-            mv "$cached" data/documents.cached.jsonl
-            keep=data/documents.cached.jsonl
-            # A CI run killed mid-write leaves a partial last line. Glued to the
-            # release's first line it becomes a broken line in the middle of the
-            # file, which load_documents refuses to read past -- correctly, but
-            # it would fail every build from then on.
-            if [ -s "$keep" ] && [ -n "$(tail -c1 "$keep")" ]; then
-              echo "cached document log ends mid-write; dropping its last line"
-              sed -i '$d' "$keep"
+          if [ -f data/documents.jsonl.gz ]; then
+            keep=""
+            if [ -f "$cached" ]; then
+              keep=data/documents.cached.jsonl
+              mv "$cached" "$keep"
+              # A CI run killed mid-write leaves a partial last line. Glued to
+              # the release's first line it becomes a broken line in the middle
+              # of the file, which load_documents refuses to read past --
+              # correctly, but it would fail every build from then on.
+              if [ -s "$keep" ] && [ -n "$(tail -c1 "$keep")" ]; then
+                echo "cached document log ends mid-write; dropping its last line"
+                sed -i '$d' "$keep"
+              fi
             fi
-          fi
-
-          if gh release download "$tag" --pattern 'documents.jsonl.gz' \
-               --dir data --clobber 2>/dev/null; then
             gunzip -f data/documents.jsonl.gz
             if [ -n "$keep" ]; then
               cat "$keep" "$cached" > data/documents.merged.jsonl
@@ -223,29 +234,22 @@ jobs:
               rm -f "$keep"
             fi
             echo "document lists: $(wc -l < "$cached") records after merge"
-          else
-            # No asset on this release: keep whatever the nightly accumulated
-            # rather than throwing it away for nothing.
-            [ -n "$keep" ] && mv "$keep" "$cached"
-            echo "::warning::release $tag carries no documents.jsonl.gz — \
-              building from the cached log alone"
+          elif [ -f "$cached" ]; then
+            # Nothing published: keep whatever the nightly accumulated.
+            echo "building document lists from the cached log alone"
           fi
 
           # AI summaries are the output of a local Ollama run against OCR'd
           # text -- generation "will never live in CI" for the same reason
-          # OCR itself doesn't, so this release is the only path in. Unlike
+          # OCR itself doesn't, so a release is the only path in. Unlike
           # documents.jsonl.gz there is nothing nightly to merge with (CI
           # never produces these), so a straight overwrite is correct.
           # Missing is not a build failure: build_site.py then builds
-          # without AI summaries and every row simply has none, same as
-          # today's site.
-          if gh release download "$tag" --pattern 'ai_summaries.jsonl.gz' \
-               --dir data --clobber 2>/dev/null; then
+          # without AI summaries and every row simply has none.
+          fetch --asset ai_summaries.jsonl.gz --tag ai-summaries-data --max-age-days 14
+          if [ -f data/ai_summaries.jsonl.gz ]; then
             gunzip -f data/ai_summaries.jsonl.gz
             echo "AI summaries: $(wc -l < data/ai_summaries.jsonl) records"
-          else
-            echo "::warning::release $tag carries no ai_summaries.jsonl.gz — \
-              building without AI summaries"
           fi
 
       - name: Build the payload

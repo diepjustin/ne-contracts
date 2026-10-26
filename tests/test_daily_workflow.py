@@ -208,3 +208,18 @@ def test_orphaned_tags_are_pruned_safely_after_the_release_prune():
 
 def test_the_repository_is_never_hard_coded():
     assert "--repo diepjustin/ne-contracts" not in code(job("daily"))
+
+
+def test_accept_strays_runs_in_the_job_that_holds_the_data():
+    """The leak-streak ::error says to run --accept-strays, but the CSVs and ledger it
+    rewrites live in this job's cache, so a dispatch input has to be able to reach it."""
+    names = [s.split("\n", 1)[0] for s in steps("daily")]
+    accept = next(s for s in steps("daily") if "Accept strays" in s.split("\n", 1)[0])
+    assert names.index(accept.split("\n", 1)[0]) < next(
+        i for i, n in enumerate(names) if "Daily scrape -- contract" in n)
+    assert "--daily --entity \"$ENTITY\" --accept-strays" in accept
+    # Inputs arrive through env, never interpolated into the shell line.
+    assert "${{" not in accept.split("run:", 1)[1]
+    assert "github.event_name == 'workflow_dispatch'" in accept
+    for name in ("accept_strays_dataset", "accept_strays_entity"):
+        assert "      %s:" % name in DAILY.split("\npermissions:", 1)[0]

@@ -15,6 +15,15 @@ on:
         description: 'Scrape and run the publish checks, but do not deploy.'
         type: boolean
         default: false
+      accept_strays_dataset:
+        description: 'With accept_strays_entity: the dataset whose strays to accept (see the leak-streak ::error).'
+        type: choice
+        options: ['', contract, purchase-order, state]
+        default: ''
+      accept_strays_entity:
+        description: 'Entity name exactly as the ::error prints it, e.g. Military Department. Look up a few of its strays first.'
+        type: string
+        default: ''
 
 # Nothing at workflow level: each job asks for exactly what it uses.
 permissions: {}
@@ -154,6 +163,23 @@ jobs:
       # normal night is about 16 minutes for all three. A dataset cut short
       # keeps its old stamp, so the last step turns the run red, and the
       # backup entry (or tomorrow) resumes where it stopped.
+      # The leak-streak ::error tells whoever reads it to run --accept-strays, but
+      # the CSVs and the ledger it rewrites live in this job's cache, not on
+      # anyone's machine -- so the only place it can run is here. It runs before
+      # the nightly steps: it re-reads just the named entity and restores its
+      # strays with tonight's values, then the normal step below reads the rest
+      # (or, on a same-day re-run, finds them done) and stamps the dataset.
+      - name: Accept strays (manual dispatch only)
+        if: >-
+          steps.gate.outputs.proceed == 'true'
+          && github.event_name == 'workflow_dispatch'
+          && github.event.inputs.accept_strays_dataset != ''
+          && github.event.inputs.accept_strays_entity != ''
+        env:
+          DATASET: ${{ github.event.inputs.accept_strays_dataset }}
+          ENTITY: ${{ github.event.inputs.accept_strays_entity }}
+        run: python3 scripts/scrape.py "$DATASET" --daily --entity "$ENTITY" --accept-strays --hours 0.75
+
       - name: Daily scrape -- contract
         if: steps.gate.outputs.proceed == 'true'
         run: python3 scripts/scrape.py contract --daily --hours 0.75

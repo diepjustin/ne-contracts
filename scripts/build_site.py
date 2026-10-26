@@ -315,15 +315,18 @@ def twin_key(r):
 
 
 def active_twin_keys(paths):
-    """twin_key of every Active row the build keeps, read in a pass of its own.
+    """(twin_key of every Active row the build keeps, the Detail URLs of those rows),
+    read in a pass of its own.
 
     A pass of its own because of file order: --daily appends, so the Active
     row of a pair sits after its Expired twin, and the main loop meets the
     Expired one first. Only Active rows are held -- ~44k tuples, not 740k.
     An Active row main() will drop as a duplicate is skipped here too, so an
     Expired row is only ever dropped in favour of a row that is published.
+    A row with no Detail URL names no record, so it is never anyone's twin.
     """
     keys = set()
+    urls = set()
     kept = set()
     for path in paths:
         with open(path, newline="", encoding="utf-8") as f:
@@ -335,7 +338,9 @@ def active_twin_keys(paths):
                     continue
                 kept.add(fingerprint)
                 keys.add(twin_key(r))
-    return keys
+                if r["Detail URL"]:
+                    urls.add(r["Detail URL"])
+    return keys, urls
 
 
 def build_rows(columns, docs, dn_tokens, view_tokens):
@@ -426,18 +431,24 @@ def main():
     seen = set()
     duplicates = 0
 
-    # An Expired row whose every other column matches an Active row is one
-    # record listed twice. --daily makes these: a record missed from one
-    # night's Active search is flipped to Expired, then appended as new when
-    # it reappears, so unchecked the page lists it twice -- once falsely
-    # Expired -- and adds its amount into every total twice. scrape.py never
-    # rewrites the stale row, so the pair stays in the CSV, which is a record
-    # of what was scraped, and the Expired twin is dropped here. A pair that
-    # differs anywhere is kept: it may be a genuine amendment, like 45500 at
-    # the Medical Center, $2,558,983 expired and $21,204,743 active.
-    twin_keys = active_twin_keys(DATA.values())
+    # An Expired row with the same Detail URL as an Active row is the same
+    # record listed twice. Until Oct 2026 --daily made these: a record missed
+    # from one night's Active search was flipped to Expired, then appended as
+    # new when it reappeared, so the page listed it twice -- once falsely
+    # Expired -- and added its amount into every total twice. The pairs stay in
+    # the CSV, which is a record of what was scraped, and the Expired row is
+    # dropped here. Until 26 Oct 2026 only a pair identical in every other
+    # column was; one that differed was kept as a possible amendment, like
+    # 45500 at the Medical Center, $2,558,983 expired and $21,204,743 active.
+    # That kept 209 stale rows and $488M counted twice (88941 at $312M beside
+    # its own $313M), and the Active row is the current one: --daily now
+    # rewrites an amended row and logs what moved to changes.jsonl, which is
+    # where the history belongs, not in a second row the totals add up.
+    twin_keys, active_urls = active_twin_keys(DATA.values())
     twins = 0
     twin_amount = 0.0
+    stale = 0
+    stale_amount = 0.0
 
     for path in DATA.values():
         with open(path, newline="", encoding="utf-8") as f:
@@ -451,6 +462,10 @@ def main():
                 if r["Status"] == "Expired" and twin_key(r) in twin_keys:
                     twins += 1
                     twin_amount += to_amount(r["Amount"])
+                    continue
+                if r["Status"] == "Expired" and r["Detail URL"] in active_urls:
+                    stale += 1
+                    stale_amount += to_amount(r["Amount"])
                     continue
 
                 ent = r["Entity Name"]
@@ -624,6 +639,9 @@ def main():
     if twins:
         print(f"expired twins : {twins:,} dropped, ${twin_amount:,.2f} no longer counted twice "
               "(identical to an Active row with the same Detail URL)")
+    if stale:
+        print(f"stale twins   : {stale:,} dropped, ${stale_amount:,.2f} no longer counted twice "
+              "(an older Expired copy of an Active row with the same Detail URL)")
 
     if args.emit_json:
         verify_urls(payload["url"], payload["vtok"], payload["rows"], sources)

@@ -586,10 +586,15 @@ what keeps every Detail URL to one row.
 Until Oct 2026 such a record was unknown, fetched and appended as a new `Active` row beside
 the stale one, and the site listed it twice, once falsely Expired, adding its amount into
 every total twice. The 28 Sep 2026 release has 302 Detail URLs carrying both statuses.
-Those pairs are left as they are: `build_site.py` drops an Expired row whose every other
-column, View URL included, matches a published Active row with the same Detail URL — 131
-rows and $18,505,640.26 on that release — and a pair that differs anywhere is kept;
-`45500` below is one.
+Those pairs are left as they are in the CSVs, which record what was scraped, and
+`build_site.py` drops the Expired row of each: any Expired row with the same Detail URL as
+a published Active row. Until 26 Oct 2026 it dropped only one identical to the Active row
+in every other column, View URL included, and kept a pair that differed anywhere as a
+possible amendment (`45500` below is one). That kept 209 stale rows and $487,950,817
+counted twice on the 26 Oct release — `88941` at $312,259,000 beside its own current
+$313,292,290 — so now the Active row stands alone, and what moved belongs in
+`data/changes.jsonl`. The build prints both counts: `expired twins` (identical, 209 rows
+and $26,559,997 that day) and `stale twins` (an older copy).
 
 Flipping back trusts the same Active search whose silence made the flip, so it has to know
 when that search is wrong the other way: when its Status filter lets Expired records

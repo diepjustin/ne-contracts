@@ -567,11 +567,12 @@ def test_the_page_can_never_mark_the_unknown_document():
 
 # --- one record listed twice ------------------------------------------------
 #
-# --daily flips a record missed from one night's search to Expired, then
-# appends it again as new when it comes back. The 28 Sep 2026 release carried 302
+# --daily flipped a record missed from one night's search to Expired, then
+# appended it again as new when it came back. The 28 Sep 2026 release carried 302
 # Detail URLs with both an Active and an Expired row; 134 were identical in
 # every other column, so the page listed them twice and totalled them twice.
-# The rest differ somewhere and may be real amendments, so they must survive.
+# The rest were kept as possible amendments until 26 Oct 2026, which left 209
+# stale rows and $488M counted twice; the Active row is the current one.
 
 DETAIL = ("https://statecontracts.nebraska.gov/Search/SearchDocuments"
           "?A=a1&D=d1&DN={dn}&N=n1&DT=dt1&V=v1")
@@ -621,9 +622,10 @@ def test_an_identical_expired_twin_is_dropped(monkeypatch, tmp_path, capsys):
     assert "expired twins : 1 dropped, $4,920.00" in capsys.readouterr().out
 
 
-def test_a_pair_that_differs_anywhere_is_kept(monkeypatch, tmp_path):
+def test_a_stale_expired_copy_of_an_active_record_is_dropped(monkeypatch, tmp_path, capsys):
     """The 45500 shape -- one URL, $2,558,983 expired and $21,204,743 active --
-    and a pair differing only in which document the row points at."""
+    and a pair differing only in which document the row points at. Each is one
+    record, and the Active row is its current state."""
     payload = _build(monkeypatch, tmp_path, [
         _row("45500", "Expired", "$2,558,983.00", "dn1"),
         _row("45500", "Active", "$21,204,743.00", "dn1"),
@@ -631,7 +633,32 @@ def test_a_pair_that_differs_anywhere_is_kept(monkeypatch, tmp_path):
         _row("300100", "Active", "$50,000.00", "dn2", tok="t3"),
     ])
 
-    assert payload["meta"]["count"] == 4
+    assert payload["meta"]["count"] == 2
+    assert {payload["meta"]["statuses"][r[5]] for r in payload["rows"]} == {"Active"}
+    assert "stale twins   : 2 dropped, $2,608,983.00" in capsys.readouterr().out
+
+
+def test_an_expired_row_with_its_own_detail_url_is_kept(monkeypatch, tmp_path):
+    """Same document number, different record: only the Detail URL says two rows are one."""
+    payload = _build(monkeypatch, tmp_path, [
+        _row("45500", "Expired", "$2,558,983.00", "dn1"),
+        _row("45500", "Active", "$21,204,743.00", "dn2"),
+    ])
+    assert payload["meta"]["count"] == 2
+
+
+def test_an_empty_detail_url_is_never_a_record_to_match(tmp_path):
+    """main() refuses a row with no Detail URL outright; if that ever loosens, two such
+    rows must not read as one record."""
+    import csv
+
+    path = tmp_path / "state.csv"
+    blank = _row("6", "Active", "$6.00", "dn6")
+    blank[9] = ""
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        csv.writer(f).writerows([CSV_COLUMNS, blank, _row("7", "Active", "$7.00", "dn7")])
+    _keys, urls = build_site.active_twin_keys([str(path)])
+    assert urls == {DETAIL.format(dn="dn7")}
 
 
 def test_a_twin_is_only_dropped_for_a_row_that_is_published(tmp_path):
@@ -646,7 +673,7 @@ def test_a_twin_is_only_dropped_for_a_row_that_is_published(tmp_path):
         csv.writer(f).writerows([header,
                                  _row("7", "Active", "$1.00", "dn7"),
                                  _row("7", "Active", "$2.00", "dn7")])
-    keys = build_site.active_twin_keys([str(path)])
+    keys, _urls = build_site.active_twin_keys([str(path)])
 
     first = dict(zip(header, _row("7", "Expired", "$1.00", "dn7")))
     second = dict(zip(header, _row("7", "Expired", "$2.00", "dn7")))
@@ -727,8 +754,10 @@ def test_an_unparseable_stamp_means_no_stamp(monkeypatch, tmp_path):
 
 
 # One case per column of the twin key. The key is every CSV column but Status,
-# and each column is a separate way for a pair to be two real records: an
-# Expired row may be dropped only when it matches its Active row in all ten.
+# and it decides only how a dropped Expired row is counted: identical to its
+# Active row ("expired twins") or an older copy of it ("stale twins"). Whether it
+# is dropped at all is the Detail URL alone, so a pair differing in any other
+# column is still one record, and a pair differing in the Detail URL is two.
 # The names are spelled out here, not read from build_site.TWIN_COLUMNS: a
 # change that dropped a column from the key would otherwise drop its own test.
 
@@ -745,17 +774,29 @@ CSV_COLUMNS = ["Document Number", "Document Type", "Entity Code", "Entity Name",
     ("Amount", "$4,921.00"),
     ("Begin Date", "08/14/2026"),
     ("End Date", "01/01/2100"),
-    ("Detail URL", DETAIL.format(dn="dn-other")),
     ("View URL", VIEW.format(tok="t-other")),
 ])
-def test_a_pair_differing_in_this_column_alone_is_kept(monkeypatch, tmp_path, column, other):
+def test_a_pair_differing_in_this_column_alone_is_one_stale_record(monkeypatch, tmp_path, capsys,
+                                                                    column, other):
     active = _row("1454299", "Active", "$4,920.00", "dn1")
     expired = _row("1454299", "Expired", "$4,920.00", "dn1")
     expired[CSV_COLUMNS.index(column)] = other
 
     payload = _build(monkeypatch, tmp_path, [expired, active])
 
-    assert payload["meta"]["count"] == 2, f"an Expired row that differs in {column} was dropped"
+    assert payload["meta"]["count"] == 1, f"an Expired copy that differs in {column} was kept"
+    printed = capsys.readouterr().out
+    assert "stale twins   : 1 dropped" in printed and "expired twins :" not in printed
+
+
+def test_a_pair_differing_in_the_detail_url_is_two_records(monkeypatch, tmp_path):
+    active = _row("1454299", "Active", "$4,920.00", "dn1")
+    expired = _row("1454299", "Expired", "$4,920.00", "dn1")
+    expired[CSV_COLUMNS.index("Detail URL")] = DETAIL.format(dn="dn-other")
+
+    payload = _build(monkeypatch, tmp_path, [expired, active])
+
+    assert payload["meta"]["count"] == 2
 
 
 def test_the_twin_rule_covers_every_column_but_status():

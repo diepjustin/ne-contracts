@@ -117,13 +117,19 @@ jobs:
             echo "dry_run: running the checks, but not dispatching a deploy."
           fi
 
+          # When tonight began, for the last step: a dataset's scrape stamp earlier than
+          # this means tonight's scrape did not finish it. Not when this run began: a
+          # backup skips a dataset the first run finished (see the scrape steps), and its
+          # stamp is older than the backup. If this cannot be worked out, the run start
+          # is the stricter line, never a looser one.
+          night=$(python3 scripts/nightly_gate.py --night-start --now "$started") || night=$started
+
           echo "proceed=$proceed" >> "$GITHUB_OUTPUT"
           echo "publish=$publish" >> "$GITHUB_OUTPUT"
           echo "deploy=$deploy" >> "$GITHUB_OUTPUT"
-          # When this run began, for the last step: a dataset's scrape stamp earlier
-          # than this means tonight's scrape did not finish it.
           echo "started=$started" >> "$GITHUB_OUTPUT"
-          echo "$EVENT -> proceed=$proceed publish=$publish deploy=$deploy"
+          echo "night=$night" >> "$GITHUB_OUTPUT"
+          echo "$EVENT -> proceed=$proceed publish=$publish deploy=$deploy (tonight began $night)"
 
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         if: steps.gate.outputs.proceed == 'true'
@@ -180,17 +186,43 @@ jobs:
           ENTITY: ${{ github.event.inputs.accept_strays_entity }}
         run: python3 scripts/scrape.py "$DATASET" --daily --entity "$ENTITY" --accept-strays --hours 0.75
 
+      # Each skips a dataset already stamped tonight. The gate lets a backup through when
+      # any dataset is unfinished, and a dataset --daily finished has no progress file
+      # left, so without this the backup re-read every entity of the ones that were done.
+      # The night is the one this run started in, so a run that crosses noon does not
+      # change its mind halfway. Any doubt (no stamp, an unreadable file) means scrape.
       - name: Daily scrape -- contract
         if: steps.gate.outputs.proceed == 'true'
-        run: python3 scripts/scrape.py contract --daily --hours 0.75
+        env:
+          RUN_STARTED: ${{ steps.gate.outputs.started }}
+        run: |
+          if python3 scripts/nightly_gate.py --meta data/scrape_meta.json --dataset contract --now "$RUN_STARTED"; then
+            echo "contract already finished tonight -- skipping it."
+          else
+            python3 scripts/scrape.py contract --daily --hours 0.75
+          fi
 
       - name: Daily scrape -- purchase-order
         if: steps.gate.outputs.proceed == 'true'
-        run: python3 scripts/scrape.py purchase-order --daily --hours 0.75
+        env:
+          RUN_STARTED: ${{ steps.gate.outputs.started }}
+        run: |
+          if python3 scripts/nightly_gate.py --meta data/scrape_meta.json --dataset purchase-order --now "$RUN_STARTED"; then
+            echo "purchase-order already finished tonight -- skipping it."
+          else
+            python3 scripts/scrape.py purchase-order --daily --hours 0.75
+          fi
 
       - name: Daily scrape -- state
         if: steps.gate.outputs.proceed == 'true'
-        run: python3 scripts/scrape.py state --daily --hours 0.75
+        env:
+          RUN_STARTED: ${{ steps.gate.outputs.started }}
+        run: |
+          if python3 scripts/nightly_gate.py --meta data/scrape_meta.json --dataset state --now "$RUN_STARTED"; then
+            echo "state already finished tonight -- skipping it."
+          else
+            python3 scripts/scrape.py state --daily --hours 0.75
+          fi
 
       # --- Publish leg: every night the scrape ran ---
       #
@@ -417,14 +449,14 @@ jobs:
       # can colour the run red without blocking any of them. scrape.py stamps a dataset
       # only when every entity in it was read, so a night that does not finish leaves the
       # stamp where it was, exits 0, and ends green; the 24 Sep 2026 freeze went 19 nights
-      # that way. This compares each stamp with the moment the run began and fails, with
-      # an ::error line per dataset, if any is older. The start time goes through env, never
+      # that way. This compares each stamp with the moment tonight began and fails, with
+      # an ::error line per dataset, if any is older. The time goes through env, never
       # into the command line. See scripts/check_scrape_stamps.py.
       - name: Check that every dataset finished tonight
         if: always() && steps.gate.outputs.proceed == 'true'
         env:
-          RUN_STARTED: ${{ steps.gate.outputs.started }}
-        run: python3 scripts/check_scrape_stamps.py --since "$RUN_STARTED"
+          NIGHT_STARTED: ${{ steps.gate.outputs.night }}
+        run: python3 scripts/check_scrape_stamps.py --since "$NIGHT_STARTED"
 
   # The nightly used to dispatch pages.yml and never look back, so a Pages build
   # that failed left the site frozen while every nightly stayed green (sc-01). This

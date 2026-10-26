@@ -118,10 +118,11 @@ The scraper reproduces the state's records faithfully, including their errors.
   Of" column holding the scrape time. A text cell starting with `=`, `+`, `-`, `@`, a tab
   or a CR is prefixed with an apostrophe so a spreadsheet shows it instead of evaluating
   it; numbers, including negative amounts, are left as numbers.
-- Amounts are as recorded by the state and may not reflect amendments. `--daily` does not
-  rewrite an amended row — the CSV keeps the value from the last full scrape — but it does
-  record the movement to `data/changes.jsonl`. Only a full re-scrape updates the row
-  itself.
+- Amounts are as recorded by the state. An Active record whose amount, vendor or dates
+  move is rewritten by `--daily` with the new values, and the move is recorded in
+  `data/changes.jsonl`; an Expired record keeps the values it had when it was last seen
+  Active. Until late Oct 2026 `--daily` only recorded the move, so Active rows held the
+  values of the 9–11 Aug 2026 full scrape.
 - The state's own entity list contains a typo — "Deaf & Hard of Dearing" — preserved
   verbatim, because matching the source exactly is what makes the links work.
 - **The state updates daily** (per its FAQ).
@@ -508,7 +509,8 @@ python3 scripts/scrape.py purchase-order --daily
 python3 scripts/scrape.py state --daily
 ```
 
-An unseen record gets a detail fetch and a new row. A known record is not rewritten. A
+An unseen record gets a detail fetch and a new row. A known record is rewritten only if
+its amount, vendor or dates moved (see "Amendments" below). A
 previously-Active record that does not appear today has its `Status` flipped to `Expired`
 in place — **unless the disappearance is too large to be real**. An entity that returns
 no records at all while it had five or more active ones, or that loses more than half of
@@ -619,7 +621,23 @@ compared against what the CSV already held, and any move is appended to
 
 Before this the database was a photograph: `45500` at the Medical Center reads $2,558,983
 expired and $21,204,743 active, the same contract amended, and nothing in the data could
-show it had moved. The CSV still holds only the current value — the log is the history.
+show it had moved. The CSV holds only the current value — the log is the history.
+
+The amended row is rewritten too, the way a returning record's is: tonight's listing
+values and a fresh detail fetch for its View URL and `documents.jsonl` entry, once the
+entity has been judged (an entity refused or unfinished keeps its rows and is read again
+next run). Until late Oct 2026 the row was left alone, so the site kept the amount of the
+last full scrape and the same move was logged again every night against a baseline that
+never changed. The entry is logged just before the rewrite, so a kill between the two logs
+it again the next night, which folding on `key` absorbs. At most 2,000 amended rows are
+rewritten a night (`AMEND_LIMIT`), so the first run after this change, which owed every
+amendment since the Aug 2026 full scrape, spreads them over a few nights. A record whose
+detail page cannot be read keeps its row, unlogged, until a night it can.
+
+The same rewrite drops a row identical in every column to one above it: the same record
+listed twice, which the full scrape picks up when the listing shifts between two pages,
+and which flipping an Active row beside an identical Expired twin also makes. The hub-data
+CSVs carried 187 of them on 26 Oct 2026; the site already showed one of each.
 
 Read it by folding on `key` and keeping the last entry, never by counting lines: a field
 that moves twice appears twice. It is append-only, gitignored, and **cannot be
@@ -1047,6 +1065,13 @@ matching the current UTC offset; at the delays below, both entries would have sk
 as that night's scrape — a `dry_run` too, which publishes the hub-data release but not the
 site — so the scheduled entries will skip it.
 
+The same test, a dataset at a time, runs at the top of each scrape step, against the
+`scrape_meta.json` the cache restored: a dataset already stamped tonight is skipped. A
+backup let through because state did not finish used to re-read contract and
+purchase-order from the top, since a finished dataset leaves no progress file. A manual
+dispatch skips them the same way, so it cannot re-read a dataset that already finished
+tonight.
+
 Each scrape step has `--hours 0.75`, so the three stop cleanly, checkpointed, well inside
 the job's 180-minute limit (a normal night is about 16 minutes for all three), and
 `PYTHONUNBUFFERED=1` so progress reaches the log as it happens. A dataset cut short keeps
@@ -1124,8 +1149,10 @@ does not finish — an entity refused, a deadline, a crash after the other datas
 or a leak streak at its third night (see "Strays that never go away") — leaves that time where it was and exits 0, and left alone the job ends green while the
 page's "Last updated" date stops moving (as it did from 24 Sep 2026). The last step of
 `daily.yml`, `scripts/check_scrape_stamps.py`, compares each dataset's recorded time with
-the moment the run began and turns the run red, with an `::error` line for each dataset that
-has not finished, if any is older. It runs after the deploy dispatch, the cache save and the
+the moment tonight began (noon Central, as the gate counts it) and turns the run red, with an
+`::error` line for each dataset that has not finished, if any is older. It compared with the
+moment the run began until Oct 2026; a backup that skips a dataset the first run finished
+could never meet that. It runs after the deploy dispatch, the cache save and the
 release, so it blocks none of them: a red final step beside green ones means data is stale,
 not that anything was lost.
 
@@ -1572,7 +1599,8 @@ that still holds on page 2 when the parameters are repeated on every request. Un
 the caveat is the whole mitigation.
 
 **Change tracking records but does not publish.** `--daily` now writes every amendment
-to `data/changes.jsonl` (see "Daily updates"). Nothing on the site reads it yet: an
+to `data/changes.jsonl` and rewrites the row, so the site shows the current values (see
+"Daily updates"). Nothing on the site reads the history yet: an
 `amended` flag and change count as resident columns, the history itself as deferred
 blocks reusing the `write_desc_blocks` pattern, and a filter beside the existing
 data-quality ones. That wants a few weeks of accumulation before it says anything

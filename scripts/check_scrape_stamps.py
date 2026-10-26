@@ -7,27 +7,31 @@ done -- leaves that stamp where it was, exits 0, and the job ends green. Nothing
 the stamp until a person notices the page's "Last updated" date has not moved. The 24 Sep 2026
 freeze went 19 nights that way.
 
-This reads the three stamps and compares each with the moment *this run started*:
+This reads the three stamps and compares each with the moment *tonight began*:
 
-    python3 scripts/check_scrape_stamps.py --since 2026-10-14T03:00:02+00:00
+    python3 scripts/check_scrape_stamps.py --since 2026-10-13T12:00:00-05:00
 
 It exits 1 and prints one `::error title=Daily scrape did not finish::<dataset>: <why>`
 annotation per dataset whose stamp is missing, unreadable, has no UTC offset, or is earlier
 than --since. Exit 0 means all three datasets finished tonight.
 
-Compared with the start of the run, not with "now" or a fixed age, on purpose. A fixed
+Compared with the start of the night, not with "now" or a fixed age, on purpose. A fixed
 threshold has to sit between a normal night (stamps minutes old) and a missed one (about 25
 hours), and the cron's own lateness (a fire can slip hours) eats that margin; "earlier than
-this run began" has no margin to eat. A missed night is caught the first time it happens.
+tonight began" has no margin to eat. A missed night is caught the first time it happens.
+Tonight is nightly_gate.py's noon-to-noon Central night. Until Oct 2026 this compared with
+the moment the run started, which a backup run cannot meet for a dataset the first run
+already finished: each scrape step now skips such a dataset rather than read it again.
 
 It is the LAST step of daily.yml, after the deploy dispatch, the cache save and the release,
 so it can colour the run red without blocking any of them -- the red run is what sends
-GitHub's failed-scheduled-run email. The gate step records when the run began (`started`,
-UTC), and this step takes it through `env`, never by interpolating it into the command line,
+GitHub's failed-scheduled-run email. The gate step records when tonight began (`night`,
+from `nightly_gate.py --night-start`), and this step takes it through `env`, never by
+interpolating it into the command line,
 with `if: always() && steps.gate.outputs.proceed == 'true'`. The condition names no step id, so
 there is none to forget to add; `always()` means it also reports on a night an earlier step
 already failed, which only repeats what is already red. If the gate step stopped recording
-`started`, --since would arrive empty and this would fail every night, loudly.
+`night`, --since would arrive empty and this would fail every night, loudly.
 
 Standard library only, so it runs before or without `pip install`, and it never raises: bad
 input is reported as a problem, and a failure of the check itself is reported and exits 1.
@@ -92,7 +96,7 @@ def problems(stamps, since, unreadable=None):
             found.append((dataset, f"its stamp {str(raw)[:60]!r} is not usable: {e}"))
             continue
         if moment < since:
-            found.append((dataset, f"last finished {raw}, before this run started at "
+            found.append((dataset, f"last finished {raw}, before tonight began at "
                                    f"{since.isoformat()}; tonight's scrape did not complete it"))
     return found
 
@@ -105,7 +109,7 @@ def escape(text):
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Fail unless every dataset's scrape finished since --since.")
     parser.add_argument("--since", required=True,
-                        help="when this run started: ISO-8601 with a UTC offset, e.g. 2026-10-14T03:00:02+00:00")
+                        help="when tonight began: ISO-8601 with a UTC offset, e.g. 2026-10-13T12:00:00-05:00")
     parser.add_argument("--meta", default=META, help="the stamps file (default: data/scrape_meta.json)")
     args = parser.parse_args(argv)
 
@@ -125,7 +129,7 @@ def main(argv=None):
 
         for dataset in DATASETS:
             print(f"{dataset}: finished {stamps[dataset]}")
-        print(f"All {len(DATASETS)} datasets finished since this run started at {since.isoformat()}.")
+        print(f"All {len(DATASETS)} datasets finished since tonight began at {since.isoformat()}.")
         return 0
     except Exception as e:  # noqa: BLE001 -- this check must say what went wrong, not die with a traceback
         print(f"::error title={TITLE}::{escape('check_scrape_stamps.py itself failed: ' + type(e).__name__ + ': ' + str(e))}")

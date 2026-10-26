@@ -8,6 +8,8 @@ logs, unbounded steps).
 import os
 import re
 
+import pytest
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 with open(os.path.join(ROOT, ".github", "workflows", "daily.yml"), encoding="utf-8") as f:
     DAILY = f.read()
@@ -99,12 +101,25 @@ def test_every_scrape_step_has_a_time_budget_that_fits_the_job():
     timeout = int(re.search(r"timeout-minutes: (\d+)", job("daily")).group(1))
     budgets = []
     for dataset in ("contract", "purchase-order", "state"):
-        run = re.search(r"run: python3 scripts/scrape.py %s --daily(.*)" % re.escape(dataset),
+        run = re.search(r"python3 scripts/scrape.py %s --daily(.*)" % re.escape(dataset),
                         step("Daily scrape -- " + dataset)).group(1)
         m = re.search(r"--hours ([\d.]+)", run)
         assert m, "%s has no --hours budget" % dataset
         budgets.append(float(m.group(1)) * 60)
     assert sum(budgets) <= timeout - 30, "the scrape budgets leave no room for the publish leg"
+
+
+@pytest.mark.parametrize("dataset", ["contract", "purchase-order", "state"])
+def test_a_scrape_step_skips_a_dataset_already_finished_tonight(dataset):
+    """A backup let through for one unfinished dataset used to re-read the other two."""
+    s = step("Daily scrape -- " + dataset)
+    run = s.split("run: |", 1)[1]
+    gate = ('if python3 scripts/nightly_gate.py --meta data/scrape_meta.json --dataset %s '
+            '--now "$RUN_STARTED"; then' % dataset)
+    assert gate in run
+    assert run.index(gate) < run.index("else") < run.index("python3 scripts/scrape.py %s --daily" % dataset)
+    assert "RUN_STARTED: ${{ steps.gate.outputs.started }}" in s
+    assert "${{" not in run, "an expression inside run: is command injection"
 
 
 # --- the deploy dispatch (fresh-09) and the check that it reached the site (sc-01) ---------

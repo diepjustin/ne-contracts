@@ -26,6 +26,16 @@ that look simpler both lose real nights:
   scrape that ran at 3 am on the 23rd makes a release dated the 23rd, and an on-time
   10:17 pm run on the 23rd would then find "today's" release and skip the whole night.
 
+The same test, one dataset at a time, is what lets each scrape step of a run the gate let
+through skip a dataset that an earlier run already finished tonight -- a backup retrying an
+unfinished state dataset used to re-read contract and purchase-order from scratch:
+
+    python3 scripts/nightly_gate.py --meta data/scrape_meta.json --dataset contract --now "$RUN_STARTED"
+
+And `--night-start --now "$RUN_STARTED"` prints when tonight began, for the last step's
+check_scrape_stamps.py --since: a dataset skipped that way finished before this run
+started, but not before tonight did.
+
 Standard library only (zoneinfo needs the system tz database, which ubuntu-latest and
 macOS have), because it runs before setup-python.
 """
@@ -56,16 +66,28 @@ def night_start(now):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Exit 0 only if every dataset already finished tonight.")
-    parser.add_argument("--meta", required=True, help="a scrape_meta.json, e.g. from the newest hub-data release")
-    parser.add_argument("--now", default=None, help="ISO-8601 with an offset; for tests (default: the clock)")
+    parser.add_argument("--meta", help="a scrape_meta.json, e.g. from the newest hub-data release")
+    parser.add_argument("--dataset", action="append", choices=check_scrape_stamps.DATASETS,
+                        help="judge only this dataset (repeatable; default: all three)")
+    parser.add_argument("--night-start", action="store_true",
+                        help="print when tonight began, as ISO-8601, and exit 0")
+    parser.add_argument("--now", default=None,
+                        help="ISO-8601 with an offset, e.g. when the run started (default: the clock)")
     args = parser.parse_args(argv)
+    if not args.meta and not args.night_start:
+        parser.error("--meta is required unless --night-start is given")
+    datasets = args.dataset or list(check_scrape_stamps.DATASETS)
 
     try:
         now = (check_scrape_stamps.parse_time(args.now) if args.now
                else datetime.datetime.now(datetime.timezone.utc))
         since = night_start(now)
+        if args.night_start:
+            print(since.isoformat())
+            return 0
         stamps, unreadable = check_scrape_stamps.read_stamps(args.meta)
-        found = check_scrape_stamps.problems(stamps, since, unreadable)
+        found = [(d, why) for d, why in check_scrape_stamps.problems(stamps, since, unreadable)
+                 if d in datasets]
     except Exception as e:  # noqa: BLE001 -- any doubt means "run"
         print(f"gate check failed ({type(e).__name__}: {e}); running to be safe")
         return 2
@@ -76,8 +98,9 @@ def main(argv=None):
         for dataset, why in found:
             print(f"  {dataset}: {why}")
         return 1
-    print(f"tonight's night began {since.isoformat()}, and every dataset has finished since:")
-    for dataset in check_scrape_stamps.DATASETS:
+    print(f"tonight's night began {since.isoformat()}, and "
+          f"{'every dataset has' if len(datasets) > 1 else 'it has'} finished since:")
+    for dataset in datasets:
         print(f"  {dataset}: {stamps[dataset]}")
     return 0
 

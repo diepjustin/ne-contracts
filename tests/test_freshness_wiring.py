@@ -17,6 +17,7 @@ SCRIPTS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 sys.path.insert(0, SCRIPTS)
 
 import check_scrape_stamps  # noqa: E402
+import nightly_gate  # noqa: E402
 
 ROOT = os.path.dirname(SCRIPTS)
 with open(os.path.join(ROOT, ".github", "workflows", "daily.yml"), encoding="utf-8") as f:
@@ -73,7 +74,7 @@ def test_the_check_is_the_last_step_and_runs_the_script():
     assert "Check that every dataset finished tonight" in last.splitlines()[0], (
         "the freshness check must stay the LAST step of daily.yml, so it can colour the run red "
         "without blocking anything; see scripts/check_scrape_stamps.py")
-    assert line_starting(last, "run:") == 'run: python3 scripts/check_scrape_stamps.py --since "$RUN_STARTED"'
+    assert line_starting(last, "run:") == 'run: python3 scripts/check_scrape_stamps.py --since "$NIGHT_STARTED"'
 
 
 def test_it_comes_after_everything_it_must_not_block():
@@ -83,9 +84,9 @@ def test_it_comes_after_everything_it_must_not_block():
         assert position(name) < check, "%r must run before the freshness check, not after it" % name
 
 
-def test_the_start_time_reaches_it_through_env_never_through_the_command_line():
+def test_the_night_start_reaches_it_through_env_never_through_the_command_line():
     last = STEPS[-1]
-    assert "RUN_STARTED: ${{ steps.gate.outputs.started }}" in last
+    assert "NIGHT_STARTED: ${{ steps.gate.outputs.night }}" in last
     assert "${{" not in line_starting(last, "run:"), "an expression in a run: line is command injection"
 
 
@@ -100,6 +101,20 @@ def test_the_gate_step_records_when_the_run_began():
     assert "id: gate" in gate
     assert "started=$(date -u +%Y-%m-%dT%H:%M:%S+00:00)" in gate
     assert 'echo "started=$started" >> "$GITHUB_OUTPUT"' in gate
+
+
+def test_the_gate_step_records_when_tonight_began_falling_back_to_the_run_start():
+    gate = STEPS[position("Decide whether tonight still needs a scrape")]
+    assert ('night=$(python3 scripts/nightly_gate.py --night-start --now "$started") '
+            '|| night=$started') in gate
+    assert 'echo "night=$night" >> "$GITHUB_OUTPUT"' in gate
+
+
+def test_what_night_start_prints_is_one_the_check_reads(capsys):
+    assert nightly_gate.main(["--night-start", "--now", "2026-10-27T08:13:00+00:00"]) == 0
+    printed = capsys.readouterr().out.strip()
+    assert check_scrape_stamps.parse_time(printed) == datetime.datetime.fromisoformat(
+        "2026-10-26T12:00:00-05:00")
 
 
 def test_the_format_the_gate_writes_is_one_the_check_reads():

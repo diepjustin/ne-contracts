@@ -52,7 +52,7 @@ def errors(lines):
 def test_a_night_where_all_three_datasets_finished_is_green(check):
     code, lines = check(stamps())
     assert code == 0 and errors(lines) == []
-    assert lines[-1].startswith("All 3 datasets finished since this run started at 2026-10-14T08:00:02+00:00")
+    assert lines[-1].startswith("All 3 datasets finished since tonight began at 2026-10-14T08:00:02+00:00")
     assert [line.split(":")[0] for line in lines[:3]] == ["contract", "purchase-order", "state"]
 
 
@@ -61,7 +61,7 @@ def test_the_24_sep_freeze_is_red_and_names_only_the_dataset_that_froze(check):
     code, lines = check(stamps(state="2026-09-24T03:11:02-05:00"))
     assert code == 1
     (problem,) = errors(lines)
-    assert problem.startswith("state: last finished 2026-09-24T03:11:02-05:00, before this run started")
+    assert problem.startswith("state: last finished 2026-09-24T03:11:02-05:00, before tonight began")
     assert "did not complete" in problem
 
 

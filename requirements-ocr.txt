@@ -22,7 +22,7 @@ pyobjc-framework-Vision==12.2.2; sys_platform == "darwin"
 click==8.5.0; sys_platform == "darwin"
 
 # Rendering PDF pages to images, for either engine.
-PyMuPDF==1.26.7
+PyMuPDF==2.0
 pillow==13.0.0
 
 # The Tesseract engine (--engines tesseract); needs the tesseract binary too.

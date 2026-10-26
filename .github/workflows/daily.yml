@@ -54,7 +54,7 @@ jobs:
       # reached the log in its last few milliseconds (scraper-09).
       PYTHONUNBUFFERED: '1'
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false   # nothing here pushes; gh gets its token from env
 
@@ -131,7 +131,7 @@ jobs:
           echo "night=$night" >> "$GITHUB_OUTPUT"
           echo "$EVENT -> proceed=$proceed publish=$publish deploy=$deploy (tonight began $night)"
 
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         if: steps.gate.outputs.proceed == 'true'
         with:
           python-version: '3.12'
@@ -149,7 +149,7 @@ jobs:
 
       - name: Restore data/ cache
         if: steps.gate.outputs.proceed == 'true'
-        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: data
           key: ne-contracts-data-${{ github.run_id }}     # never pre-exists -- forces the restore-keys fallback below
@@ -270,7 +270,7 @@ jobs:
       - name: Save data/ cache
         id: cachesave
         if: always() && steps.cachecheck.outputs.ok == 'true'
-        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: data
           key: ne-contracts-data-${{ github.run_id }}-${{ github.run_attempt }}
@@ -486,7 +486,7 @@ jobs:
       actions: read     # gh run list and gh run watch on pages.yml
       contents: read    # checkout, for scripts/check_live_site.py
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false   # nothing here pushes; gh gets its token from env
 

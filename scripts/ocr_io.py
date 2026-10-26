@@ -1,6 +1,6 @@
 """Shared plumbing for the Mac's nightly OCR job (scripts/run_ocr_catchup.sh).
 
-Standard library only, and Python 3.9 compatible, because the Mac's venv runs 3.9.
+Standard library only, so it runs in whatever venv the Mac's job has.
 
 Four things, each small, each easy to get subtly wrong once per script:
 

@@ -411,8 +411,9 @@ OCR everything.
 
 ## Running it
 
-The workflows run Python 3.11 and the maintainer's local venv is 3.9.6; the test suite
-passes on 3.9 and on 3.12.
+The workflows and the Mac's venv run Python 3.12. The venv was 3.9.6 until 26 Oct 2026,
+when Pillow 13 (past 58 security alerts) needed 3.10 or later; every package in
+`requirements.txt` is pinned, so all three install the same versions.
 
 **On a clean clone, restore `data/` before scraping** (see "Getting the data back").
 `data/*_scrape_progress.json` is tracked in git but `data/*.csv` is gitignored, so a fresh

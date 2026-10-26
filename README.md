@@ -120,8 +120,8 @@ The scraper reproduces the state's records faithfully, including their errors.
   it; numbers, including negative amounts, are left as numbers.
 - Amounts are as recorded by the state. An Active record whose amount, vendor or dates
   move is rewritten by `--daily` with the new values, and the move is recorded in
-  `data/changes.jsonl`; an Expired record keeps the values it had when it was last seen
-  Active. Until late Oct 2026 `--daily` only recorded the move, so Active rows held the
+  `data/changes.jsonl`; an Expired record keeps the values it had when it was last
+  collected. Until late Oct 2026 `--daily` only recorded the move, so Active rows held the
   values of the 9–11 Aug 2026 full scrape.
 - The state's own entity list contains a typo — "Deaf & Hard of Dearing" — preserved
   verbatim, because matching the source exactly is what makes the links work.

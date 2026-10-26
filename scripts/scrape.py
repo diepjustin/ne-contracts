@@ -4,8 +4,10 @@ from urllib3.util.retry import Retry
 from bs4 import BeautifulSoup
 from concurrent.futures import ThreadPoolExecutor
 import argparse
+import collections
 import datetime
 import hashlib
+import itertools
 import json
 import statistics
 import sys
@@ -1000,6 +1002,12 @@ WATCHED_FIELDS = (
 
 CHANGES_JSONL = "data/changes.jsonl"
 
+# Amended records rewritten in one --daily run, each with a detail fetch. A normal night has
+# a handful; the first run after the rewrite began (Oct 2026) owes every amendment since the
+# Aug full scrape, and this spreads those over a few nights rather than one long fetch after
+# the --hours budget has stopped counting.
+AMEND_LIMIT = 2000
+
 
 def load_known_active(csv_path):
     """({entity_name: {detail_url, ...}}, {detail_url: (values...)}) for Active rows.
@@ -1032,17 +1040,14 @@ def load_known_active(csv_path):
     return known, baseline
 
 
-def record_changes(record, baseline, out_path=CHANGES_JSONL):
-    """Append one entry per watched field that moved. Returns how many.
+def field_changes(record, baseline):
+    """One changes.jsonl entry per watched field of `record` that differs from `baseline`.
 
-    Append-only with last-entry-wins, the same shape as data/doc_text.jsonl --
-    so read it by folding on `key` and keeping the last entry, never by
-    counting lines. Each entry stands alone: the document it describes, the
-    field, both values, and the date it was observed.
+    Empty for a record the baseline does not hold: that one is new, not amended.
     """
     was = baseline.get(record["detail_url"])
     if was is None:
-        return 0
+        return []
 
     changes = []
     for (key, _column, label), before in zip(WATCHED_FIELDS, was):
@@ -1059,6 +1064,18 @@ def record_changes(record, baseline, out_path=CHANGES_JSONL):
                 "seen": datetime.date.today().isoformat(),
                 "detail_url": record["detail_url"],
             })
+    return changes
+
+
+def record_changes(record, baseline, out_path=CHANGES_JSONL):
+    """Append one entry per watched field that moved. Returns how many.
+
+    Append-only with last-entry-wins, the same shape as data/doc_text.jsonl --
+    so read it by folding on `key` and keeping the last entry, never by
+    counting lines. Each entry stands alone: the document it describes, the
+    field, both values, and the date it was observed.
+    """
+    changes = field_changes(record, baseline)
     if not changes:
         return 0
 
@@ -1074,18 +1091,31 @@ def patch_status_to_expired(csv_path, flip_urls):
     return patch_statuses(csv_path, flip_urls, set())[0]
 
 
-def patch_statuses(csv_path, to_expired, to_active):
-    """Flip Active -> Expired for rows whose Detail URL is in to_expired, and
-    Expired -> Active for one row of each URL in to_active.
+Patched = collections.namedtuple("Patched", "expired restored amended duplicates")
+
+
+def patch_statuses(csv_path, to_expired, to_active, amend=None):
+    """Flip Active -> Expired for rows whose Detail URL is in to_expired,
+    Expired -> Active for one row of each URL in to_active, and replace the
+    Active row of each URL in `amend` ({url: row}) with the row given.
 
     `to_active` is a set of URLs, whose row only has its Status flipped, or a
     {url: row} dict, whose row is replaced by the one given -- --daily passes
     tonight's listing and View URL, so a record restored does not come back with
-    the amount and end date it had when it left the list.
+    the amount and end date it had when it left the list. `amend` is the same
+    for a record that never left: its amount, vendor or dates moved (see run_daily).
 
-    Returns (rows flipped to Expired, {url: values of its row flipped back}),
+    Returns Patched(rows flipped to Expired, {url: values of its row flipped
+    back}, {urls whose Active row was replaced}, exact duplicate rows dropped),
     the values being the WATCHED_FIELDS columns as they stood before the patch,
     so the caller can record what moved while the record was off the list.
+    Index 0 is still the count flipped to Expired.
+
+    A row identical in every column to one above it is the same record listed
+    twice -- the full scrape picks some up when the listing shifts between two
+    pages, and flipping an Active row beside an identical Expired twin makes
+    another -- so the rewrite keeps the first. build_site.py already showed one,
+    but the hub-data CSVs carried both: 187 such rows on 26 Oct 2026.
 
     One full rewrite, same shape as drop_unfinished_rows -- there is no index
     to seek by. Called once per dataset per --daily run, after every entity
@@ -1097,15 +1127,17 @@ def patch_statuses(csv_path, to_expired, to_active):
     most recently knew as Active, and an older Expired twin beside it -- the
     pairs the append-on-return behaviour left before Oct 2026 -- stays as it was.
     """
-    if (not to_expired and not to_active) or not os.path.exists(csv_path):
-        return 0, {}
+    amend = amend or {}
+    if (not to_expired and not to_active and not amend) or not os.path.exists(csv_path):
+        return Patched(0, {}, set(), 0)
     with open(csv_path, newline="", encoding="utf-8") as f:
         rows = list(csv.reader(f))
     if not rows:
-        return 0, {}
+        return Patched(0, {}, set(), 0)
 
     header, body = rows[0], rows[1:]
     patched = 0
+    amended = set()
     last_expired = {}
     for i, r in enumerate(body):
         if len(r) <= 9:
@@ -1113,6 +1145,10 @@ def patch_statuses(csv_path, to_expired, to_active):
         if r[8] == "Active" and r[9] in to_expired:
             r[8] = "Expired"
             patched += 1
+        elif r[8] == "Active" and r[9] in amend:
+            body[i] = list(amend[r[9]])
+            body[i][8] = "Active"
+            amended.add(r[9])
         elif r[8] == "Expired" and r[9] in to_active:
             last_expired[r[9]] = i
 
@@ -1124,17 +1160,26 @@ def patch_statuses(csv_path, to_expired, to_active):
             body[i] = list(replacements[url])
         body[i][8] = "Active"
 
-    if patched or restored:
+    seen_rows = set()
+    kept = []
+    for r in body:
+        key = tuple(r)
+        if key not in seen_rows:
+            seen_rows.add(key)
+            kept.append(r)
+    duplicates = len(body) - len(kept)
+
+    if patched or restored or amended or duplicates:
         tmp = csv_path + ".tmp"
         with open(tmp, "w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
             writer.writerow(header)
-            writer.writerows(body)
+            writer.writerows(kept)
             # On disk before run_daily records the night's entities done (see there).
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp, csv_path)  # atomic, same reasoning as save_progress
-    return patched, restored
+    return Patched(patched, restored, amended, duplicates)
 
 
 def load_expired_only(csv_path):
@@ -1498,7 +1543,7 @@ def run_daily(args):
     """Scrape only Status=Active for one dataset and diff against what the
     existing CSV already knows is Active -- see README.md, "Daily updates"
     for why this is safe (build_site.py's exact-fingerprint dedup) and what
-    it deliberately does not catch (amendments to an already-Active record).
+    it does not catch (a record first published already Expired).
     """
     entity_type, doc_type, output_csv = DATASETS[args.dataset]
     is_state = args.dataset == "state"
@@ -1565,7 +1610,7 @@ def run_daily(args):
     pending = {}  # entity_name -> (rows, documents entries, new-record count, leaky), held until the night is judged
     report = {}   # entity_name -> counts dict
     samples = {}  # entity_name -> sorted document numbers of tonight's strays
-    amended = 0   # watched fields seen to have moved, written to changes.jsonl
+    amends = {}   # entity_name -> {detail_url: record} for known records whose watched fields moved
     scanned_known = scanned_vanished = 0   # every entity read tonight, refused ones too
     listed_total = strays_total = 0        # every entity finished and not refused tonight
 
@@ -1581,19 +1626,16 @@ def run_daily(args):
         known = known_active.get(entity_name, set())
         seen = set()
         returned = {}   # detail_url -> record, for listed records the CSV holds only as Expired
+        changed = {}    # detail_url -> record, for known records listed with new values
         rows = HeldRows()
         documents = []
 
-        def note_change(record):
-            nonlocal amended
-            amended += record_changes(record, baseline)
-
-        def note_seen(record, _seen=seen, _returned=returned):
+        def note_seen(record, _seen=seen, _returned=returned, _changed=changed):
             _seen.add(record["detail_url"])
             if document_key(record["detail_url"]) in expired_only:
                 _returned[record["detail_url"]] = record
-            else:
-                note_change(record)
+            elif field_changes(record, baseline):
+                _changed[record["detail_url"]] = record
 
         count, finished = scrape_entity(
             session, entity_name, entity_val, "Active", entity_type, doc_type, rows,
@@ -1663,15 +1705,15 @@ def run_daily(args):
         }
         flips[entity_name] = vanished
         backs[entity_name] = returned
+        # Whatever the leak verdicts: they judge records the CSV holds as Expired or has
+        # never seen, and these are ones it already holds as Active.
+        amends[entity_name] = changed
 
         # Done in memory only. Its new rows and status patches are written after the loop,
         # once the night is judged, so recording it done here let a kill before those writes
         # leave it skipped by a same-day re-run, which then stamped the dataset over rows and
         # flips never written. Progress is saved below, after them.
         done_today.add(entity_name)
-
-    if amended:
-        print(f"Recorded {amended:,} field change(s) to {CHANGES_JSONL}.")
 
     distrust = dataset_breaker(scanned_known, scanned_vanished)
     if distrust:
@@ -1683,6 +1725,7 @@ def run_daily(args):
         done_today.difference_update(flips)
         flips.clear()
         backs.clear()
+        amends.clear()
         report.clear()
 
     # The same leak test across the dataset, for a filter leaking a few records into each of
@@ -1724,20 +1767,43 @@ def run_daily(args):
 
     all_flip_urls = {u for s in flips.values() for u in s}
     all_backs = {u: (name, r) for name, b in backs.items() for u, r in b.items()}
-    if all_flip_urls or all_backs:
+    all_amends = dict(itertools.islice(((u, (name, r)) for name, a in amends.items()
+                                        for u, r in a.items()), AMEND_LIMIT))
+    if all_flip_urls or all_backs or all_amends:
         # A returning record is restored as tonight's listing shows it, with a fresh detail
         # fetch, the same as a new record: until Oct 2026 only its Status moved, so it came
         # back with the amount, end date and View URL it had when it left (audit diff-02).
         fresh, fresh_documents = fresh_rows(all_backs)
+        # An amended record is rewritten the same way. Until Oct 2026 its row kept the values
+        # of the last full scrape, so the site showed the old amount, and the same change was
+        # logged again every night against a baseline that never moved.
+        amended_rows, amended_documents = fresh_rows(
+            all_amends, "amended could not have their detail pages read: left as they were "
+                        "tonight, retried next run.")
+        # Logged before the rewrite: a kill in between logs them again tomorrow, which folding
+        # on key absorbs, where the other order would lose them for good.
+        logged = sum(record_changes(all_amends[u][1], baseline) for u in amended_rows)
         # Into the ledger before the CSV, out of it after: a kill in between leaves a ledger
         # entry with no Expired row, which is pruned at the next load, rather than an Expired
         # row the ledger forgot, which would count against the next night as a stray.
         if all_flip_urls:
             ledger.update((ledger_key(u), datetime.date.today().isoformat()) for u in all_flip_urls)
             save_flip_ledger(ledger_path, ledger)
-        patched, restored = patch_statuses(output_csv, all_flip_urls, fresh)
+        patched, restored, rewritten, duplicates = patch_statuses(output_csv, all_flip_urls, fresh,
+                                                                  amended_rows)
         if all_flip_urls:
             print(f"Patched {patched:,} row(s) Active -> Expired.")
+        if all_amends:
+            append_documents([e for u, e in amended_documents.items() if u in rewritten],
+                             os.path.join(ROOT, DOCUMENTS_JSONL))
+            print(f"Rewrote {len(rewritten):,} amended row(s) with tonight's values; recorded "
+                  f"{logged:,} field change(s) to {CHANGES_JSONL}.")
+            waiting = sum(len(a) for a in amends.values()) - len(all_amends)
+            if waiting:
+                print(f"  {waiting:,} more amended record(s) wait for the next run "
+                      f"(at most {AMEND_LIMIT:,} a night).")
+        if duplicates:
+            print(f"Dropped {duplicates:,} row(s) identical to one above them.")
         if all_backs:
             print(f"Patched {len(restored):,} row(s) Expired -> Active: listed again tonight, "
                   "with tonight's values and documents.")
@@ -1825,13 +1891,14 @@ def write_new_rows(csv_path, pending, report, held):
     return len(rows), held_back
 
 
-def fresh_rows(backs):
-    """Tonight's CSV row and documents entry for each record to flip back.
+def fresh_rows(backs, unread="listed again could not have their detail pages read: "
+                             "left Expired tonight, retried next run."):
+    """Tonight's CSV row and documents entry for each record to flip back or amend.
 
     `backs` is {detail_url: (entity_name, record as listed)}. Returns ({url: row}, {url:
     documents entry}); a record whose detail page could not be read is left out of both,
-    so it stays Expired and owed tonight and is retried next run, the same as a new record
-    whose detail page fails is not written.
+    so it stays as the CSV has it tonight and is retried next run, the same as a new record
+    whose detail page fails is not written. `unread` finishes the line that counts those.
     """
     if not backs:
         return {}, {}
@@ -1844,8 +1911,7 @@ def fresh_rows(backs):
         rows[url] = record_row(record, name, "Active", view_url_for(docs))
         entries[url] = documents_entry(record["doc_number"], name, url, docs)
     if deferred:
-        print(f"  {deferred:,} record(s) listed again could not have their detail pages read: "
-              "left Expired tonight, retried next run.")
+        print(f"  {deferred:,} record(s) {unread}")
     return rows, entries
 
 

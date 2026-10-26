@@ -10,7 +10,9 @@
     --canvas: #f2f2ef; --bg: #ffffff; --panel: #f5f6f8; --border: #e1e4ea; --text: #14181d;
     --muted: #626b76; --accent: #d00000; --accent-soft: #fdecec;
     --row-alt: #fafbfc; --shadow: 0 1px 2px rgba(20,24,29,.06), 0 6px 14px rgba(20,24,29,.08);
-    --active: #0a7d3f; --active-bg: #0a7d3f14; --active-border: #0a7d3f4d;
+    /* #0a7d3f until Oct 2026: 4.33:1 on the detail panel and 4.11:1 on the open row,
+       where the pill's own tint sits over theirs. This is 4.7:1 at worst. */
+    --active: #087238; --active-bg: #08723814; --active-border: #0872384d;
     /* Deliberately not --accent: that color already means "the state's/site's
        own emphasis" (links, focus rings, status pills), and an AI-generated
        summary is a different kind of claim that must never blend into it. */
@@ -53,6 +55,15 @@
   ::-webkit-scrollbar-track { background: var(--scroll-track); }
   ::-webkit-scrollbar-thumb { background: var(--scroll-thumb); border-radius: 6px; border: 2px solid var(--bg); }
   :focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  /* Off-screen until it has focus, as the first Tab stop on the page. */
+  .skip {
+    position: absolute; left: 20px; top: -48px; z-index: 10; padding: 6px 12px;
+    background: var(--bg); color: var(--accent); border: 1px solid var(--accent);
+    border-radius: 6px; font-weight: 600;
+  }
+  .skip:focus { top: 8px; }
+  /* Focused only as the skip link's target, never by Tab: no ring around the whole tool. */
+  main:focus { outline: none; }
   body {
     margin: 0; background: var(--canvas); color: var(--text);
     font: 15px/1.5 var(--sans);
@@ -309,10 +320,15 @@
   }
   thead th:hover { color: var(--accent); }
   thead th .ind { opacity: .5; font-weight: 400; }
+  /* A button, so sorting is reachable from the keyboard; it was a click on the <th>
+     alone. Unset to look like the header text it wraps, which means its focus ring
+     has to be restated: unset outranks the page-wide :focus-visible rule. */
+  thead th .sort { all: unset; cursor: pointer; }
+  thead th .sort:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   td { padding: 7px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
   tbody tr:nth-child(even) { background: var(--row-alt); }
   tbody tr:hover { background: var(--panel); }
-  /* Rows become keyboard-operable (tabindex + role=button) only once there is
+  /* Rows become keyboard-operable (tabindex) only once there is
      something to expand into -- see the has-descriptions/has-ai-summaries
      guard in render(). An inset ring so it never nudges row height. */
   tbody tr[tabindex]:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
@@ -415,6 +431,8 @@
 </head>
 <body>
 
+<a class="skip" href="#main">Skip to the search</a>
+
 <header>
   <div class="head-row">
     <div>
@@ -458,6 +476,10 @@
   </div>
   <div class="gap-note" id="gaps" hidden></div>
 </header>
+
+<!-- One landmark for the tool itself, so a screen reader can jump past the header's
+     paragraphs and links to it, and the skip link above has somewhere to land. -->
+<main id="main" tabindex="-1">
 
 <div class="controls">
   <div class="control-group">
@@ -567,14 +589,14 @@
 <div id="scroller" hidden>
   <table>
     <thead><tr>
-      <th data-k="0">Document # <span class="ind"></span></th>
-      <th data-k="7">Type <span class="ind"></span></th>
-      <th data-k="1">Vendor <span class="ind"></span></th>
-      <th data-k="2" class="amt">Amount <span class="ind"></span></th>
-      <th data-k="3">Begins <span class="ind"></span></th>
-      <th data-k="4">Ends <span class="ind"></span></th>
-      <th data-k="5">Status <span class="ind"></span></th>
-      <th data-k="6">Agency <span class="ind"></span></th>
+      <th data-k="0"><button type="button" class="sort">Document # <span class="ind"></span></button></th>
+      <th data-k="7"><button type="button" class="sort">Type <span class="ind"></span></button></th>
+      <th data-k="1"><button type="button" class="sort">Vendor <span class="ind"></span></button></th>
+      <th data-k="2" class="amt"><button type="button" class="sort">Amount <span class="ind"></span></button></th>
+      <th data-k="3"><button type="button" class="sort">Begins <span class="ind"></span></button></th>
+      <th data-k="4"><button type="button" class="sort">Ends <span class="ind"></span></button></th>
+      <th data-k="5"><button type="button" class="sort">Status <span class="ind"></span></button></th>
+      <th data-k="6"><button type="button" class="sort">Agency <span class="ind"></span></button></th>
     </tr></thead>
     <tbody id="rows"></tbody>
   </table>
@@ -583,12 +605,17 @@
 
 <pre id="report" hidden></pre>
 
+<!-- What a focused row does, read after its cells (aria-describedby on each row). -->
+<p id="row-hint" hidden>Press Enter to show this record's documents and description.</p>
+
+</main>
+
 <footer>
   Created by <a href="https://diepjustin.github.io/">Justin Diep</a>.
   Public records from the Nebraska Department of Administrative Services, published under
   <a href="https://nebraskalegislature.gov/laws/statutes.php?statute=84-602.04" target="_blank" rel="noopener">Neb. Rev. Stat. § 84-602.04</a>.
-  Amounts are as the state recorded them when first collected; later amendments may not be
-  reflected. <a href="https://github.com/diepjustin/ne-contracts/blob/main/README.md#caveats-worth-knowing-before-you-quote-it" target="_blank" rel="noopener">What is in this data, and what is not</a>.
+  Amounts are as the state recorded them. Active records are re-read nightly, so an amendment
+  shows up the night it appears; an expired record keeps the values it had when last collected. <a href="https://github.com/diepjustin/ne-contracts/blob/main/README.md#caveats-worth-knowing-before-you-quote-it" target="_blank" rel="noopener">What is in this data, and what is not</a>.
 </footer>
 
 <script>
@@ -1404,9 +1431,13 @@
 
     for (var i = startRow; i < stop; i++) {
       var id = view[i], t = typeCol[id];
-      html += '<tr data-row="' + id + '"' + (id === picked ? ' class="picked"' : '') +
-        ((hasDesc || hasAi) ? ' tabindex="0" role="button" aria-expanded="' +
-                   (id === picked ? 'true' : 'false') + '"' : '') + ">" +
+      // A focusable row, not role=button: a button's contents are presentational, so
+      // that role hid the document link inside every row from screen readers (axe:
+      // nested-interactive). Nor aria-expanded, which a row may carry only in a
+      // treegrid. The hint says what Enter does, the open row is aria-current, and the
+      // panel it opens is a live region that reads itself out.
+      html += '<tr data-row="' + id + '"' + (id === picked ? ' class="picked" aria-current="true"' : '') +
+        ((hasDesc || hasAi) ? ' tabindex="0" aria-describedby="row-hint"' : '') + ">" +
         '<td class="doc"><a data-row="' + id + '" href="' + esc(permalink(id)) +
           '" target="_blank" rel="noopener">' + highlight(docStr(id)) + "</a>" +
           (oddCol[id] ? '<span class="odd-flag" data-extra role="img" aria-label="Source oddity: ' +
@@ -1427,7 +1458,22 @@
 
     var trail = Math.max(0, Math.round(track - lead - body));
     if (trail > 0) html += '<tr style="height:' + trail + 'px"></tr>';
+
+    // Every scroll replaces the rows, and the focused one with them, which dropped a
+    // keyboard reader at the top of the document: Tab onto a row near the bottom edge
+    // scrolls it into view, and Enter opens the panel, which shrinks the scroller.
+    // Put focus back on the same row, or its link, if it is still drawn.
+    var had = document.activeElement, keep = null;
+    if (had && had !== tbody && tbody.contains(had)) {
+      var from = had.closest("tr[data-row]");
+      if (from) keep = { row: from.dataset.row, link: had.tagName === "A" };
+    }
     tbody.innerHTML = html;
+    if (keep) {
+      var back = tbody.querySelector('tr[data-row="' + keep.row + '"]');
+      if (back && keep.link) back = back.querySelector("a[data-row]");
+      if (back) back.focus({ preventScroll: true });
+    }
   }
 
   // ------------------------------------------------------------------ links
@@ -1820,7 +1866,10 @@
     // its class there does nothing. This was two `var was` declarations and
     // worked only because the second assignment won.
     var live = tbody.querySelector("tr.picked");
-    if (live) live.classList.remove("picked");
+    if (live) {
+      live.classList.remove("picked");
+      live.removeAttribute("aria-current");
+    }
   }
 
   // An empty description is not the same fact as an absent one, and a reader
@@ -2124,10 +2173,10 @@
     var was = tbody.querySelector("tr.picked");
     if (was) {
       was.classList.remove("picked");
-      was.setAttribute("aria-expanded", "false");
+      was.removeAttribute("aria-current");
     }
     tr.classList.add("picked");
-    tr.setAttribute("aria-expanded", "true");
+    tr.setAttribute("aria-current", "true");
     showDetail(+tr.dataset.row);
   }
 
@@ -2306,8 +2355,8 @@
     });
 
     // A click handler on a <tr> is invisible to anyone not using a mouse. The
-    // rows carry role/tabindex so they are reachable and announced; this makes
-    // the two keys that role promises actually work.
+    // rows carry tabindex so they are reachable, and #row-hint says Enter opens
+    // them; this makes Enter and Space work.
     tbody.addEventListener("keydown", function (ev) {
       if ((!hasDesc && !hasAi) || ev.key !== "Enter" && ev.key !== " ") return;
       var tr = ev.target.closest && ev.target.closest("tr[data-row]");
@@ -3020,8 +3069,12 @@
 
   function showSortIndicator() {
     document.querySelectorAll("thead .ind").forEach(function (s) { s.textContent = ""; });
+    document.querySelectorAll("thead th[aria-sort]").forEach(function (th) { th.removeAttribute("aria-sort"); });
     var sorted = document.querySelector('thead th[data-k="' + sortKey + '"]');
-    if (sorted) sorted.querySelector(".ind").textContent = sortDir > 0 ? "↑" : "↓";
+    if (sorted) {
+      sorted.querySelector(".ind").textContent = sortDir > 0 ? "↑" : "↓";
+      sorted.setAttribute("aria-sort", sortDir > 0 ? "ascending" : "descending");
+    }
   }
 
   // Turning description search on means fetching the index first, or the

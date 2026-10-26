@@ -679,13 +679,25 @@ def test_only_the_row_it_flipped_comes_back_beside_an_older_twin(monkeypatch, tm
     """A URL left with a stale Expired row and an appended Active one before Oct 2026.
     When it is missed and then listed again, only its last row -- the one --daily flipped --
     returns to Active, so it is not listed as Active twice."""
-    stale = row(9, status="Expired")
+    stale = row(9, status="Expired", amount="$90.00")
     rows = [row(n) for n in range(10)] + [stale] + [row(9)] + [row(99, OTHER)]
     rows.pop(9)     # the stale twin sits before the Active row appended after it
     night(monkeypatch, tmp_path, rows, {CAMPUS: [listed(n) for n in range(9)], OTHER: [listed(99, OTHER)]})
     out = night(monkeypatch, tmp_path, None, {CAMPUS: [listed(n) for n in range(10)],
                                               OTHER: [listed(99, OTHER)]})
     assert status_of(out, 9) == ["Expired", "Active"]
+
+
+def test_a_flip_that_makes_an_identical_twin_keeps_one_row(monkeypatch, tmp_path):
+    """The same pair with nothing between them but Status: once the Active row is flipped
+    the two are the same row, and the rewrite keeps one, which is the row that returns."""
+    rows = [row(n) for n in range(9)] + [row(9, status="Expired"), row(9), row(99, OTHER)]
+    out = night(monkeypatch, tmp_path, rows, {CAMPUS: [listed(n) for n in range(9)],
+                                              OTHER: [listed(99, OTHER)]})
+    assert status_of(out, 9) == ["Expired"]
+    out = night(monkeypatch, tmp_path, None, {CAMPUS: [listed(n) for n in range(10)],
+                                              OTHER: [listed(99, OTHER)]})
+    assert status_of(out, 9) == ["Active"]
 
 
 def test_an_amendment_made_while_off_the_list_is_recorded(monkeypatch, tmp_path):

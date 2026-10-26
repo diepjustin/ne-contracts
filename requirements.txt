@@ -1,20 +1,20 @@
-# 2.33.0 fixes Dependabot alert #3 (insecure temp file reuse in
-# extract_zipped_paths) but needs Python >=3.10; 2.32.5 is the last release
-# that installs on the 3.9 local venv. CI (3.11) gets the fixed version.
-requests==2.33.1; python_version >= "3.10"
-requests==2.32.5; python_version < "3.10"
+# Every package is pinned, so CI, the nightly and the Mac's venv run the same
+# code; Dependabot proposes the bumps. Python 3.10 or later: requests 2.33,
+# pdfminer.six and pytest 9 need it, and so does Pillow in requirements-ocr.txt.
+# 2.33.0 fixes Dependabot alert #3 (insecure temp file reuse in extract_zipped_paths).
+requests==2.33.1
 beautifulsoup4==4.12.3
 pypdf==6.21.2
 # pypdf needs this to open AES-encrypted PDFs and raises rather than saying so
 # plainly. Without it 729 purchase orders failed as "errors" and looked like
 # malformed documents; they open fine once it is installed.
-cryptography>=3.1
+cryptography==50.0.2
 
 # A second opinion for PDFs pypdf refuses to open. 3,181 documents fail on a
 # single "Invalid object in /Pages" and render perfectly well; pdfminer
 # reconstructs more and opened 12 of 12 in a sample. Fallback only.
-pdfminer.six>=20221105
+pdfminer.six==20260107
 
 # Test suite (scripts/../tests). No network, no data/ -- runs in CI before
 # the scrape so a broken parser stops the run early.
-pytest>=7.0
+pytest==9.1.1

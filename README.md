@@ -118,10 +118,11 @@ The scraper reproduces the state's records faithfully, including their errors.
   Of" column holding the scrape time. A text cell starting with `=`, `+`, `-`, `@`, a tab
   or a CR is prefixed with an apostrophe so a spreadsheet shows it instead of evaluating
   it; numbers, including negative amounts, are left as numbers.
-- Amounts are as recorded by the state and may not reflect amendments. `--daily` does not
-  rewrite an amended row — the CSV keeps the value from the last full scrape — but it does
-  record the movement to `data/changes.jsonl`. Only a full re-scrape updates the row
-  itself.
+- Amounts are as recorded by the state. An Active record whose amount, vendor or dates
+  move is rewritten by `--daily` with the new values, and the move is recorded in
+  `data/changes.jsonl`; an Expired record keeps the values it had when it was last
+  collected. Until late Oct 2026 `--daily` only recorded the move, so Active rows held the
+  values of the 9–11 Aug 2026 full scrape.
 - The state's own entity list contains a typo — "Deaf & Hard of Dearing" — preserved
   verbatim, because matching the source exactly is what makes the links work.
 - **The state updates daily** (per its FAQ).
@@ -410,8 +411,9 @@ OCR everything.
 
 ## Running it
 
-The workflows run Python 3.11 and the maintainer's local venv is 3.9.6; the test suite
-passes on 3.9 and on 3.12.
+The workflows and the Mac's venv run Python 3.12. The venv was 3.9.6 until 26 Oct 2026,
+when Pillow 13 (past 58 security alerts) needed 3.10 or later; every package in
+`requirements.txt` is pinned, so all three install the same versions.
 
 **On a clean clone, restore `data/` before scraping** (see "Getting the data back").
 `data/*_scrape_progress.json` is tracked in git but `data/*.csv` is gitignored, so a fresh
@@ -485,6 +487,30 @@ all of them that shape or next to it:
 config rather than pulled from the `globals` package: one dependency fewer, and the list
 is then an explicit statement of what the page assumes a browser gives it.
 
+### Checking the page in a browser
+
+The lint reads the code; `scripts/check_page.cjs` runs it. It serves a built site on
+127.0.0.1, opens it in Chromium, and fails if `?selftest=1` does not end "all checks
+passed", if the page throws or asks for anything off that server, if a search does not
+narrow the count, if Tab through the rows or Enter on one drops focus on the body, or if
+axe-core finds a WCAG 2.1 A or AA violation with a row open — on a 1366×900 desktop and
+a 390×844 phone. Until Oct 2026 only a person ran the selftest, and the keyboard and
+screen-reader paths had never been checked at all: every scroll re-rendered the focused
+row away, and `role=button` on each row hid its document link from screen readers.
+
+`pages.yml` runs it on the staged site before the upload, so a page that fails it does
+not deploy. `ci.yml` runs it on a pull request's `index.html` against the payload
+`pages.yml` last built (restored from the cache, never saved), and skips it with a notice
+when the pull request changes `build_site.py`, since that payload is the old builder's.
+Playwright and axe-core are installed outside the checkout at pinned versions, like the
+lint's eslint. Locally, against a build from `scripts/build_site.py`:
+
+```bash
+npm install --no-save --prefix /tmp/page-check playwright@1.63.0 axe-core@4.10.2
+/tmp/page-check/node_modules/.bin/playwright install chromium
+NODE_PATH=/tmp/page-check/node_modules node scripts/check_page.cjs .
+```
+
 Every scrape checkpoints per page and resumes; interrupting is safe. A full run is 20+
 hours against a government server — **don't re-scrape casually.**
 
@@ -508,7 +534,8 @@ python3 scripts/scrape.py purchase-order --daily
 python3 scripts/scrape.py state --daily
 ```
 
-An unseen record gets a detail fetch and a new row. A known record is not rewritten. A
+An unseen record gets a detail fetch and a new row. A known record is rewritten only if
+its amount, vendor or dates moved (see "Amendments" below). A
 previously-Active record that does not appear today has its `Status` flipped to `Expired`
 in place — **unless the disappearance is too large to be real**. An entity that returns
 no records at all while it had five or more active ones, or that loses more than half of
@@ -559,10 +586,15 @@ what keeps every Detail URL to one row.
 Until Oct 2026 such a record was unknown, fetched and appended as a new `Active` row beside
 the stale one, and the site listed it twice, once falsely Expired, adding its amount into
 every total twice. The 28 Sep 2026 release has 302 Detail URLs carrying both statuses.
-Those pairs are left as they are: `build_site.py` drops an Expired row whose every other
-column, View URL included, matches a published Active row with the same Detail URL — 131
-rows and $18,505,640.26 on that release — and a pair that differs anywhere is kept;
-`45500` below is one.
+Those pairs are left as they are in the CSVs, which record what was scraped, and
+`build_site.py` drops the Expired row of each: any Expired row with the same Detail URL as
+a published Active row. Until 26 Oct 2026 it dropped only one identical to the Active row
+in every other column, View URL included, and kept a pair that differed anywhere as a
+possible amendment (`45500` below is one). That kept 209 stale rows and $487,950,817
+counted twice on the 26 Oct release — `88941` at $312,259,000 beside its own current
+$313,292,290 — so now the Active row stands alone, and what moved belongs in
+`data/changes.jsonl`. The build prints both counts: `expired twins` (identical, 209 rows
+and $26,559,997 that day) and `stale twins` (an older copy).
 
 Flipping back trusts the same Active search whose silence made the flip, so it has to know
 when that search is wrong the other way: when its Status filter lets Expired records
@@ -619,7 +651,23 @@ compared against what the CSV already held, and any move is appended to
 
 Before this the database was a photograph: `45500` at the Medical Center reads $2,558,983
 expired and $21,204,743 active, the same contract amended, and nothing in the data could
-show it had moved. The CSV still holds only the current value — the log is the history.
+show it had moved. The CSV holds only the current value — the log is the history.
+
+The amended row is rewritten too, the way a returning record's is: tonight's listing
+values and a fresh detail fetch for its View URL and `documents.jsonl` entry, once the
+entity has been judged (an entity refused or unfinished keeps its rows and is read again
+next run). Until late Oct 2026 the row was left alone, so the site kept the amount of the
+last full scrape and the same move was logged again every night against a baseline that
+never changed. The entry is logged just before the rewrite, so a kill between the two logs
+it again the next night, which folding on `key` absorbs. At most 2,000 amended rows are
+rewritten a night (`AMEND_LIMIT`), so the first run after this change, which owed every
+amendment since the Aug 2026 full scrape, spreads them over a few nights. A record whose
+detail page cannot be read keeps its row, unlogged, until a night it can.
+
+The same rewrite drops a row identical in every column to one above it: the same record
+listed twice, which the full scrape picks up when the listing shifts between two pages,
+and which flipping an Active row beside an identical Expired twin also makes. The hub-data
+CSVs carried 187 of them on 26 Oct 2026; the site already showed one of each.
 
 Read it by folding on `key` and keeping the last entry, never by counting lines: a field
 that moves twice appears twice. It is append-only, gitignored, and **cannot be
@@ -644,6 +692,19 @@ nothing to report.
 
 `data/` holds two things that are expensive rather than impossible to recreate, and both
 have a home to fetch them from. Neither is in git.
+
+If the nightly's cache itself is gone (GitHub evicts an entry nobody has restored for 7
+days), seed a new one from the newest hub-data release, which carries the CSVs, the stamps,
+the nightly's document log and, in `daily_state.tar.gz`, the amendment log, flip ledgers and
+leak streaks that otherwise lived only in the cache:
+
+```bash
+gh workflow run seed-cache.yml --ref main -f from_release=true
+```
+
+`seed-cache.yml` also takes `artifact_run_id`, a `rescue-cache.yml` run whose artifact to
+seed from; it refuses any other run's artifact, since any run here, a fork's pull request
+included, can upload one by that name. For a local copy:
 
 ```bash
 # CSVs (363 MB, ~20h of scraping) — cached by the nightly workflow.
@@ -1047,6 +1108,13 @@ matching the current UTC offset; at the delays below, both entries would have sk
 as that night's scrape — a `dry_run` too, which publishes the hub-data release but not the
 site — so the scheduled entries will skip it.
 
+The same test, a dataset at a time, runs at the top of each scrape step, against the
+`scrape_meta.json` the cache restored: a dataset already stamped tonight is skipped. A
+backup let through because state did not finish used to re-read contract and
+purchase-order from the top, since a finished dataset leaves no progress file. A manual
+dispatch skips them the same way, so it cannot re-read a dataset that already finished
+tonight.
+
 Each scrape step has `--hours 0.75`, so the three stop cleanly, checkpointed, well inside
 the job's 180-minute limit (a normal night is about 16 minutes for all three), and
 `PYTHONUNBUFFERED=1` so progress reaches the log as it happens. A dataset cut short keeps
@@ -1124,8 +1192,10 @@ does not finish — an entity refused, a deadline, a crash after the other datas
 or a leak streak at its third night (see "Strays that never go away") — leaves that time where it was and exits 0, and left alone the job ends green while the
 page's "Last updated" date stops moving (as it did from 24 Sep 2026). The last step of
 `daily.yml`, `scripts/check_scrape_stamps.py`, compares each dataset's recorded time with
-the moment the run began and turns the run red, with an `::error` line for each dataset that
-has not finished, if any is older. It runs after the deploy dispatch, the cache save and the
+the moment tonight began (noon Central, as the gate counts it) and turns the run red, with an
+`::error` line for each dataset that has not finished, if any is older. It compared with the
+moment the run began until Oct 2026; a backup that skips a dataset the first run finished
+could never meet that. It runs after the deploy dispatch, the cache save and the
 release, so it blocks none of them: a red final step beside green ones means data is stale,
 not that anything was lost.
 
@@ -1139,7 +1209,10 @@ change on this side alone.
   `ne-contracts-hub-data-YYYY-MM-DD`, the America/Chicago date, carrying four gzipped
   assets: `nu_contracts.csv.gz`, `nu_purchase_orders.csv.gz`, `state_agencies.csv.gz` and
   `scrape_meta.json.gz`, plus `documents.jsonl.gz` when the nightly's `data/` has a document
-  log (the entries `--daily` has written since the cache was seeded, not the full backfill).
+  log (the entries `--daily` has written since the cache was seeded, not the full backfill),
+  and since Oct 2026 `daily_state.tar.gz`: the amendment log and each dataset's flip
+  ledger and leak streaks, for `seed-cache.yml` (see "Getting the data back"). ne-connect
+  downloads it with the rest and has no use for it.
   The CSVs keep the eleven columns listed under "Running it". A same-day re-run replaces
   that day's assets in place (`--clobber`, then removes any it did not produce), so there is
   no moment without a release. Only the newest three are kept, and pruning a release
@@ -1572,7 +1645,8 @@ that still holds on page 2 when the parameters are repeated on every request. Un
 the caveat is the whole mitigation.
 
 **Change tracking records but does not publish.** `--daily` now writes every amendment
-to `data/changes.jsonl` (see "Daily updates"). Nothing on the site reads it yet: an
+to `data/changes.jsonl` and rewrites the row, so the site shows the current values (see
+"Daily updates"). Nothing on the site reads the history yet: an
 `amended` flag and change count as resident columns, the history itself as deferred
 blocks reusing the `write_desc_blocks` pattern, and a filter beside the existing
 data-quality ones. That wants a few weeks of accumulation before it says anything

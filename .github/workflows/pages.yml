@@ -54,7 +54,7 @@ jobs:
 
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
-          python-version: '3.11'
+          python-version: '3.12'
 
       - name: Install dependencies
         run: pip install -r requirements.txt
@@ -334,6 +334,21 @@ jobs:
           dir=$(python3 -c "import json;print(json.load(open('_site/manifest.json'))['dir'])")
           test -d "_site/$dir" || { echo "manifest names $dir but it is not staged"; exit 1; }
           echo "payload $dir present"
+
+      # The staged site in a real browser, before it can deploy: ?selftest=1 must end
+      # "all checks passed", a search must narrow the count, Tab and Enter must open a
+      # row without dropping focus, and axe must find no WCAG 2.1 AA violation, on a
+      # desktop and a phone viewport. Until Oct 2026 only a person ran the selftest, so
+      # a page that threw on load would have deployed green. The tools are installed
+      # outside the checkout at pinned versions, like lint_page.py's eslint, and never
+      # staged. See scripts/check_page.cjs.
+      - name: Check the staged page in a browser
+        run: |
+          tools="$RUNNER_TEMP/page-check"
+          npm install --no-save --no-package-lock --no-audit --no-fund --prefix "$tools" \
+            playwright@1.63.0 axe-core@4.10.2
+          "$tools/node_modules/.bin/playwright" install --with-deps chromium
+          NODE_PATH="$tools/node_modules" node scripts/check_page.cjs _site
 
       - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:

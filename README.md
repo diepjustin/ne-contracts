@@ -486,6 +486,30 @@ all of them that shape or next to it:
 config rather than pulled from the `globals` package: one dependency fewer, and the list
 is then an explicit statement of what the page assumes a browser gives it.
 
+### Checking the page in a browser
+
+The lint reads the code; `scripts/check_page.cjs` runs it. It serves a built site on
+127.0.0.1, opens it in Chromium, and fails if `?selftest=1` does not end "all checks
+passed", if the page throws or asks for anything off that server, if a search does not
+narrow the count, if Tab through the rows or Enter on one drops focus on the body, or if
+axe-core finds a WCAG 2.1 A or AA violation with a row open — on a 1366×900 desktop and
+a 390×844 phone. Until Oct 2026 only a person ran the selftest, and the keyboard and
+screen-reader paths had never been checked at all: every scroll re-rendered the focused
+row away, and `role=button` on each row hid its document link from screen readers.
+
+`pages.yml` runs it on the staged site before the upload, so a page that fails it does
+not deploy. `ci.yml` runs it on a pull request's `index.html` against the payload
+`pages.yml` last built (restored from the cache, never saved), and skips it with a notice
+when the pull request changes `build_site.py`, since that payload is the old builder's.
+Playwright and axe-core are installed outside the checkout at pinned versions, like the
+lint's eslint. Locally, against a build from `scripts/build_site.py`:
+
+```bash
+npm install --no-save --prefix /tmp/page-check playwright@1.63.0 axe-core@4.10.2
+/tmp/page-check/node_modules/.bin/playwright install chromium
+NODE_PATH=/tmp/page-check/node_modules node scripts/check_page.cjs .
+```
+
 Every scrape checkpoints per page and resumes; interrupting is safe. A full run is 20+
 hours against a government server — **don't re-scrape casually.**
 

@@ -4,7 +4,8 @@ name: CI
 # only job with that name is pages.yml's, which runs on a push to main -- after a change has
 # landed -- so no pull request could ever satisfy it, and nothing tested a change before it
 # merged. This runs the same tests and page lint as pages.yml's build job on every pull
-# request to main, and nothing else: no cache, no release, no deploy, no secrets.
+# request to main, and its browser check of the page, and nothing else: no release, no
+# deploy, no secrets, and no cache written (it reads the newest built payload, below).
 #
 # Deliberately not `pull_request_target` (it runs with the base repo's token and secrets, and
 # this repo is public), and deliberately not also `push`, which would report the same check
@@ -34,11 +35,14 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           persist-credentials: false
+          # The PR's merge commit and its first parent, the base branch's tip, so the
+          # page check below can see whether this PR changes the payload builder.
+          fetch-depth: 2
 
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
@@ -56,3 +60,40 @@ jobs:
 
       - name: Lint the page
         run: python3 scripts/lint_page.py
+
+      # pages.yml's browser check of the page (scripts/check_page.cjs), on this PR's
+      # index.html against the payload the site was last built from: pages.yml saves it
+      # on main, and a PR may read the base branch's caches but never write them. Restore
+      # only -- nothing here can save a cache another run would trust.
+      - name: Restore the newest built payload
+        id: payload
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: |
+            d
+            manifest.json
+          key: ne-payload-${{ github.run_id }}   # never pre-exists; forces the fallback below
+          restore-keys: |
+            ne-payload-
+
+      # Skipped, with a notice, when there is no payload to check against or the PR
+      # changes build_site.py: that payload is the old builder's, so a failure would say
+      # nothing about the PR. pages.yml runs the same check on the new build before it
+      # deploys, so a broken one still cannot reach the site.
+      - name: Check the page in a browser
+        env:
+          RESTORED: ${{ steps.payload.outputs.cache-matched-key }}
+        run: |
+          if [ -z "$RESTORED" ] || [ ! -f manifest.json ]; then
+            echo "::notice title=Page check skipped::no built payload to check the page against"
+            exit 0
+          fi
+          if ! git diff --quiet HEAD^1 HEAD -- scripts/build_site.py; then
+            echo "::notice title=Page check skipped::this PR changes build_site.py, so the cached payload is not its build; pages.yml checks the new build before it deploys"
+            exit 0
+          fi
+          tools="$RUNNER_TEMP/page-check"
+          npm install --no-save --no-package-lock --no-audit --no-fund --prefix "$tools" \
+            playwright@1.63.0 axe-core@4.10.2
+          "$tools/node_modules/.bin/playwright" install --with-deps chromium
+          NODE_PATH="$tools/node_modules" node scripts/check_page.cjs .

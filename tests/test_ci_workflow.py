@@ -64,15 +64,32 @@ def test_it_reports_the_required_context_and_nothing_renames_it():
 def test_it_can_read_the_repository_and_do_nothing_else():
     lines = CI.splitlines()
     assert lines[lines.index("permissions:") + 1] == "  contents: read"
-    forbidden = ("pages: write", "contents: write", "actions: write", "actions/cache", "gh release",
-                 "gh cache", "gh workflow", "upload-pages-artifact", "deploy-pages")
+    forbidden = ("pages: write", "contents: write", "actions: write", "actions/cache@",
+                 "actions/cache/save", "gh release", "gh cache", "gh workflow",
+                 "upload-pages-artifact", "deploy-pages")
     assert not [word for word in forbidden if word in CI]
 
 
-def test_it_runs_the_tests_and_the_page_lint_the_publish_job_runs():
+def test_the_only_cache_it_touches_it_restores():
+    """The page check reads the payload pages.yml built on main. Restoring a base-branch
+    cache is read-only; saving one from a PR would hand the next run whatever the PR built."""
+    uses = re.findall(r"uses: (actions/cache\S*)@", CI)
+    assert uses == ["actions/cache/restore"]
+
+
+def test_it_runs_the_tests_the_page_lint_and_the_page_check_the_publish_job_runs():
     pages = "\n".join(code_lines(workflow("pages.yml")))
-    for command in ("python3 -m pytest tests/ -q", "python3 scripts/lint_page.py", "pip install -r requirements.txt"):
-        assert command in CI and command in pages
+    for command in ("python3 -m pytest tests/ -q", "python3 scripts/lint_page.py", "pip install -r requirements.txt",
+                    "playwright@1.63.0 axe-core@4.10.2", 'playwright" install --with-deps chromium'):
+        assert command in CI and command in pages, command
+    assert 'node scripts/check_page.cjs _site' in pages
+    assert 'node scripts/check_page.cjs .' in CI
+
+
+def test_the_page_check_runs_on_the_staged_site_before_the_upload():
+    pages = workflow("pages.yml")
+    assert pages.index("- name: Stage the site") < pages.index("- name: Check the staged page in a browser") \
+        < pages.index("uses: actions/upload-pages-artifact")
 
 
 def test_the_publish_workflow_still_does_not_run_on_pull_requests():

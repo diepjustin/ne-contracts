@@ -8,16 +8,22 @@ name: NE Contracts seed cache
 # scrape can never restore, which is how the Aug 2026 outage happened.
 #
 # Point it at a run that uploaded an `ne-contracts-data-rescue` artifact (see
-# `rescue-cache.yml`), or leave the input blank to seed from CSVs committed to
-# the ref being run from.
+# `rescue-cache.yml`); or tick from_release to seed from the newest hub-data
+# release, which is the way back once every cache entry has gone (GitHub evicts
+# one unused for 7 days); or leave both blank to seed from CSVs committed to the
+# ref being run from.
 
 on:
   workflow_dispatch:
     inputs:
       artifact_run_id:
-        description: 'Run ID whose ne-contracts-data-rescue artifact holds data/. Blank = use data/ as checked out.'
+        description: 'Run ID of a rescue-cache.yml run whose ne-contracts-data-rescue artifact holds data/. Blank = see from_release.'
         type: string
         required: false
+      from_release:
+        description: 'Seed from the newest ne-contracts-hub-data- release instead (its CSVs, stamps, document log and --daily state).'
+        type: boolean
+        default: false
 
 permissions: {}
 
@@ -39,6 +45,34 @@ jobs:
         with:
           persist-credentials: false   # nothing here pushes; gh gets its token from env
 
+      - name: Take one source at a time
+        if: inputs.artifact_run_id != '' && inputs.from_release
+        run: |
+          echo "::error::give artifact_run_id or from_release, not both"
+          exit 1
+
+      # Only an artifact rescue-cache.yml made in this repository. Any run here can
+      # upload an artifact by that name, a pull request from a fork included (its run
+      # uses the fork's workflow files), and this one becomes the baseline the nightly
+      # diffs against.
+      - name: Check the run is a rescue-cache.yml run of this repository
+        if: inputs.artifact_run_id != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_RUN_ID: ${{ inputs.artifact_run_id }}
+        run: |
+          case "$ARTIFACT_RUN_ID" in
+            ''|*[!0-9]*) echo "::error::artifact_run_id must be a run's numeric id"; exit 1 ;;
+          esac
+          got=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$ARTIFACT_RUN_ID" \
+                  --jq '[.path, .event, .head_repository.full_name, .conclusion] | join(" ")')
+          want=".github/workflows/rescue-cache.yml workflow_dispatch $GITHUB_REPOSITORY success"
+          if [ "$got" != "$want" ]; then
+            echo "::error::run $ARTIFACT_RUN_ID is [$got], not a successful dispatched rescue-cache.yml run of this repository -- refusing to seed from its artifact"
+            exit 1
+          fi
+          echo "run $ARTIFACT_RUN_ID: $got"
+
       - name: Download data/ from the rescue run
         if: inputs.artifact_run_id != ''
         env:
@@ -50,6 +84,39 @@ jobs:
           gh run download "$ARTIFACT_RUN_ID" \
             --name ne-contracts-data-rescue \
             --dir data
+
+      # The nightly publishes this every night it scrapes, so it is at most a day or two
+      # behind. Its daily_state.tar.gz carries the amendment log, flip ledgers and leak
+      # streaks; a release from before Oct 2026 has none, which costs the amendment
+      # history and makes the next nights read owed flip-backs as strays (see README.md,
+      # "Strays that never go away").
+      - name: Download data/ from the newest hub-data release
+        if: inputs.from_release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 100 --json tagName \
+                  --jq '[.[].tagName | select(startswith("ne-contracts-hub-data-"))] | sort | last // empty')
+          if [ -z "$tag" ]; then
+            echo "::error::no ne-contracts-hub-data- release to seed from"
+            exit 1
+          fi
+          echo "seeding from $tag"
+          dl="$RUNNER_TEMP/release"
+          rm -rf "$dl"
+          mkdir -p "$dl" data
+          gh release download "$tag" --repo "$GITHUB_REPOSITORY" --dir "$dl"
+          for f in "$dl"/*.csv.gz "$dl"/scrape_meta.json.gz "$dl"/documents.jsonl.gz; do
+            if [ -f "$f" ]; then
+              gunzip -c "$f" > "data/$(basename "$f" .gz)"
+            fi
+          done
+          if [ -f "$dl/daily_state.tar.gz" ]; then
+            tar -xzf "$dl/daily_state.tar.gz" -C data
+            echo "--daily state: $(tar -tzf "$dl/daily_state.tar.gz" | paste -sd' ' -)"
+          else
+            echo "::warning::$tag has no daily_state.tar.gz: no amendment log, flip ledgers or leak streaks to restore"
+          fi
 
       - name: Verify data/ carries the CSVs before seeding
         run: |

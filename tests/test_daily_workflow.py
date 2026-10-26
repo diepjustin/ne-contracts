@@ -189,6 +189,16 @@ def test_the_release_adds_the_document_log_only_when_there_is_one():
         assert "data/%s" % name in release
 
 
+def test_the_release_carries_the_daily_state_only_the_cache_held():
+    """The amendment log cannot be regenerated, and without the ledgers a reseeded cache
+    reads every owed flip-back as a stray. seed-cache.yml's from_release restores these."""
+    release = code(step("Publish a data release for ne-connect"))
+    for f in ("data/changes.jsonl", "data/*_daily_flips.json", "data/*_daily_leaks.json"):
+        assert f in release, f
+    assert 'tar -czf release/daily_state.tar.gz -C data "${state[@]}"' in release
+    assert release.index("daily_state.tar.gz") < release.index("gh release upload")
+
+
 def test_a_same_day_rerun_replaces_assets_in_place_rather_than_deleting_the_release():
     release = code(step("Publish a data release for ne-connect"))
     assert 'gh release upload "$tag" release/*.gz --repo "$repo" --clobber' in release

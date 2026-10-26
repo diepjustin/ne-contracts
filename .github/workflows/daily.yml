@@ -343,6 +343,19 @@ jobs:
           if [ -f data/documents.jsonl ]; then
             gzip -c data/documents.jsonl > release/documents.jsonl.gz
           fi
+          # The --daily state that lived nowhere but this cache: the amendment log, which
+          # nothing can regenerate, and each dataset's flip ledger and leak streaks. With
+          # them a cache seeded from this release (seed-cache.yml, from_release) resumes
+          # where the nightly stopped; without them it has no amendment history and reads
+          # every flip-back it owes as a stray.
+          state=()
+          for f in data/changes.jsonl data/*_daily_flips.json data/*_daily_leaks.json; do
+            if [ -f "$f" ]; then state+=("$(basename "$f")"); fi
+          done
+          if [ ${#state[@]} -gt 0 ]; then
+            tar -czf release/daily_state.tar.gz -C data "${state[@]}"
+            echo "daily_state.tar.gz: ${state[*]}"
+          fi
           if ! ls release/*.gz >/dev/null 2>&1; then
             echo "::warning::nothing to release -- skipping"
             exit 0

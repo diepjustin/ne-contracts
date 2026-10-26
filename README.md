@@ -688,6 +688,19 @@ nothing to report.
 `data/` holds two things that are expensive rather than impossible to recreate, and both
 have a home to fetch them from. Neither is in git.
 
+If the nightly's cache itself is gone (GitHub evicts an entry nobody has restored for 7
+days), seed a new one from the newest hub-data release, which carries the CSVs, the stamps,
+the nightly's document log and, in `daily_state.tar.gz`, the amendment log, flip ledgers and
+leak streaks that otherwise lived only in the cache:
+
+```bash
+gh workflow run seed-cache.yml --ref main -f from_release=true
+```
+
+`seed-cache.yml` also takes `artifact_run_id`, a `rescue-cache.yml` run whose artifact to
+seed from; it refuses any other run's artifact, since any run here, a fork's pull request
+included, can upload one by that name. For a local copy:
+
 ```bash
 # CSVs (363 MB, ~20h of scraping) — cached by the nightly workflow.
 gh workflow run rescue-cache.yml --ref main   # then download its artifact
@@ -1191,7 +1204,10 @@ change on this side alone.
   `ne-contracts-hub-data-YYYY-MM-DD`, the America/Chicago date, carrying four gzipped
   assets: `nu_contracts.csv.gz`, `nu_purchase_orders.csv.gz`, `state_agencies.csv.gz` and
   `scrape_meta.json.gz`, plus `documents.jsonl.gz` when the nightly's `data/` has a document
-  log (the entries `--daily` has written since the cache was seeded, not the full backfill).
+  log (the entries `--daily` has written since the cache was seeded, not the full backfill),
+  and since Oct 2026 `daily_state.tar.gz`: the amendment log and each dataset's flip
+  ledger and leak streaks, for `seed-cache.yml` (see "Getting the data back"). ne-connect
+  downloads it with the rest and has no use for it.
   The CSVs keep the eleven columns listed under "Running it". A same-day re-run replaces
   that day's assets in place (`--clobber`, then removes any it did not produce), so there is
   no moment without a release. Only the newest three are kept, and pruning a release

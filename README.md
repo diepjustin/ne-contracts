@@ -599,10 +599,12 @@ stays where it was for as long as the run is red. Look the strays up on the stat
 they really are Active again:
 
 ```bash
-python3 scripts/scrape.py state --daily --entity "Military Department" --accept-strays
+gh workflow run daily.yml -f accept_strays_dataset=state -f accept_strays_entity="Military Department"
 ```
 
-That re-reads the named entities, takes their strays as re-opened, restores them as above,
+The data lives in the nightly's cache, so this runs inside `daily.yml`: its "Accept strays"
+step runs `scrape.py state --daily --entity "Military Department" --accept-strays` before the
+normal steps. (The same command works by hand on a local copy of `data/`.) That re-reads the named entities, takes their strays as re-opened, restores them as above,
 and ends their streaks (and the dataset's). If the filter is genuinely leaking, leave it:
 the run stays red until it stops.
 

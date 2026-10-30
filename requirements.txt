@@ -2,7 +2,7 @@
 # code; Dependabot proposes the bumps. Python 3.10 or later: requests 2.33,
 # pdfminer.six and pytest 9 need it, and so does Pillow in requirements-ocr.txt.
 # 2.33.0 fixes Dependabot alert #3 (insecure temp file reuse in extract_zipped_paths).
-requests==2.33.1
+requests==2.34.2
 beautifulsoup4==4.12.3
 pypdf==6.21.2
 # pypdf needs this to open AES-encrypted PDFs and raises rather than saying so

@@ -24,6 +24,10 @@ on:
         description: 'Entity name exactly as the ::error prints it, e.g. Military Department. Look up a few of its strays first.'
         type: string
         default: ''
+      sweep_since:
+        description: 'Expired purchase-order sweep back to this Begin Date, e.g. 2026-08-01 for a catch-up. Empty: the nightly window.'
+        type: string
+        default: ''
 
 # Nothing at workflow level: each job asks for exactly what it uses.
 permissions: {}
@@ -223,6 +227,22 @@ jobs:
           else
             python3 scripts/scrape.py state --daily --hours 0.75
           fi
+
+      # --daily reads Status=Active only, so a record the state first publishes already
+      # Expired never reached the data -- mostly a University purchase order that starts
+      # and ends within days, a quarter to a half of them since the August full scrape.
+      # This reads each entity's Expired search newest-first and appends what the CSV has
+      # never held, back 35 days of Begin Date, or to sweep_since on a manual catch-up (run
+      # it again if it reports unfinished: what it appended stays, and the next one skips
+      # past it). It only appends and stamps nothing, so a failure is reported here but does
+      # not hold back tonight's publish; the step near the end turns the run red instead.
+      - name: Sweep newly Expired purchase orders
+        id: sweep
+        if: steps.gate.outputs.proceed == 'true'
+        continue-on-error: true
+        env:
+          SINCE: ${{ github.event.inputs.sweep_since }}
+        run: python3 scripts/scrape.py purchase-order --sweep-expired ${SINCE:+"$SINCE"} --hours 0.25
 
       # --- Publish leg: every night the scrape ran ---
       #
@@ -457,6 +477,16 @@ jobs:
             fi
           done <<< "$tags"
           echo "deleted $deleted orphaned hub-data tag(s)"
+
+      # The sweep above runs with continue-on-error so that it cannot hold back the
+      # publish. This turns the run red once everything is out, so a sweep that stopped
+      # -- the site's sort order changed, data/ was missing -- reaches the failure email
+      # and not only an annotation. A sweep that ran out of time is a warning, not this.
+      - name: Report a failed Expired sweep
+        if: always() && steps.sweep.outcome == 'failure'
+        run: |
+          echo "::error title=Expired sweep failed::The Expired purchase-order sweep failed; see its step. The rest of tonight's data was published."
+          exit 1
 
       # Last, after the deploy dispatch, the cache save, the release and its prune, so it
       # can colour the run red without blocking any of them. scrape.py stamps a dataset

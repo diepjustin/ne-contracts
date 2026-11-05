@@ -1915,6 +1915,240 @@ def fresh_rows(backs, unread="listed again could not have their detail pages rea
     return rows, entries
 
 
+# --- The Expired sweep ----------------------------------------------------------
+#
+# --daily searches Status=Active only, so a record the state first publishes already
+# Expired never entered the data: mostly a University purchase order that starts and ends
+# within a day or two. From the August full scrape to 5 Nov 2026 that was about 45% of
+# August's UNL and UNK purchase orders, a third of September's and a quarter of October's.
+# The sweep reads an entity's Expired search newest-first by Begin Date, appends what the
+# CSV has never held, and stops at the first page that begins before its window.
+#
+# Checked against the live site on 5 Nov 2026 (UNK, and UNL's 518 pages back to 1 Jul):
+# the grid's own header link is ?sort=BeginDate&sortdir=ASC, DESC is a true date order
+# newest first, and it holds page after page as long as every request repeats it -- the
+# pager's links are a bare ?page=N, which falls back to the search's own order.
+SWEEP_SORT = "sort=BeginDate&sortdir=DESC"
+
+# The nightly window, in days of Begin Date. On 5 Nov records beginning 2-3 Nov were
+# already listed, so the state posts within days; a month is room for a slow one. At about
+# 0.4s a page it costs UNL, the largest, about a minute on top of its 2-minute search.
+SWEEP_DAYS = 35
+
+
+def parse_since(text, today=None):
+    """--sweep-expired's argument: a date (2026-08-01) or a number of days back (35)."""
+    if text.isdigit():
+        return (today or datetime.date.today()) - datetime.timedelta(days=int(text))
+    return datetime.date.fromisoformat(text)
+
+
+def begin_day(record):
+    try:
+        return datetime.datetime.strptime(record["begin_date"], "%m/%d/%Y").date()
+    except ValueError:
+        return None
+
+
+def load_known_keys(csv_path):
+    """document_key of every row's Detail URL, whatever its Status."""
+    keys = set()
+    with open(csv_path, newline="", encoding="utf-8") as f:
+        reader = csv.reader(f)
+        next(reader, None)  # header
+        for r in reader:
+            if len(r) > 9:
+                keys.add(document_key(r[9]))
+    return keys
+
+
+def out_of_order(days, floor):
+    """Why `days` (one page's Begin Dates, unreadable ones None) is not newest-first after a
+    page that ended on `floor`, or None if it is."""
+    seq = ([floor] if floor else []) + [d for d in days if d]
+    for earlier, later in zip(seq, seq[1:]):
+        if later > earlier:
+            return f"Begin Date {later:%m/%d/%Y} follows {earlier:%m/%d/%Y}"
+    return None
+
+
+def sweep_entity(session, entity_name, entity_val, entity_type, doc_type, since, known,
+                 on_page, deadline=None):
+    """Append one entity's Expired records that `known` lacks, newest-first by Begin Date,
+    down to the first page that begins before `since`.
+
+    Every record on a page it reads is a candidate, the oldest page's included. `on_page`
+    gets each page's (rows, documents entries) and has them on disk before the next page.
+    Returns (rows appended, finished, problem): `problem` is set, and finished False, when
+    the order the stop rule rests on does not hold. A record whose detail page cannot be
+    read is left out and found again next run, the same as --daily's new records.
+    """
+    print(f"\nSweeping: {entity_name} | Expired" + (f" | {doc_type}" if doc_type else "")
+          + f" | Begin Date from {since:%m/%d/%Y}")
+    data = {
+        "__RequestVerificationToken": get_token(session),
+        "TempEntity": entity_val,
+        "Status": "Expired",
+        "Type": entity_type,
+        "Entity": entity_val,
+        "Vendor": "",
+        "Amount": "0",
+    }
+    if doc_type is not None:
+        data["DocType"] = doc_type
+
+    def search():
+        time.sleep(PAGE_DELAY)
+        r = session.post(RESULTS_URL, data={**data, "__RequestVerificationToken": get_token(session)},
+                         timeout=SEARCH_TIMEOUT)
+        r.raise_for_status()
+
+    def read(page):
+        time.sleep(PAGE_DELAY)
+        r = session.get(f"{RESULTS_URL}?page={page}&{SWEEP_SORT}", timeout=SEARCH_TIMEOUT)
+        r.raise_for_status()
+        return parse_results_page(BeautifulSoup(r.text, "html.parser"))
+
+    search()
+    page, appended, floor, deferred = 1, 0, None, 0
+    while True:
+        records, last_page = read(page)
+        if not records and page > 1:
+            # The search's session state expired (see scrape_entity): search again, once.
+            print(f"  Page {page:,} came back empty -- re-running the search.")
+            search()
+            records, last_page = read(page)
+            if not records:
+                print(f"  Page {page:,} still empty -- stopping, not finished.")
+                return appended, False, None
+        if not records:
+            print("  No results found.")
+            return appended, True, None
+
+        days = [begin_day(r) for r in records]
+        problem = out_of_order(days, floor)
+        if problem:
+            return appended, False, f"page {page:,}: {problem}"
+        floor = min((d for d in days if d), default=floor)
+
+        # By URL, so a record a tie on Begin Date shows twice is appended once.
+        new = list({r["detail_url"]: r for r in records
+                    if r["detail_url"] and document_key(r["detail_url"]) not in known}.values())
+        rows, entries = [], []
+        for record, docs in zip(new, fetch_documents_parallel(new) if new else []):
+            if docs is None:
+                deferred += 1
+                continue
+            rows.append(record_row(record, entity_name, "Expired", view_url_for(docs)))
+            entries.append(documents_entry(record["doc_number"], entity_name, record["detail_url"], docs))
+            known.add(document_key(record["detail_url"]))
+        if rows:
+            on_page(rows, entries)
+            appended += len(rows)
+        if page == 1 or page % 50 == 0:
+            print(f"  Page {page:,}: Begin Date {records[0]['begin_date']}..{records[-1]['begin_date']}, "
+                  f"{appended:,} appended so far")
+
+        if all(d and d < since for d in days):
+            print(f"  Page {page:,} begins before {since:%m/%d/%Y}: done, {appended:,} appended.")
+            break
+        if last_page is None or page >= last_page:
+            print(f"  Last page ({page:,}): done, {appended:,} appended.")
+            break
+        if deadline and time.time() >= deadline:
+            print(f"  Time limit reached at page {page:,} -- stopping, not finished.")
+            return appended, False, None
+        page += 1
+
+    if deferred:
+        print(f"  {deferred:,} record(s) whose detail pages could not be read are left for the next run.")
+    return appended, True, None
+
+
+def run_sweep(args):
+    """--sweep-expired: append the Expired records the Active-only nightly never saw.
+
+    Append-only: a row the CSV holds, under any Status, is never touched, and nothing is
+    stamped -- scrape_meta.json says when --daily finished, which this does not change.
+    Each row appended goes into the flip ledger too. The ledger holds the records this
+    scraper itself saw end, and that is what makes a later Active listing of one a return
+    rather than a stray: without it, a swept purchase order that re-opened would count
+    toward a leak streak and turn the nightly red.
+    """
+    entity_type, doc_type, output_csv = DATASETS[args.dataset]
+    entities = STATE_ENTITIES if args.dataset == "state" else HIGHER_ED_ENTITIES
+    if args.entity:
+        unknown = [e for e in args.entity if e not in entities]
+        if unknown:
+            print(f"unknown entity name(s) for dataset {args.dataset!r}: {unknown}.", file=sys.stderr)
+            sys.exit(2)
+        entities = {name: entities[name] for name in args.entity}
+    since = parse_since(args.sweep_expired)
+
+    repair_csv_tail(output_csv)
+    if not csv_has_records(output_csv):
+        print(f"ERROR: refusing --sweep-expired: {output_csv} has no records. Restore data/ first; "
+              "the sweep only adds to a dataset, it cannot stand in for one.", file=sys.stderr)
+        sys.exit(1)
+    if not document_service_healthy():
+        print("ERROR: refusing --sweep-expired: the state is not serving documents right now, so "
+              "every record would be written as having none. Nothing was swept.", file=sys.stderr)
+        sys.exit(1)
+
+    known = load_known_keys(output_csv)
+    ledger_path = flip_ledger_file(args.dataset)
+    ledger = load_flip_ledger(ledger_path)
+    today = datetime.date.today().isoformat()
+    deadline = time.time() + args.hours * 3600 if args.hours else None
+    session = build_session()
+    appended = collections.Counter()
+    unfinished, problems = [], []
+
+    with open(output_csv, "a", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+
+        def on_page(rows, entries):
+            writer.writerows(rows)
+            f.flush()
+            os.fsync(f.fileno())
+            append_documents(entries, os.path.join(ROOT, DOCUMENTS_JSONL))
+            ledger.update((ledger_key(row[9]), today) for row in rows)
+            appended["rows"] += len(rows)
+
+        for name in ordered_entities(entities):
+            if deadline and time.time() >= deadline:
+                unfinished.append(name)
+                continue
+            try:
+                _, finished, problem = sweep_entity(
+                    session, name, entities[name], entity_type, doc_type, since, known, on_page,
+                    deadline=deadline)
+            except requests.RequestException as e:
+                # The session already retried. What this entity appended stays, and the
+                # next run reads it again, so a bad minute on the state's side is a warning.
+                print(f"  The state site failed ({e}) -- stopping {name}, not finished.")
+                finished, problem = False, None
+            finally:
+                save_flip_ledger(ledger_path, ledger)
+            if problem:
+                problems.append(f"{name}: {problem}")
+            elif not finished:
+                unfinished.append(name)
+
+    print(f"\nSwept {len(entities) - len(unfinished) - len(problems):,} of {len(entities):,} "
+          f"entities: {appended['rows']:,} Expired record(s) appended to {output_csv}.")
+    if unfinished:
+        print(f"::warning title=Expired sweep unfinished::{args.dataset}: not finished: "
+              f"{', '.join(unfinished)}. The next run reads them again; what was appended stays.")
+    if problems:
+        # The stop rule rests on the order, so a sweep that cannot trust it stops rather
+        # than reading the whole history or stopping early and calling that complete.
+        for p in problems:
+            print(f"::error title=Expired sweep stopped::{args.dataset}: {p}. The Expired search "
+                  f"is not newest-first by Begin Date with {SWEEP_SORT}; check the site's sort links.")
+        sys.exit(1)
+
+
 CSV_HEADER = [
     "Document Number", "Document Type", "Entity Code", "Entity Name",
     "Vendor", "Amount", "Begin Date", "End Date", "Status", "Detail URL", "View URL"
@@ -1970,11 +2204,27 @@ def main():
                         help="With --daily --entity: take the records the Active search lists that "
                              "the CSV holds as Expired as genuinely re-opened, flip them back, and "
                              "end those entities' leak streaks. For use by hand, after looking.")
+    parser.add_argument("--sweep-expired", metavar="SINCE", nargs="?", const=str(SWEEP_DAYS),
+                        default=None,
+                        help="Append the Expired records the CSV has never held, reading newest-"
+                             "first down to Begin Date SINCE: a date (2026-08-01) or a number of "
+                             f"days back (default {SWEEP_DAYS}). Touches no existing row.")
     args = parser.parse_args()
 
     if args.accept_strays and not (args.daily and args.entity):
         parser.error("--accept-strays needs --daily and at least one --entity: it overrides the "
                      "leak check, so it is given only for entities a person has looked at.")
+    if args.sweep_expired is not None:
+        if args.daily or args.fresh or args.status:
+            parser.error("--sweep-expired runs on its own: it appends to the CSV and never "
+                         "rescans, so --daily, --fresh and --status do not combine with it.")
+        try:
+            parse_since(args.sweep_expired)
+        except ValueError:
+            parser.error(f"--sweep-expired takes a date (2026-08-01) or a number of days, "
+                         f"not {args.sweep_expired!r}")
+        run_sweep(args)
+        return
     if args.daily:
         if args.fresh or args.status:
             parser.error("--daily is incompatible with --fresh/--status (it always reads and "

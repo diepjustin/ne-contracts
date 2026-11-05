@@ -106,6 +106,9 @@ def test_every_scrape_step_has_a_time_budget_that_fits_the_job():
         m = re.search(r"--hours ([\d.]+)", run)
         assert m, "%s has no --hours budget" % dataset
         budgets.append(float(m.group(1)) * 60)
+    sweep = re.search(r"--sweep-expired .*--hours ([\d.]+)", step("Sweep newly Expired"))
+    assert sweep, "the Expired sweep has no --hours budget"
+    budgets.append(float(sweep.group(1)) * 60)
     assert sum(budgets) <= timeout - 30, "the scrape budgets leave no room for the publish leg"
 
 
@@ -120,6 +123,36 @@ def test_a_scrape_step_skips_a_dataset_already_finished_tonight(dataset):
     assert run.index(gate) < run.index("else") < run.index("python3 scripts/scrape.py %s --daily" % dataset)
     assert "RUN_STARTED: ${{ steps.gate.outputs.started }}" in s
     assert "${{" not in run, "an expression inside run: is command injection"
+
+
+# --- the Expired purchase-order sweep (n13) ----------------------------------------------
+
+def test_the_sweep_runs_after_the_scrapes_and_before_anything_is_saved_or_published():
+    sweep = index("Sweep newly Expired purchase orders")
+    assert index("Daily scrape -- state") < sweep
+    for later in ("Guard rail on tonight's diff", "Save data/ cache", "Deploy the rebuilt site",
+                  "Publish a data release for ne-connect"):
+        assert sweep < index(later), "what the sweep appends has to reach %r" % later
+
+
+def test_a_failed_sweep_cannot_hold_back_the_publish_but_still_turns_the_run_red():
+    sweep = step("Sweep newly Expired purchase orders")
+    assert "id: sweep" in sweep and "continue-on-error: true" in sweep
+    assert "if: steps.gate.outputs.proceed == 'true'" in sweep
+    report = step("Report a failed Expired sweep")
+    assert "if: always() && steps.sweep.outcome == 'failure'" in report
+    assert "exit 1" in report
+    assert index("Publish a data release for ne-connect") < index("Report a failed Expired sweep") \
+        < index("Check that every dataset finished tonight")
+    assert "Check that every dataset finished tonight" in steps("daily")[-1].splitlines()[0]
+
+
+def test_the_catch_up_date_arrives_through_env():
+    sweep = step("Sweep newly Expired purchase orders")
+    assert "SINCE: ${{ github.event.inputs.sweep_since }}" in sweep
+    run = sweep.split("run:", 1)[1]
+    assert "python3 scripts/scrape.py purchase-order --sweep-expired ${SINCE:+\"$SINCE\"}" in run
+    assert "      sweep_since:" in DAILY.split("\npermissions:", 1)[0]
 
 
 # --- the deploy dispatch (fresh-09) and the check that it reached the site (sc-01) ---------

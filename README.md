@@ -82,7 +82,7 @@ The scraper reproduces the state's records faithfully, including their errors.
 - **Purchase orders are not a Higher Education thing, even though the site makes them
   look like one.** The search form only offers a Contract/Purchase Order filter for
   Higher Education, so on the agency side the distinction is invisible — but it is in
-  the records. Ten of the 32 agency document-type codes (`O9`, `OM`, `OP`, `X7`, `Y6`,
+  the records. Ten of the 33 agency document-type codes (`O9`, `OM`, `OP`, `X7`, `Y6`,
   `Y7`, `Z8`, `Z9`, `ZO`, `ZP`) are filed under "Purchase Orders", covering 152,210
   records, about 65% of agency data. Overall the dataset is 619,601 purchase orders to
   118,594 contracts — the reverse of what the interface implies.

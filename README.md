@@ -28,9 +28,10 @@ There is no backend and no framework.
 **739,605 records across 92 entities** — every state agency, board and commission the
 database lists (83), plus all nine University of Nebraska and Nebraska State College
 campuses. Both Active and Expired, contracts and purchase orders. **The initial
-collection finished on 9–11 Aug 2026; since then only Active records are re-read each
-night**, so a record the state publishes already ended can be missing (see the caveats
-below).
+collection finished on 9–11 Aug 2026; since then each night re-reads the Active
+records**, plus, since 5 Nov 2026, the University and state college purchase orders that
+first appear already ended. A contract or state-agency record the state publishes already
+ended can still be missing (see the caveats below).
 
 | | Records |
 | --- | ---: |
@@ -142,17 +143,22 @@ The scraper reproduces the state's records faithfully, including their errors.
   `data/documents.jsonl`; the page lists them when you click a row. **Rows the backfill
   has not reached yet are `docCount` 255 — unknown — and the page says nothing about
   them.** Coverage so far is `meta.docCheckedRows`.
-- **Records the state publishes already ended are mostly missing since 11 Aug 2026.** The
-  nightly run searches only `Status=Active`, so a record that first appears `Expired` —
-  typically a short University purchase order that starts and ends within a day or two —
-  never enters the dataset. University purchase-order numbers form one counter shared by
-  UNL, UNMC, UNO, UNK and Wayne, and in the weeks measured (mid-Sep to early Oct) about a
-  quarter of them were absent: roughly 430–590 records a week, typically small (median
-  $222, about $2 M a week in all). A separate stretch of about 2,570 purchase orders with
-  begin dates 21 Aug–4 Sep is also missing; a stale restore of the data on 11 Sep is the
-  likely cause, but that is unverified. Per-vendor and per-campus counts for small, fast
-  purchases are understated by that much; Active records are unaffected. Measured in the
-  13 Oct 2026 audit; see "Open work".
+- **Records the state publishes already ended were mostly missing from 11 Aug to 5 Nov
+  2026, and outside purchase orders they still can be.** The nightly run searches only
+  `Status=Active`, so a record that first appears `Expired` — typically a short University
+  purchase order that starts and ends within a day or two — never entered the dataset.
+  University purchase-order numbers form one counter shared by UNL, UNMC, UNO, UNK and
+  Wayne, and in the weeks measured (mid-Sep to early Oct) about a quarter of them were
+  absent: roughly 430–590 records a week, typically small (median $222, about $2 M a week
+  in all). A separate stretch of about 2,570 purchase orders with begin dates 21 Aug–4 Sep
+  was missing too; a stale restore of the data on 11 Sep is the likely cause, but that is
+  unverified. Measured in the 13 Oct 2026 audit; on 5 Nov the state listed about 3,460
+  Expired UNL purchase orders beginning since 1 Aug that the data lacked, and about 340 at
+  UNK. Since 5 Nov 2026 the nightly also sweeps the Expired purchase orders of every
+  higher-education entity and appends the ones it has never held, and a one-time catch-up
+  read them back to 1 Aug 2026 (see "Daily updates"). Contracts and state-agency records
+  are not swept; the 13 Oct audit put about 90% of the loss in University purchase orders,
+  so a contract or state record first published already ended can still be missing.
 - **A stretch of the state's own data is nearly empty, and some old Expired rows here may
   no longer exist there.** Very few records end between May 2020 and early August 2021 —
   about 50 purchase orders in those fifteen months, against about 2,300 a month normally —
@@ -525,14 +531,32 @@ and `build_site.py`'s entity guard match on that exact string.
 The full scrape is a one-time job. Day to day the state mostly adds records under
 `Status=Active`, only ~7.3% of pages, so `--daily` re-scans just that status and diffs it
 against what the CSV already knows, matched on `Detail URL`. "Mostly" is the catch: a
-record the state publishes already ended is born `Expired`, never appears in that list
-and is never collected (see the caveats and "Open work"):
+record the state publishes already ended is born `Expired` and never appears in that
+list. For purchase orders, where that is common, a sweep reads the Expired search too:
 
 ```bash
 python3 scripts/scrape.py contract --daily
 python3 scripts/scrape.py purchase-order --daily
 python3 scripts/scrape.py state --daily
+python3 scripts/scrape.py purchase-order --sweep-expired        # the last 35 days
+python3 scripts/scrape.py purchase-order --sweep-expired 2026-08-01   # a catch-up
 ```
+
+The sweep reads each entity's Expired search newest-first by Begin Date, appends every
+record whose `Detail URL` the CSV has never held, under any Status, and stops at the first
+page that begins before its window. It never touches a row the CSV already holds and
+stamps nothing. Two things it rests on, both checked against the live site on 5 Nov 2026:
+`sort=BeginDate&sortdir=DESC` is a true date order, newest first, and it holds page after
+page only if every request repeats it, because the pager's own links are a bare `?page=N`
+that falls back to the search's order. If a page arrives out of order the sweep stops with
+an `::error` rather than trust its stop rule. Each row it appends also goes into the flip
+ledger, the same as a record `--daily` itself flipped: a purchase order the state re-opens
+later then comes back as a return instead of counting as a stray toward a leak streak (see
+below). In `daily.yml` it runs after the three scrapes with a 15-minute budget and
+`continue-on-error`, so it cannot hold back the night's publish; a failed sweep turns the
+run red at the end instead. A run that runs out of time reports the entities it did not
+finish, and the next run picks them up, skipping what is already appended. For a
+catch-up, dispatch `daily.yml` with `sweep_since` set to the first Begin Date to read.
 
 An unseen record gets a detail fetch and a new row. A known record is rewritten only if
 its amount, vendor or dates moved (see "Amendments" below). A
@@ -1634,15 +1658,11 @@ descriptions specifically rather than text generally. The yield is known — the
 finds something to return in about 16–17% of the OCR'd documents — but a yield says
 nothing about whether what it returns is right.
 
-**Records the state publishes already ended are not collected.** The nightly searches
-`Status=Active` only, so a record that first appears `Expired` never enters the dataset
-(see the caveats): about one in four new University purchase orders is missing. The fix
-is an append-only Expired sweep of the four University purchase-order combos (UNMC, UNL,
-UNO, UNK; about 90% of the loss), ordered newest-first and stopping on Begin Date, plus a
-one-time catch-up for the late-Aug 2026 hole. It needs one manual check before any code:
-that the state's Expired search honours `sort=BeginDate&sortdir=DESC` as a true date sort
-that still holds on page 2 when the parameters are repeated on every request. Until then
-the caveat is the whole mitigation.
+**Contracts and state-agency records the state publishes already ended are not collected.**
+The Expired sweep (see "Daily updates") covers higher-education purchase orders, about 90%
+of the loss the 13 Oct 2026 audit measured. The same code takes `contract` or `state`, but
+the sort it rests on was checked only on purchase-order searches; check those first, and
+measure what is missing, before adding either to the nightly.
 
 **Change tracking records but does not publish.** `--daily` now writes every amendment
 to `data/changes.jsonl` and rewrites the row, so the site shows the current values (see

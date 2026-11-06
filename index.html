@@ -1292,6 +1292,9 @@
     return parseFloat(clean);
   }
 
+  // What the last apply() filtered and sorted by, and how many rows it kept.
+  var lastKey = null, lastCount = -1;
+
   function apply() {
     var q = $("q").value.trim().toLowerCase();
     term = q;
@@ -1369,8 +1372,17 @@
     // after scrolling down the full list drew from that old position, past the
     // end of a shorter result, so the table stayed empty under a count of
     // matches -- for minutes, at 7,000,000 px and "kiewit" -- and after a short
-    // scroll it settled on the last results instead of the first.
-    scroller.scrollTop = 0;
+    // scroll it settled on the last results instead of the first. Only a new
+    // list, though: a trailing space, a comma typed into an amount, or Reset
+    // with nothing set re-runs this on the same inputs, and must not throw the
+    // reader back to the top. The count is there for anything the inputs do
+    // not name: a list that changed under the same inputs still starts at its
+    // top.
+    var key = [q, ti, si, ei, mn, mx, d0, d1, onlyBadDates, descWant, dhit ? 1 : 0,
+               sortKey, sortDir].join("\u0001");
+    if (key !== lastKey || count !== lastCount) scroller.scrollTop = 0;
+    lastKey = key;
+    lastCount = count;
     render();
     summarize(total, odd);
     writeState();

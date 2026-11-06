@@ -10,9 +10,11 @@
 //   1. ?selftest=1 ends "all checks passed", with no page error on the way;
 //   2. the page loads with no page error and asks for nothing off this server, on a
 //      desktop and a phone viewport;
-//   3. a search made after scrolling halfway down the full list narrows the count and
-//      shows its first rows (fixed in Nov 2026: it drew from the old scroll position, past
-//      the end of the result, so the table stayed empty under the count), and Tab and
+//   3. a space typed into the empty search box leaves the table where the reader
+//      scrolled it, and a search made after scrolling halfway down the full list narrows
+//      the count and shows its first rows (fixed in Nov 2026: it drew from the old scroll
+//      position, past the end of the result, so the table stayed empty under the count;
+//      only a new list goes back to the top), and Tab and
 //      Enter open a row without dropping focus on the body (fixed in Oct 2026: every
 //      scroll re-rendered the focused row away);
 //   4. axe-core finds no WCAG 2.1 A or AA violation with a row open, on both viewports.
@@ -125,6 +127,14 @@ async function checkPage(browser, base, name) {
     return s.scrollTop;
   });
   await page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))));
+  // The same list again must not move: a space trims to the empty search the table already shows.
+  await page.fill("#q", " ");
+  await page.waitForTimeout(600);
+  const stayed = await page.$eval("#scroller", (s) => s.scrollTop);
+  if (stayed !== from) {
+    fail(`${name}: unchanged search`, `a space in the empty search box moved the table from ${from} px to ${stayed} px; ` +
+      "only a new list should start at its top");
+  }
   await page.fill("#q", "kiewit");
   await page.waitForFunction((was) => document.getElementById("count").textContent !== was,
     before, { timeout: 30000 }).catch(() => {});

@@ -1364,6 +1364,13 @@
     }
 
     view = out.subarray(0, count);
+    // A new list starts at its top. render() places rows by the scroll
+    // position, and until Nov 2026 only a sort click reset it: a search typed
+    // after scrolling down the full list drew from that old position, past the
+    // end of a shorter result, so the table stayed empty under a count of
+    // matches -- for minutes, at 7,000,000 px and "kiewit" -- and after a short
+    // scroll it settled on the last results instead of the first.
+    scroller.scrollTop = 0;
     render();
     summarize(total, odd);
     writeState();
@@ -3147,7 +3154,6 @@
         if (k === sortKey) sortDir = -sortDir; else { sortKey = k; sortDir = 1; }
         showSortIndicator();
         apply();
-        scroller.scrollTop = 0;
       });
     });
 

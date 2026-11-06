@@ -757,8 +757,9 @@ def test_an_older_expired_copy_beside_a_flipped_and_an_active_record_is_still_on
 
 def test_a_row_with_a_stray_extra_field_still_builds(monkeypatch, tmp_path, capsys):
     """csv.DictReader puts fields past the header in a list under None, which
-    cannot be hashed. Copies are compared on the named columns, so a stray comma
-    in one row neither stops the build nor makes its copy read as different."""
+    cannot be hashed. Copies are compared on the named columns, so a stray field
+    after the last one neither stops the build nor makes its copy read as
+    different. (scrape.py writes every row with csv.writer, which quotes commas.)"""
     payload = _build(monkeypatch, tmp_path, [
         _row("12", "Expired", "$1.00", "dn12") + ["stray"],
         _row("12", "Expired", "$1.00", "dn12"),

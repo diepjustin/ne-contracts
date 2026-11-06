@@ -124,6 +124,21 @@ def test_a_complete_last_line_without_a_newline_is_kept(logs):
     assert sorted(store) == ["a", "b", "z"]
 
 
+def test_an_unterminated_cached_log_ends_its_line_before_the_release_begins(logs):
+    """The cached log is written first, so its last line meets the release's first.
+    A complete entry missing only its newline -- a kill between the brace and the
+    newline -- would otherwise fuse with it into one broken line mid-file, where
+    load_documents halts and every build fails."""
+    release, cached, merged = logs
+    with open(cached, "wb") as f:
+        f.write(json.dumps(entry("b", 1, "2026-10-01")).encode() + b"\n" +
+                json.dumps(entry("c", 1, "2026-10-01")).encode())
+    write_log(release, [entry("a", 1, "2026-08-29"), entry("d", 1, "2026-08-29")])
+    store, counts = merged()
+    assert sorted(store) == ["a", "b", "c", "d"]
+    assert counts["release_only"] == 2
+
+
 @pytest.mark.parametrize("broken", ["release", "cached"])
 def test_a_broken_line_before_the_end_stops_the_merge(logs, broken, tmp_path):
     """Not a torn write: something rewrote the log, and the lines after it cannot be trusted."""

@@ -1074,28 +1074,31 @@ reads for its row.
 
 **`documents.jsonl.gz` rides on the same release**, for the same reason: it is the output
 of ~23 hours of detail fetches and will never be produced in CI. It is optional — a
-release without it builds with every row's document count unknown, and the page then
-claims nothing about any row, which is what a partly-finished backfill looks like anyway.
-**Re-upload it after any backfill sitting, or the site keeps publishing the coverage the
-release last carried.** That is the one way this can go quietly stale: the code will be
-live and correct while the data behind it is a sitting old.
+release without it builds from the cached nightly log alone, which since Nov 2026 holds
+every record the backfill does; only with neither is every row's document count unknown,
+and the page then claims nothing about any row. **Re-upload it after any backfill
+sitting**: the merge below lets a sitting's entries win wherever they are newer than the
+nightly's, but only once they are on the release.
 
 The build **merges** the release copy with the cached one rather than replacing it, and
 that is load-bearing. `--daily` writes an entry for every new record it finds, and
 `data/` round-trips through the Actions cache, so an earlier `--clobber` destroyed the
 document list of every record scraped since the release was cut — 2,118 within a day of
-shipping, growing nightly, while the site reported 99.7% and looked finished. The release
-is concatenated first so the cached log wins any key both hold, and records only one side
-has survive as unique keys. Until Nov 2026 the order was the reverse, with the release
-treated as the authoritative backfill. But `--daily` re-reads the document lists of
-amended, restored and swept records, so the cached log holds every key the 28-29 Aug
-backfill does and is newer wherever the two differ: release-last put the August list
-back on 936 records on 5 Nov, hiding 292 documents, usually the amendment itself. The
-release gets a final newline if it lacks one, because its last line now meets the
-cached log's first, and fused they would be one unparseable line in the middle of the
-file, which `load_documents` refuses to read past. An unterminated last line in the
-cached copy is dropped too, though it now ends the file, where `load_documents` would
-truncate it anyway.
+shipping, growing nightly, while the site reported 99.7% and looked finished.
+`scripts/merge_document_logs.py` writes the cached log through unchanged and then appends
+a release entry only for a record the cached log lacks, or one whose `seen` date is later
+than every cached entry for it (a tie goes to the cached entry), so `load_documents`'
+last-entry-wins fold lands on each record's newest list. Until Nov 2026 the merge was
+`cat cached release`, with the release treated as the authoritative backfill. But
+`--daily` re-reads the document lists of amended, restored and swept records, so on 5 Nov
+the cached log held every record the 28-30 Aug backfill does and was newer on 207 of
+them: release-last put the August list back on those, hiding 235 documents, usually the
+amendment itself. Putting the release first instead would fail the other way, letting
+older nightly reads beat a backfill sitting re-uploaded after them; going by date covers
+both. On the 5 Nov data the release added nothing and the merge was byte-identical to the
+cached log. A torn last line in either file is dropped with a note, since glued to the
+next file it would be one unparseable line in the middle of the result, which
+`load_documents` refuses to read past; a broken line anywhere else stops the build.
 
 **AI summaries** come the same way, from `ai-summaries-data` with the same fallback; both
 fixed tags are updated in place by the Mac job, and the build warns when either asset is
@@ -1239,8 +1242,8 @@ change on this side alone.
   `ne-contracts-hub-data-YYYY-MM-DD`, the America/Chicago date, carrying four gzipped
   assets: `nu_contracts.csv.gz`, `nu_purchase_orders.csv.gz`, `state_agencies.csv.gz` and
   `scrape_meta.json.gz`, plus `documents.jsonl.gz` when the nightly's `data/` has a document
-  log (on 5 Nov 2026 it held every record the 28-29 Aug backfill does, newer wherever the
-  two differed),
+  log (on 5 Nov 2026 it held every record the 28-30 Aug backfill does, and was newer on
+  207 of them),
   and since Oct 2026 `daily_state.tar.gz`: the amendment log and each dataset's flip
   ledger and leak streaks, for `seed-cache.yml` (see "Getting the data back"). ne-connect
   downloads it with the rest and has no use for it.

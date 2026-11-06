@@ -356,9 +356,9 @@ jobs:
               echo "::warning::$f missing -- skipping it in tonight's hub-data release"
             fi
           done
-          # The nightly's own document log. It holds every record the 28-29 Aug
+          # The nightly's own document log. It holds every record the 28-30 Aug
           # backfill (documents.jsonl.gz on the extraction-data release) does,
-          # and is newer wherever the two differ, because --daily re-reads the
+          # and on 5 Nov was newer on 207 of them, because --daily re-reads the
           # lists of amended, restored and swept records. Optional, so a data/
           # without it publishes the other four as before.
           if [ -f data/documents.jsonl ]; then

@@ -663,8 +663,9 @@ def test_an_empty_detail_url_is_never_a_record_to_match(tmp_path):
 
 def test_a_twin_is_only_dropped_for_a_row_that_is_published(tmp_path):
     """Two Active rows sharing a fingerprint are one row to main(), which keeps
-    the last. An Expired row matching only the first must stay, or its values
-    would leave the page entirely."""
+    the last, so only that row's values make an exact twin. An Expired row
+    matching the dropped first copy is no exact twin of anything published; its
+    Detail URL still makes it a stale twin of the row that is."""
     import csv
 
     path = tmp_path / "state.csv"
@@ -752,6 +753,18 @@ def test_an_older_expired_copy_beside_a_flipped_and_an_active_record_is_still_on
     ])
     assert sorted((r[0], payload["meta"]["statuses"][r[5]], r[2]) for r in payload["rows"]) == [
         ("10", "Expired", 2.0), ("11", "Active", 6.0)]
+
+
+def test_a_row_with_a_stray_extra_field_still_builds(monkeypatch, tmp_path, capsys):
+    """csv.DictReader puts fields past the header in a list under None, which
+    cannot be hashed. Copies are compared on the named columns, so a stray comma
+    in one row neither stops the build nor makes its copy read as different."""
+    payload = _build(monkeypatch, tmp_path, [
+        _row("12", "Expired", "$1.00", "dn12") + ["stray"],
+        _row("12", "Expired", "$1.00", "dn12"),
+    ])
+    assert payload["meta"]["count"] == 1
+    assert "(all identical to it: a resumed scrape redid a page)" in capsys.readouterr().out
 
 
 # --- "Last updated" ---------------------------------------------------------

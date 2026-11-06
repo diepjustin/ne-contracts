@@ -328,6 +328,15 @@ def twin_key(r):
     return tuple(r[c] for c in TWIN_COLUMNS)
 
 
+def copy_values(r):
+    """A hash of every column of a row, to tell identical copies from ones that differ.
+
+    Built from the named columns, not r.values(): a row with more fields than the
+    header has its extras as a list under None, which cannot be hashed.
+    """
+    return hash(twin_key(r) + (r["Status"],))
+
+
 def copies(paths):
     """(for each fingerprint_key, the ordinal of the row the build keeps and a hash
     of its values; twin_key of every Active row the build keeps; the Detail URLs of
@@ -357,7 +366,7 @@ def copies(paths):
         with open(path, newline="", encoding="utf-8") as f:
             for r in csv.DictReader(f):
                 fingerprint = fingerprint_key(r)
-                kept[fingerprint] = (ordinal, hash(tuple(r.values())))
+                kept[fingerprint] = (ordinal, copy_values(r))
                 ordinal += 1
                 if r["Status"] == "Active":
                     active[fingerprint] = (twin_key(r), r["Detail URL"])
@@ -489,7 +498,7 @@ def main():
                 keep, values = kept[fingerprint_key(r)]
                 if keep != ordinal:
                     duplicates += 1
-                    if hash(tuple(r.values())) != values:
+                    if copy_values(r) != values:
                         changed += 1
                     continue
 

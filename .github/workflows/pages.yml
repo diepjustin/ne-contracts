@@ -207,10 +207,17 @@ jobs:
           # 2,118 of them within a day of shipping, growing nightly, while the
           # site went on reporting 99.7% and looking finished.
           #
-          # Order matters: the cached file goes first so the release wins on any
-          # key both hold, since load_documents folds last-entry-wins and the
-          # release is the authoritative backfill. Records only the nightly has
-          # seen are unique keys and survive either way.
+          # Order matters: the release goes first so the cached log wins on any
+          # key both hold, since load_documents folds last-entry-wins. Until
+          # Nov 2026 it was the other way round, on the reasoning that the
+          # release was the authoritative backfill. It stopped being so once
+          # --daily began re-reading the document lists of amended, restored
+          # and swept records: the cached log now holds every key the 28-29 Aug
+          # backfill does, and is newer wherever the two differ. Release-last
+          # put the August list back on 936 such records, hiding 292 documents
+          # the state had added since, usually the amendment itself. The
+          # release still fills any key a cached log lacks, such as one rebuilt
+          # from a seed that carried no document log.
           fetch --asset documents.jsonl.gz
           cached=data/documents.jsonl
           if [ -f data/documents.jsonl.gz ]; then
@@ -218,10 +225,9 @@ jobs:
             if [ -f "$cached" ]; then
               keep=data/documents.cached.jsonl
               mv "$cached" "$keep"
-              # A CI run killed mid-write leaves a partial last line. Glued to
-              # the release's first line it becomes a broken line in the middle
-              # of the file, which load_documents refuses to read past --
-              # correctly, but it would fail every build from then on.
+              # A CI run killed mid-write leaves a partial last line. It now
+              # ends the merged file, where load_documents would truncate it
+              # anyway; dropping it here keeps that true whatever the order.
               if [ -s "$keep" ] && [ -n "$(tail -c1 "$keep")" ]; then
                 echo "cached document log ends mid-write; dropping its last line"
                 sed -i '$d' "$keep"
@@ -229,7 +235,14 @@ jobs:
             fi
             gunzip -f data/documents.jsonl.gz
             if [ -n "$keep" ]; then
-              cat "$keep" "$cached" > data/documents.merged.jsonl
+              # The release now comes first, so its last line meets the cached
+              # log's first. Unterminated, the two would fuse into one broken
+              # line in the middle of the file, which load_documents refuses to
+              # read past -- correctly, but it would fail every build.
+              if [ -s "$cached" ] && [ -n "$(tail -c1 "$cached")" ]; then
+                echo >> "$cached"
+              fi
+              cat "$cached" "$keep" > data/documents.merged.jsonl
               mv data/documents.merged.jsonl "$cached"
               rm -f "$keep"
             fi

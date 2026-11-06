@@ -391,8 +391,9 @@ run missed while it slept fires at the next wake, which can be mid-morning. The 
 more than OCR. It first downloads that day's `ne-contracts-hub-data-<date>` release (the
 CSVs and `scrape_meta.json` the GitHub nightly published at about 03:17) instead of
 scraping its own copy, which had drifted from what the site shows; `--local-scrape` still
-scrapes instead. That release carries no `documents.jsonl`, so the Mac's own build calls
-the document count of newer records unknown, which nothing it feeds depends on. Then come
+scrapes instead. It takes only those four files, not the release's `documents.jsonl.gz`,
+so the Mac's own build calls the document count of newer records unknown, which nothing
+it feeds depends on. Then come
 `build_site.py`, a prune of every `d/` build but the current one, `extract_text.py`,
 `extract_scope.py`, `ocr_pilot.py` and `generate_ai_summaries.py`.
 
@@ -1083,13 +1084,18 @@ The build **merges** the release copy with the cached one rather than replacing 
 that is load-bearing. `--daily` writes an entry for every new record it finds, and
 `data/` round-trips through the Actions cache, so an earlier `--clobber` destroyed the
 document list of every record scraped since the release was cut — 2,118 within a day of
-shipping, growing nightly, while the site reported 99.7% and looked finished. The cached
-file is concatenated first so the release wins any key both hold (it is the authoritative
-backfill) while records only the nightly has seen survive as unique keys. An unterminated
-last line in the cached copy is dropped first: fused to the release's first line it
-becomes one unparseable line in the middle of the file, which `load_documents` refuses to
-read past — and if the release were ever a single line, that fusion would instead be
-silently truncated, taking a real record with it.
+shipping, growing nightly, while the site reported 99.7% and looked finished. The release
+is concatenated first so the cached log wins any key both hold, and records only one side
+has survive as unique keys. Until Nov 2026 the order was the reverse, with the release
+treated as the authoritative backfill. But `--daily` re-reads the document lists of
+amended, restored and swept records, so the cached log holds every key the 28-29 Aug
+backfill does and is newer wherever the two differ: release-last put the August list
+back on 936 records on 5 Nov, hiding 292 documents, usually the amendment itself. The
+release gets a final newline if it lacks one, because its last line now meets the
+cached log's first, and fused they would be one unparseable line in the middle of the
+file, which `load_documents` refuses to read past. An unterminated last line in the
+cached copy is dropped too, though it now ends the file, where `load_documents` would
+truncate it anyway.
 
 **AI summaries** come the same way, from `ai-summaries-data` with the same fallback; both
 fixed tags are updated in place by the Mac job, and the build warns when either asset is
@@ -1233,7 +1239,8 @@ change on this side alone.
   `ne-contracts-hub-data-YYYY-MM-DD`, the America/Chicago date, carrying four gzipped
   assets: `nu_contracts.csv.gz`, `nu_purchase_orders.csv.gz`, `state_agencies.csv.gz` and
   `scrape_meta.json.gz`, plus `documents.jsonl.gz` when the nightly's `data/` has a document
-  log (the entries `--daily` has written since the cache was seeded, not the full backfill),
+  log (on 5 Nov 2026 it held every record the 28-29 Aug backfill does, newer wherever the
+  two differed),
   and since Oct 2026 `daily_state.tar.gz`: the amendment log and each dataset's flip
   ledger and leak streaks, for `seed-cache.yml` (see "Getting the data back"). ne-connect
   downloads it with the rest and has no use for it.

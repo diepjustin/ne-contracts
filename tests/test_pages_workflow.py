@@ -48,8 +48,14 @@ def test_each_asset_comes_from_its_fixed_release_then_the_extraction_release():
     assert "python3 scripts/fetch_release_asset.py" in FETCH
 
 
-def test_the_document_log_is_still_merged_cached_first():
-    assert 'cat "$keep" "$cached" > data/documents.merged.jsonl' in FETCH
+def test_the_document_log_is_merged_release_first_so_the_nightly_wins():
+    """load_documents keeps the last entry per record, and the cached nightly log is
+    the newer one wherever the two differ: --daily re-reads the document lists of
+    amended, restored and swept records. Release-last hid 292 documents on 5 Nov."""
+    assert 'cat "$cached" "$keep" > data/documents.merged.jsonl' in FETCH
+    assert 'cat "$keep" "$cached"' not in FETCH
+    assert FETCH.index('echo >> "$cached"') < FETCH.index('cat "$cached" "$keep"'), \
+        "an unterminated release would fuse its last line with the cached log's first"
     assert FETCH.index('mv "$cached" "$keep"') < FETCH.index("gunzip -f data/documents.jsonl.gz"), \
         "gunzip writes data/documents.jsonl, so the cached copy has to move out of the way first"
     assert "sed -i '$d' \"$keep\"" in FETCH, "a torn last line in the cached log is dropped"

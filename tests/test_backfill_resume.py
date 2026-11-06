@@ -334,61 +334,85 @@ def test_ps_failing_is_reported_as_unknown_not_as_absence(monkeypatch):
 # reported 99.7% and looked finished. The shell there cannot be unit-tested;
 # the ordering it depends on can be, and is the whole reason it works.
 
-def test_cached_first_then_release_keeps_both_kinds_of_row(tmp_path):
-    """Release wins where both know a record; nightly-only records survive.
+def test_release_first_then_cached_keeps_both_kinds_of_row(tmp_path):
+    """The nightly wins where both know a record; release-only records survive.
 
-    The release is the authoritative backfill, so it goes last and wins any key
-    both hold. Records only the nightly has seen are unique keys, so they come
-    through regardless -- which is the point of merging at all."""
+    Until Nov 2026 the release went last, as the authoritative backfill. But
+    --daily re-reads the document list of every amended, restored or swept
+    record, so on any key both hold the cached entry is the newer one -- on
+    5 Nov, 936 records, 292 documents the release-last order hid. Records only
+    one side has are unique keys and come through regardless, which is the
+    point of merging at all."""
     cached = tmp_path / "cached.jsonl"
     release = tmp_path / "release.jsonl"
     merged = tmp_path / "documents.jsonl"
 
-    write_log(cached, [
-        {"k": "shared", "doc": "D1", "entity": "E", "n": 1, "seen": "2026-08-17"},
-        {"k": "nightly-only", "doc": "D9", "entity": "E", "n": 2, "seen": "2026-08-30"},
-    ])
     write_log(release, [
-        {"k": "shared", "doc": "D1", "entity": "E", "n": 5, "seen": "2026-08-30"},
-        {"k": "backfilled", "doc": "D3", "entity": "E", "n": 3, "seen": "2026-08-30"},
+        {"k": "shared", "doc": "D1", "entity": "E", "n": 1, "seen": "2026-08-29"},
+        {"k": "backfilled", "doc": "D3", "entity": "E", "n": 3, "seen": "2026-08-29"},
     ])
-    merged.write_bytes(cached.read_bytes() + release.read_bytes())
+    write_log(cached, [
+        {"k": "shared", "doc": "D1", "entity": "E", "n": 1, "seen": "2026-08-29"},
+        {"k": "nightly-only", "doc": "D9", "entity": "E", "n": 2, "seen": "2026-09-30"},
+        {"k": "shared", "doc": "D1", "entity": "E", "n": 2, "seen": "2026-10-14"},  # amended
+    ])
+    merged.write_bytes(release.read_bytes() + cached.read_bytes())
 
     store = scrape.load_documents(str(merged))
     assert sorted(store) == ["backfilled", "nightly-only", "shared"]
-    assert store["shared"]["n"] == 5          # the release is authoritative
-    assert store["nightly-only"]["n"] == 2    # and the nightly's find survives
+    assert store["shared"]["n"] == 2          # the amendment the nightly re-read
+    assert store["nightly-only"]["n"] == 2    # the nightly's find survives
+    assert store["backfilled"]["n"] == 3      # and so does the release's
 
 
-def test_a_torn_cached_log_would_poison_the_merge_if_not_trimmed(tmp_path):
-    """Why pages.yml drops an unterminated last line before concatenating.
+def test_an_unterminated_release_would_poison_the_merge_if_not_terminated(tmp_path):
+    """Why pages.yml ends the release with a newline before concatenating.
 
-    A CI run killed mid-write leaves a partial line with no newline. Glue the
-    release straight onto it and the two fuse into one unparseable line. With a
-    release of any real size -- production carries 741,652 lines -- that line
-    lands in the *middle* of the file, where load_documents halts rather than
-    reading past it. Correct, and it would fail every build until someone went
-    looking.
-
-    Worth knowing the other shape too: were the release a single line, the
-    fused line would be the file's last, and load_documents would quietly
-    truncate it -- taking a real record with it and failing nothing at all."""
+    The release now comes first, so its last line meets the cached log's first.
+    Without a newline between them the two fuse into one unparseable line in the
+    *middle* of the file -- the cached log carries ~767,000 lines -- where
+    load_documents halts rather than reading past it. Correct, and it would fail
+    every build until someone went looking."""
     cached = tmp_path / "cached.jsonl"
     release = tmp_path / "release.jsonl"
     merged = tmp_path / "documents.jsonl"
 
-    cached.write_bytes(
+    release.write_bytes(
         json.dumps({"k": "aaa", "doc": "D1", "entity": "E", "n": 1}).encode() + b"\n"
-        + b'{"k": "torn", "doc": "D2"')          # killed here, no newline
-    write_log(release, [{"k": "bbb", "doc": "D3", "entity": "E", "n": 1},
-                        {"k": "ccc", "doc": "D4", "entity": "E", "n": 2}])
+        + json.dumps({"k": "bbb", "doc": "D2", "entity": "E", "n": 1}).encode())  # no newline
+    write_log(cached, [{"k": "ccc", "doc": "D3", "entity": "E", "n": 1},
+                       {"k": "ddd", "doc": "D4", "entity": "E", "n": 2}])
 
-    merged.write_bytes(cached.read_bytes() + release.read_bytes())
+    merged.write_bytes(release.read_bytes() + cached.read_bytes())
     with pytest.raises(SystemExit):
         scrape.load_documents(str(merged))
 
-    # Trimmed the way the workflow trims it, the merge reads cleanly.
+    # Terminated the way the workflow terminates it, the merge reads cleanly.
+    release.write_bytes(release.read_bytes() + b"\n")
+    merged.write_bytes(release.read_bytes() + cached.read_bytes())
+    assert sorted(scrape.load_documents(str(merged))) == ["aaa", "bbb", "ccc", "ddd"]
+
+
+def test_a_torn_cached_log_ends_the_merge_and_costs_only_its_partial_line(tmp_path):
+    """A CI run killed mid-write leaves a partial last line in the cached log.
+
+    pages.yml drops it before merging. Even if it did not, it would now be the
+    merged file's last line, which load_documents truncates rather than
+    halting on -- that record is simply read again by a later night."""
+    cached = tmp_path / "cached.jsonl"
+    release = tmp_path / "release.jsonl"
+    merged = tmp_path / "documents.jsonl"
+
+    write_log(release, [{"k": "aaa", "doc": "D1", "entity": "E", "n": 1}])
+    cached.write_bytes(
+        json.dumps({"k": "bbb", "doc": "D2", "entity": "E", "n": 1}).encode() + b"\n"
+        + b'{"k": "torn", "doc": "D3"')          # killed here, no newline
+
+    merged.write_bytes(release.read_bytes() + cached.read_bytes())
+    assert sorted(scrape.load_documents(str(merged))) == ["aaa", "bbb"]
+
+    # Trimmed the way the workflow trims it, nothing is lost but the partial line.
     lines = cached.read_bytes().split(b"\n")
     cached.write_bytes(b"\n".join(lines[:-1]) + b"\n")
-    merged.write_bytes(cached.read_bytes() + release.read_bytes())
-    assert sorted(scrape.load_documents(str(merged))) == ["aaa", "bbb", "ccc"]
+    merged.write_bytes(release.read_bytes() + cached.read_bytes())
+    assert sorted(scrape.load_documents(str(merged))) == ["aaa", "bbb"]

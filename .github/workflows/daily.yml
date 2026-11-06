@@ -356,10 +356,11 @@ jobs:
               echo "::warning::$f missing -- skipping it in tonight's hub-data release"
             fi
           done
-          # The nightly's own document log: one entry per record --daily has
-          # found since the cache was seeded, not the full backfill (that is
-          # documents.jsonl.gz on the extraction-data release). Optional, so
-          # a data/ without it publishes the other four as before.
+          # The nightly's own document log. It holds every record the 28-29 Aug
+          # backfill (documents.jsonl.gz on the extraction-data release) does,
+          # and is newer wherever the two differ, because --daily re-reads the
+          # lists of amended, restored and swept records. Optional, so a data/
+          # without it publishes the other four as before.
           if [ -f data/documents.jsonl ]; then
             gzip -c data/documents.jsonl > release/documents.jsonl.gz
           fi

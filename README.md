@@ -82,7 +82,7 @@ The scraper reproduces the state's records faithfully, including their errors.
 - **Purchase orders are not a Higher Education thing, even though the site makes them
   look like one.** The search form only offers a Contract/Purchase Order filter for
   Higher Education, so on the agency side the distinction is invisible — but it is in
-  the records. Ten of the 32 agency document-type codes (`O9`, `OM`, `OP`, `X7`, `Y6`,
+  the records. Ten of the 33 agency document-type codes (`O9`, `OM`, `OP`, `X7`, `Y6`,
   `Y7`, `Z8`, `Z9`, `ZO`, `ZP`) are filed under "Purchase Orders", covering 152,210
   records, about 65% of agency data. Overall the dataset is 619,601 purchase orders to
   118,594 contracts — the reverse of what the interface implies.
@@ -391,8 +391,9 @@ run missed while it slept fires at the next wake, which can be mid-morning. The 
 more than OCR. It first downloads that day's `ne-contracts-hub-data-<date>` release (the
 CSVs and `scrape_meta.json` the GitHub nightly published at about 03:17) instead of
 scraping its own copy, which had drifted from what the site shows; `--local-scrape` still
-scrapes instead. That release carries no `documents.jsonl`, so the Mac's own build calls
-the document count of newer records unknown, which nothing it feeds depends on. Then come
+scrapes instead. It takes only those four files, not the release's `documents.jsonl.gz`,
+so the Mac's own build calls the document count of newer records unknown, which nothing
+it feeds depends on. Then come
 `build_site.py`, a prune of every `d/` build but the current one, `extract_text.py`,
 `extract_scope.py`, `ocr_pilot.py` and `generate_ai_summaries.py`.
 
@@ -1073,23 +1074,31 @@ reads for its row.
 
 **`documents.jsonl.gz` rides on the same release**, for the same reason: it is the output
 of ~23 hours of detail fetches and will never be produced in CI. It is optional — a
-release without it builds with every row's document count unknown, and the page then
-claims nothing about any row, which is what a partly-finished backfill looks like anyway.
-**Re-upload it after any backfill sitting, or the site keeps publishing the coverage the
-release last carried.** That is the one way this can go quietly stale: the code will be
-live and correct while the data behind it is a sitting old.
+release without it builds from the cached nightly log alone, which since Nov 2026 holds
+every record the backfill does; only with neither is every row's document count unknown,
+and the page then claims nothing about any row. **Re-upload it after any backfill
+sitting**: the merge below lets a sitting's entries win wherever they are newer than the
+nightly's, but only once they are on the release.
 
 The build **merges** the release copy with the cached one rather than replacing it, and
 that is load-bearing. `--daily` writes an entry for every new record it finds, and
 `data/` round-trips through the Actions cache, so an earlier `--clobber` destroyed the
 document list of every record scraped since the release was cut — 2,118 within a day of
-shipping, growing nightly, while the site reported 99.7% and looked finished. The cached
-file is concatenated first so the release wins any key both hold (it is the authoritative
-backfill) while records only the nightly has seen survive as unique keys. An unterminated
-last line in the cached copy is dropped first: fused to the release's first line it
-becomes one unparseable line in the middle of the file, which `load_documents` refuses to
-read past — and if the release were ever a single line, that fusion would instead be
-silently truncated, taking a real record with it.
+shipping, growing nightly, while the site reported 99.7% and looked finished.
+`scripts/merge_document_logs.py` writes the cached log through unchanged and then appends
+a release entry only for a record the cached log lacks, or one whose `seen` date is later
+than every cached entry for it (a tie goes to the cached entry), so `load_documents`'
+last-entry-wins fold lands on each record's newest list. Until Nov 2026 the merge was
+`cat cached release`, with the release treated as the authoritative backfill. But
+`--daily` re-reads the document lists of amended, restored and swept records, so on 5 Nov
+the cached log held every record the 28-30 Aug backfill does and was newer on 207 of
+them: release-last put the August list back on those, hiding 235 documents, usually the
+amendment itself. Putting the release first instead would fail the other way, letting
+older nightly reads beat a backfill sitting re-uploaded after them; going by date covers
+both. On the 5 Nov data the release added nothing and the merge was byte-identical to the
+cached log. A torn last line in either file is dropped with a note, since glued to the
+next file it would be one unparseable line in the middle of the result, which
+`load_documents` refuses to read past; a broken line anywhere else stops the build.
 
 **AI summaries** come the same way, from `ai-summaries-data` with the same fallback; both
 fixed tags are updated in place by the Mac job, and the build warns when either asset is
@@ -1233,7 +1242,8 @@ change on this side alone.
   `ne-contracts-hub-data-YYYY-MM-DD`, the America/Chicago date, carrying four gzipped
   assets: `nu_contracts.csv.gz`, `nu_purchase_orders.csv.gz`, `state_agencies.csv.gz` and
   `scrape_meta.json.gz`, plus `documents.jsonl.gz` when the nightly's `data/` has a document
-  log (the entries `--daily` has written since the cache was seeded, not the full backfill),
+  log (on 5 Nov 2026 it held every record the 28-30 Aug backfill does, and was newer on
+  207 of them),
   and since Oct 2026 `daily_state.tar.gz`: the amendment log and each dataset's flip
   ledger and leak streaks, for `seed-cache.yml` (see "Getting the data back"). ne-connect
   downloads it with the rest and has no use for it.

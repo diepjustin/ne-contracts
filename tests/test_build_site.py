@@ -663,8 +663,9 @@ def test_an_empty_detail_url_is_never_a_record_to_match(tmp_path):
 
 def test_a_twin_is_only_dropped_for_a_row_that_is_published(tmp_path):
     """Two Active rows sharing a fingerprint are one row to main(), which keeps
-    the first. An Expired row matching only the second must stay, or its
-    values would leave the page entirely."""
+    the last, so only that row's values make an exact twin. An Expired row
+    matching the dropped first copy is no exact twin of anything published; its
+    Detail URL still makes it a stale twin of the row that is."""
     import csv
 
     path = tmp_path / "state.csv"
@@ -677,8 +678,94 @@ def test_a_twin_is_only_dropped_for_a_row_that_is_published(tmp_path):
 
     first = dict(zip(header, _row("7", "Expired", "$1.00", "dn7")))
     second = dict(zip(header, _row("7", "Expired", "$2.00", "dn7")))
-    assert build_site.twin_key(first) in keys
-    assert build_site.twin_key(second) not in keys
+    assert build_site.twin_key(first) not in keys
+    assert build_site.twin_key(second) in keys
+
+
+# --- two Expired copies of one record ---------------------------------------
+#
+# The n14 rule drops an older Expired copy only while the record's current copy
+# is Active. Once --daily flips that copy to Expired too, the two share a
+# fingerprint, and until Nov 2026 the build kept the first -- the older one --
+# and logged the newer as a resumed scrape's repeat. On 5 Nov 2026 that was 73
+# records, $2.8M low.
+
+def _ending(row, end):
+    row[7] = end
+    return row
+
+
+def test_of_two_expired_copies_of_one_record_the_newest_is_published(monkeypatch, tmp_path, capsys):
+    """Correctional Services 112349 on 5 Nov 2026: the site showed
+    $10,868,900.25 ending 08/31/2026, the first copy in the CSV, while the copy
+    --daily appended later and has since flipped said $12,818,898.27 ending
+    10/31/2026."""
+    (tmp_path / "alone").mkdir()
+    (tmp_path / "both").mkdir()
+    newest = _build(monkeypatch, tmp_path / "alone", [
+        _ending(_row("112349", "Expired", "$12,818,898.27", "dn1"), "10/31/2026")])
+    capsys.readouterr()
+    payload = _build(monkeypatch, tmp_path / "both", [
+        _ending(_row("112349", "Expired", "$10,868,900.25", "dn1"), "08/31/2026"),
+        _ending(_row("112349", "Expired", "$12,818,898.27", "dn1"), "10/31/2026"),
+    ])
+
+    assert payload["meta"]["count"] == 1
+    (published,) = payload["rows"]
+    assert published[2] == 12818898.27
+    assert published == newest["rows"][0], "the newest copy, end date and all"
+    out = capsys.readouterr().out
+    assert "duplicate rows: 1 dropped, the newest copy of each record kept (1 differ from it" in out
+    assert "resumed scrape" not in out
+
+
+def test_the_newest_copy_wins_across_more_than_two(monkeypatch, tmp_path, capsys):
+    payload = _build(monkeypatch, tmp_path, [
+        _row("5", "Expired", "$1.00", "dn5"),
+        _row("6", "Active", "$9.00", "dn6"),
+        _row("5", "Expired", "$2.00", "dn5"),
+        _row("5", "Expired", "$3.00", "dn5"),
+    ])
+    assert sorted(r[2] for r in payload["rows"]) == [3.0, 9.0]
+    assert "duplicate rows: 2 dropped" in capsys.readouterr().out
+
+
+def test_identical_copies_still_read_as_a_resumed_scrape(monkeypatch, tmp_path, capsys):
+    payload = _build(monkeypatch, tmp_path, [
+        _row("8", "Expired", "$8.00", "dn8"),
+        _row("8", "Expired", "$8.00", "dn8"),
+    ])
+    assert payload["meta"]["count"] == 1
+    assert "1 dropped, the newest copy of each record kept (all identical to it: " \
+        "a resumed scrape redid a page)" in capsys.readouterr().out
+
+
+def test_an_older_expired_copy_beside_a_flipped_and_an_active_record_is_still_one_row(
+        monkeypatch, tmp_path):
+    """Both rules at once: an Expired copy dropped as the older of two Expired
+    copies never counts as a stale twin of some Active row too, and an Active
+    record keeps its stale-twin protection."""
+    payload = _build(monkeypatch, tmp_path, [
+        _row("10", "Expired", "$1.00", "dn10"),
+        _row("11", "Expired", "$5.00", "dn11"),
+        _row("10", "Expired", "$2.00", "dn10"),
+        _row("11", "Active", "$6.00", "dn11"),
+    ])
+    assert sorted((r[0], payload["meta"]["statuses"][r[5]], r[2]) for r in payload["rows"]) == [
+        ("10", "Expired", 2.0), ("11", "Active", 6.0)]
+
+
+def test_a_row_with_a_stray_extra_field_still_builds(monkeypatch, tmp_path, capsys):
+    """csv.DictReader puts fields past the header in a list under None, which
+    cannot be hashed. Copies are compared on the named columns, so a stray field
+    after the last one neither stops the build nor makes its copy read as
+    different. (scrape.py writes every row with csv.writer, which quotes commas.)"""
+    payload = _build(monkeypatch, tmp_path, [
+        _row("12", "Expired", "$1.00", "dn12") + ["stray"],
+        _row("12", "Expired", "$1.00", "dn12"),
+    ])
+    assert payload["meta"]["count"] == 1
+    assert "(all identical to it: a resumed scrape redid a page)" in capsys.readouterr().out
 
 
 # --- "Last updated" ---------------------------------------------------------

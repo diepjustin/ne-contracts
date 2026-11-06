@@ -61,7 +61,7 @@
 #     scripts/run_ocr_catchup.sh --local-scrape  # scrape instead of download
 #     scripts/run_ocr_catchup.sh --dry-run       # print the steps, run nothing
 set -uo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/.." || exit 1
 # Appended, not prepended: launchd's PATH lacks Homebrew (gh, ollama), and
 # anything already on PATH -- a test's stand-ins -- should win over it.
 export PATH="$PATH:/opt/homebrew/bin"

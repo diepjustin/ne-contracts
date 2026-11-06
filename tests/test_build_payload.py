@@ -550,10 +550,11 @@ def test_a_detail_url_on_another_host_leaves_the_last_good_build_published(site)
 def test_a_verify_that_crashes_rather_than_exits_does_not_publish_either(site):
     """A DN token shorter than 16 bytes is written unpadded and read_token_blocks raises a
     bare ValueError inside verify_payload (build-04 item c). Whatever the eventual fix,
-    the manifest must not already name the build by then."""
+    the manifest must not already name the build by then. Today it is that ValueError; a fix
+    that turns it into a refusal exits instead, and either way nothing is published."""
     site.write(state=thousand(odd=1, size=12))
     previous = publish_previous_build(site)
-    with pytest.raises(Exception):
+    with pytest.raises((ValueError, SystemExit)):
         site.build()
     assert manifest_bytes(site) == previous
 

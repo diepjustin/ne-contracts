@@ -10,8 +10,13 @@
 //   1. ?selftest=1 ends "all checks passed", with no page error on the way;
 //   2. the page loads with no page error and asks for nothing off this server, on a
 //      desktop and a phone viewport;
-//   3. a search narrows the count, and Tab and Enter open a row without dropping focus
-//      on the body (fixed in Oct 2026: every scroll re-rendered the focused row away);
+//   3. a space typed into the empty search box leaves the table where the reader
+//      scrolled it, and a search made after scrolling halfway down the full list narrows
+//      the count and shows its first rows (fixed in Nov 2026: it drew from the old scroll
+//      position, past the end of the result, so the table stayed empty under the count;
+//      only a new list goes back to the top), and Tab and
+//      Enter open a row without dropping focus on the body (fixed in Oct 2026: every
+//      scroll re-rendered the focused row away);
 //   4. axe-core finds no WCAG 2.1 A or AA violation with a row open, on both viewports.
 //
 // Each failure is a ::error line, and any of them exits 1. Needs playwright and
@@ -116,13 +121,40 @@ async function checkPage(browser, base, name) {
 
   const count = () => page.$eval("#count", (e) => e.textContent);
   const before = await count();
+  // Halfway down the full list first: a reader who drags the scrollbar and then searches.
+  const from = await page.$eval("#scroller", (s) => {
+    s.scrollTop = Math.floor((s.scrollHeight - s.clientHeight) / 2);
+    return s.scrollTop;
+  });
+  await page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))));
+  // The same list again must not move: a space trims to the empty search the table already shows.
+  await page.fill("#q", " ");
+  await page.waitForTimeout(600);
+  const stayed = await page.$eval("#scroller", (s) => s.scrollTop);
+  if (stayed !== from) {
+    fail(`${name}: unchanged search`, `a space in the empty search box moved the table from ${from} px to ${stayed} px; ` +
+      "only a new list should start at its top");
+  }
   await page.fill("#q", "kiewit");
   await page.waitForFunction((was) => document.getElementById("count").textContent !== was,
     before, { timeout: 30000 }).catch(() => {});
   const after = await count();
   const shown = await page.$$eval("#rows tr[data-row]", (rows) => rows.length);
-  console.log(`${name}: search "kiewit": ${after}`);
+  console.log(`${name}: search "kiewit" from ${from} px down: ${after}`);
   if (after === before || !shown) fail(`${name}: search`, `"kiewit" left the count at "${after}" with ${shown} rows drawn`);
+  // Drawn is not enough: the rows have to be on screen, and they have to be the first.
+  const visible = await page.waitForFunction(() => {
+    const box = document.getElementById("scroller").getBoundingClientRect();
+    return Array.prototype.some.call(document.querySelectorAll("#rows tr[data-row]"), (tr) => {
+      const r = tr.getBoundingClientRect();
+      return r.height > 0 && r.bottom > box.top && r.top < box.bottom;
+    });
+  }, null, { timeout: 2000 }).then(() => true, () => false);
+  const top = await page.$eval("#scroller", (s) => s.scrollTop);
+  if (!visible || top !== 0) {
+    fail(`${name}: search after scrolling`, `"kiewit" from ${from} px down left ${visible ? "rows on screen" : "no row on screen"} ` +
+      `at scroll position ${top} px; a new result should start at its top`);
+  }
 
   const opens = await page.$("#rows tr[data-row][tabindex]");
   if (opens) {

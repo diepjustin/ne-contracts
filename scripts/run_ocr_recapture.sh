@@ -17,7 +17,7 @@
 # defaults, no separate step needed); this one is a finite backlog that
 # only needs to run until it drains, then never again.
 set -uo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/.." || exit 1
 export PATH="/opt/homebrew/bin:$PATH"
 
 echo "=== $(date) : OCR recapture (launchd) ==="

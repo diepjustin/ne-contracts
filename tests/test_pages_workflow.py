@@ -48,11 +48,15 @@ def test_each_asset_comes_from_its_fixed_release_then_the_extraction_release():
     assert "python3 scripts/fetch_release_asset.py" in FETCH
 
 
-def test_the_document_log_is_still_merged_cached_first():
-    assert 'cat "$keep" "$cached" > data/documents.merged.jsonl' in FETCH
-    assert FETCH.index('mv "$cached" "$keep"') < FETCH.index("gunzip -f data/documents.jsonl.gz"), \
-        "gunzip writes data/documents.jsonl, so the cached copy has to move out of the way first"
-    assert "sed -i '$d' \"$keep\"" in FETCH, "a torn last line in the cached log is dropped"
+def test_the_document_log_is_merged_newest_entry_first_not_by_file_order():
+    """Until Nov 2026 this was `cat cached release`, and the 28-30 Aug backfill beat the
+    nightly's re-reads on 207 records. merge_document_logs.py decides by each entry's
+    date; its own tests are in test_merge_document_logs.py."""
+    assert ('python3 scripts/merge_document_logs.py "$release" "$cached" '
+            'data/documents.merged.jsonl') in FETCH
+    assert 'mv data/documents.merged.jsonl "$cached"' in FETCH
+    assert not re.search(r"^\s*cat .*documents", FETCH, re.M), "no file-order merge is left"
+    assert 'mv "$release" "$cached"' in FETCH, "with no cached log the release is used alone"
 
 
 def test_every_asset_is_used_only_if_it_was_downloaded_now():

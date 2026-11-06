@@ -33,6 +33,7 @@ import csv
 import datetime
 import json
 import gzip
+import hashlib
 import math
 import os
 import random
@@ -298,10 +299,23 @@ def find_permalink_collision(docs, entity_column, type_column, view_tokens):
 def row_fingerprint(r):
     """What the build's duplicate check compares, for one CSV row as a dict.
 
-    A resumed scrape re-fetches a page, and its rows repeat on all five.
+    Rows that agree on all five are copies of one record in one status. A
+    resumed scrape re-fetching a page makes byte-identical ones; a record the
+    nightly flipped to Expired beside an older Expired copy of itself makes
+    ones that differ, and the later copy is the current one. See copies().
     """
     return (r["Document Number"], r["Entity Name"], r["Status"],
             r["Document Type"], r["Detail URL"])
+
+
+def fingerprint_key(r):
+    """row_fingerprint(r) as 16 bytes, which is what copies() holds for every row.
+
+    The tuple itself would keep each row's Detail URL alive a second time beside
+    the copy the main loop keeps, about 300 MB at 766k rows. repr() keeps the
+    five fields apart, so no two fingerprints can hash the same input.
+    """
+    return hashlib.blake2b(repr(row_fingerprint(r)).encode("utf-8"), digest_size=16).digest()
 
 
 # Every CSV column but Status. An Expired row that matches an Active row on all
@@ -314,32 +328,56 @@ def twin_key(r):
     return tuple(r[c] for c in TWIN_COLUMNS)
 
 
-def active_twin_keys(paths):
-    """(twin_key of every Active row the build keeps, the Detail URLs of those rows),
-    read in a pass of its own.
+def copy_values(r):
+    """A hash of every column of a row, to tell identical copies from ones that differ.
 
-    A pass of its own because of file order: --daily appends, so the Active
-    row of a pair sits after its Expired twin, and the main loop meets the
-    Expired one first. Only Active rows are held -- ~44k tuples, not 740k.
-    An Active row main() will drop as a duplicate is skipped here too, so an
-    Expired row is only ever dropped in favour of a row that is published.
-    A row with no Detail URL names no record, so it is never anyone's twin.
+    Built from the named columns, not r.values(): a row with more fields than the
+    header has its extras as a list under None, which cannot be hashed.
     """
-    keys = set()
-    urls = set()
-    kept = set()
+    return hash(twin_key(r) + (r["Status"],))
+
+
+def copies(paths):
+    """(for each fingerprint_key, the ordinal of the row the build keeps and a hash
+    of its values; twin_key of every Active row the build keeps; the Detail URLs of
+    those rows), read in a pass of its own.
+
+    The build keeps the *last* row of each fingerprint, and a pass of its own is
+    how it knows which that is: --daily appends, so file order is age order, and
+    the main loop meets a record's older copy first. Until Nov 2026 it kept the
+    first, on the reasoning that repeats were a resumed scrape's byte-identical
+    page. By then none were. The CSVs still hold Expired copies of records that
+    --daily appended again when they came back (n14), and once --daily flips the
+    current copy to Expired too, the pair share a fingerprint. Keeping the first
+    published the older amount and end date: on 5 Nov, 73 records and $2.8M low,
+    Correctional Services 112349 at $10,868,900.25 ending 08/31/2026 instead of
+    $12,818,898.27 ending 10/31/2026.
+
+    The ordinal counts rows across `paths` in order, from 0, which is how main()
+    walks them. Only Active rows are held for the twin rules. An Active row
+    main() drops as an older copy is skipped here too, so an Expired row is only
+    ever dropped in favour of a row that is published. A row with no Detail URL
+    names no record, so it is never anyone's twin.
+    """
+    kept = {}
+    active = {}
+    ordinal = 0
     for path in paths:
         with open(path, newline="", encoding="utf-8") as f:
             for r in csv.DictReader(f):
-                if r["Status"] != "Active":
-                    continue
-                fingerprint = row_fingerprint(r)
-                if fingerprint in kept:
-                    continue
-                kept.add(fingerprint)
-                keys.add(twin_key(r))
-                if r["Detail URL"]:
-                    urls.add(r["Detail URL"])
+                fingerprint = fingerprint_key(r)
+                kept[fingerprint] = (ordinal, copy_values(r))
+                ordinal += 1
+                if r["Status"] == "Active":
+                    active[fingerprint] = (twin_key(r), r["Detail URL"])
+    keys = {key for key, _url in active.values()}
+    urls = {url for _key, url in active.values() if url}
+    return kept, keys, urls
+
+
+def active_twin_keys(paths):
+    """(twin_key of every Active row the build keeps, the Detail URLs of those rows)."""
+    _kept, keys, urls = copies(paths)
     return keys, urls
 
 
@@ -424,12 +462,14 @@ def main():
 
     sources = []       # parallel to the columns: original URLs, for round-trip verification
 
-    # A scrape interrupted between writing a page and checkpointing it re-fetches
-    # that page on resume, so the CSV can hold one duplicated page (~25 rows).
-    # They are byte-identical, including the per-document DN token, so dropping
-    # exact repeats cannot lose a distinct record.
-    seen = set()
+    # Rows sharing a fingerprint are copies of one record, and only the last is
+    # published (see copies()). A resumed scrape makes byte-identical ones, but
+    # an older Expired copy beside a record the nightly has since flipped to
+    # Expired differs from it, and was published in its place until Nov 2026.
+    # `changed` counts dropped copies that differ from the one published, so
+    # the log says when that is what is being dropped.
     duplicates = 0
+    changed = 0
 
     # An Expired row with the same Detail URL as an Active row is the same
     # record listed twice. Until Oct 2026 --daily made these: a record missed
@@ -444,7 +484,8 @@ def main():
     # its own $313M), and the Active row is the current one: --daily now
     # rewrites an amended row and logs what moved to changes.jsonl, which is
     # where the history belongs, not in a second row the totals add up.
-    twin_keys, active_urls = active_twin_keys(DATA.values())
+    kept, twin_keys, active_urls = copies(DATA.values())
+    ordinal = -1
     twins = 0
     twin_amount = 0.0
     stale = 0
@@ -453,11 +494,13 @@ def main():
     for path in DATA.values():
         with open(path, newline="", encoding="utf-8") as f:
             for r in csv.DictReader(f):
-                fingerprint = row_fingerprint(r)
-                if fingerprint in seen:
+                ordinal += 1
+                keep, values = kept[fingerprint_key(r)]
+                if keep != ordinal:
                     duplicates += 1
+                    if copy_values(r) != values:
+                        changed += 1
                     continue
-                seen.add(fingerprint)
 
                 if r["Status"] == "Expired" and twin_key(r) in twin_keys:
                     twins += 1
@@ -535,6 +578,7 @@ def main():
 
                 sources.append((detail, view))
 
+    del kept  # 766k entries the rest of the build has no use for
     n = len(docs)
 
     # The u8 columns index dictionaries that are small today but not bounded by
@@ -635,7 +679,9 @@ def main():
 
     orig = sum(os.path.getsize(p) for p in DATA.values())
     if duplicates:
-        print(f"duplicate rows: {duplicates:,} dropped (a resumed scrape redid a page)")
+        print(f"duplicate rows: {duplicates:,} dropped, the newest copy of each record kept"
+              + (f" ({changed:,} differ from it: older amounts or dates of a record listed twice)"
+                 if changed else " (all identical to it: a resumed scrape redid a page)"))
     if twins:
         print(f"expired twins : {twins:,} dropped, ${twin_amount:,.2f} no longer counted twice "
               "(identical to an Active row with the same Detail URL)")

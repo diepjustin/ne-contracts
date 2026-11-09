@@ -54,7 +54,14 @@ exec "$FAKE_REAL_PYTHON" "$@"
 
 FAKE_GH = r"""#!/bin/bash
 echo "gh $*" >> "$FAKE_LOG"
-case "${FAKE_GH_MODE:-ok}" in
+mode="${FAKE_GH_MODE:-ok}"
+# FAKE_GH_LATE=N: the first N calls answer as FAKE_GH_LATE_MODE (default: not
+# published yet), the way the nightly's release appears partway through a wait.
+if [ -n "${FAKE_GH_LATE:-}" ]; then
+  calls=$(grep -c '^gh ' "$FAKE_LOG")
+  if [ "$calls" -le "$FAKE_GH_LATE" ]; then mode="${FAKE_GH_LATE_MODE:-missing}"; fi
+fi
+case "$mode" in
   missing) echo "release not found" >&2; exit 1 ;;
   network) echo "error connecting to api.github.com" >&2; exit 1 ;;
 esac
@@ -144,6 +151,8 @@ def job(tmp_path):
         "FAKE_RELEASE_DIR": str(release),
         "FAKE_OLLAMA_UP": str(tmp_path / "ollama-up"),
         "FAKE_LOCK_PROBE": str(tmp_path / "probe.py"),
+        # One try, no waiting, unless a test asks for the wait.
+        "NE_OCR_HUB_WAIT": "0",
     }
 
     def run(*args, **env):
@@ -208,6 +217,37 @@ def test_a_release_not_published_yet_exits_3_and_the_rest_still_runs(job):
     assert "not published yet" in out.stdout
     assert steps(job.status())["fetch"] == 3
     assert steps(job.status())["summaries"] == 0
+    for name in HUB_FILES:
+        assert (job.root / "data" / name).read_text() == "old " + name + "\n"
+
+
+def test_a_release_that_appears_during_the_wait_is_installed(job):
+    """6, 8 and 9 Nov 2026: the nightly's release landed at about 05:10, 04:37 and 05:45
+    Central, after this started at 04:30, and the whole run used the night
+    before's data. Now it waits, and every try asks for the same night."""
+    out = job.run(FAKE_GH_LATE="2", NE_OCR_HUB_WAIT="60", NE_OCR_HUB_POLL="0")
+    assert out.returncode == 0, out.stdout + out.stderr
+    gh = [c for c in job.calls if c.startswith("gh ")]
+    assert len(gh) == 3 and len(set(gh)) == 1
+    assert out.stdout.count("not published yet") == 2
+    assert steps(job.status())["fetch"] == 0
+    for name in HUB_FILES:
+        assert (job.root / "data" / name).read_text() == "fresh " + name + "\n"
+
+
+def test_a_download_that_fails_then_works_during_the_wait_is_installed(job):
+    out = job.run(FAKE_GH_LATE="1", FAKE_GH_LATE_MODE="network",
+                  NE_OCR_HUB_WAIT="60", NE_OCR_HUB_POLL="0")
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert (job.root / "data" / "nu_contracts.csv").read_text() == "fresh nu_contracts.csv\n"
+
+
+def test_when_the_wait_runs_out_it_carries_on_with_the_old_data_and_exits_3(job):
+    out = job.run(FAKE_GH_MODE="missing", NE_OCR_HUB_WAIT="1", NE_OCR_HUB_POLL="1")
+    assert out.returncode == 3
+    assert len([c for c in job.calls if c.startswith("gh ")]) >= 2
+    assert "still not published after waiting 1s" in out.stdout
+    assert steps(job.status())["summaries"] == 0, "the steps after it still run"
     for name in HUB_FILES:
         assert (job.root / "data" / name).read_text() == "old " + name + "\n"
 

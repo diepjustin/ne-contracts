@@ -7,7 +7,9 @@
 # pages.yml already states for extract_text.py: a heavy per-document download
 # "will never live in CI". So this runs locally instead, on this Mac, from a
 # launchd LaunchAgent (com.justindiep.ne-contracts.ocr-catchup, not in the
-# repo) at 04:30, after the GitHub nightly has published its data release.
+# repo) at 04:30. The GitHub nightly is scheduled for 03:17 UTC, but GitHub
+# has been starting it 6-8 hours late, so its data release lands between about
+# 04:20 and 05:45 Central -- often after this starts. Step 1 waits for it.
 #
 # launchd does not wake a sleeping Mac. A StartCalendarInterval job missed
 # while the Mac slept runs at the next wake instead, which can be mid-workday;
@@ -18,7 +20,11 @@
 # whatever changed since yesterday, never the whole corpus:
 #   1. fetch          -- today's ne-contracts-hub-data-<YYYY-MM-DD> release
 #                        (America/Chicago date): the CSVs and scrape_meta.json
-#                        the GitHub nightly just published, into data/. This
+#                        the GitHub nightly just published, into data/. It
+#                        waits up to 3 hours for the release to appear
+#                        (NE_OCR_HUB_WAIT, seconds; NE_OCR_HUB_POLL between
+#                        tries). Until Nov 2026 it tried once, and on 6, 8 and
+#                        9 Nov ran every step on the night before's data. This
 #                        Mac used to scrape its own copy, which drifted from
 #                        what the site shows (6,343 records only in CI's copy
 #                        on 22 Oct 2026) and kept the state's server busy for
@@ -51,10 +57,10 @@
 #     0   every step succeeded
 #     1   a step failed (the log says which)
 #     2   OCR or summaries ran, but more than half of tonight's items failed
-#     3   today's hub-data release is not published yet; the other steps ran
-#         on the data already here
-#     4   the release exists but could not be downloaded or is incomplete;
-#         nothing in data/ was replaced
+#     3   today's hub-data release was still not published when the wait ran
+#         out; the other steps ran on the data already here
+#     4   the release exists but could not be downloaded or is incomplete,
+#         still so when the wait ran out; nothing in data/ was replaced
 #    75   another run holds data/.ocr.lock; this one did nothing at all
 #
 #     scripts/run_ocr_catchup.sh                 # what launchd runs
@@ -72,12 +78,15 @@ STATUS_FILE="logs/ocr_status.json"
 HUB_FILES="nu_contracts.csv nu_purchase_orders.csv state_agencies.csv scrape_meta.json"
 
 LOCAL_SCRAPE="${NE_OCR_LOCAL_SCRAPE:-0}"
+# How long step 1 waits for today's release, and how long between tries.
+HUB_WAIT="${NE_OCR_HUB_WAIT:-10800}"
+HUB_POLL="${NE_OCR_HUB_POLL:-600}"
 DRY_RUN=0
 for arg in "$@"; do
     case "$arg" in
         --local-scrape) LOCAL_SCRAPE=1 ;;
         --dry-run) DRY_RUN=1 ;;
-        -h|--help) sed -n '2,62p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,68p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "unknown argument: $arg (try --help)" >&2; exit 64 ;;
     esac
 done
@@ -141,10 +150,11 @@ run_step() {
     return 0
 }
 
-fetch_hub_release() {
-    local day tag tmp err f
-    day=$(TZ=America/Chicago date +%Y-%m-%d)
-    tag="${NE_OCR_HUB_TAG:-ne-contracts-hub-data-$day}"
+# Tries once to install release $1. 0: installed; 3: not published yet; 4: it
+# exists but could not be downloaded or is incomplete; 1: data/ could not be
+# written.
+try_hub_release() {
+    local tag="$1" tmp err f
     tmp="data/.hub-download"
     rm -rf "$tmp" && mkdir -p "$tmp" || return 1
 
@@ -152,8 +162,7 @@ fetch_hub_release() {
         rm -rf "$tmp"
         case "$err" in
             *"release not found"*|*"Not Found"*|*"HTTP 404"*)
-                echo "today's release $tag is not published yet (the nightly publishes" \
-                     "it around 03:17 Central). Carrying on with the data already in data/."
+                echo "today's release $tag is not published yet"
                 return 3 ;;
         esac
         echo "could not download $tag; nothing in data/ was replaced: $err"
@@ -182,6 +191,35 @@ fetch_hub_release() {
     rm -rf "$tmp"
     echo "installed $tag: $HUB_FILES"
     return 0
+}
+
+# Today's release, waiting for it: the nightly that makes it starts hours late
+# (see the top). The date is fixed when the step starts, so a wait that crosses
+# midnight still asks for the night it began in. A release that exists but is
+# not usable yet (4) is retried too: a same-day re-run of the nightly replaces
+# its assets one at a time, and a Mac just woken may not have its network back.
+fetch_hub_release() {
+    local day tag code deadline
+    day=$(TZ=America/Chicago date +%Y-%m-%d)
+    tag="${NE_OCR_HUB_TAG:-ne-contracts-hub-data-$day}"
+    deadline=$(( $(date +%s) + HUB_WAIT ))
+    while :; do
+        try_hub_release "$tag"
+        code=$?
+        case "$code" in
+            3|4) ;;
+            *) return "$code" ;;
+        esac
+        if [ "$(date +%s)" -ge "$deadline" ]; then
+            if [ "$code" -eq 3 ]; then
+                echo "still not published after waiting ${HUB_WAIT}s; carrying on with" \
+                     "the data already in data/"
+            fi
+            return "$code"
+        fi
+        echo "trying again in ${HUB_POLL}s"
+        sleep "$HUB_POLL"
+    done
 }
 
 scrape_locally() {

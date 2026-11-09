@@ -389,9 +389,12 @@ How it runs. Both jobs run on one Mac under launchd, not in CI; their LaunchAgen
 rather than the iCloud copy, under `caffeinate`. launchd does not wake a sleeping Mac: a
 run missed while it slept fires at the next wake, which can be mid-morning. The job does
 more than OCR. It first downloads that day's `ne-contracts-hub-data-<date>` release (the
-CSVs and `scrape_meta.json` the GitHub nightly published at about 03:17) instead of
-scraping its own copy, which had drifted from what the site shows; `--local-scrape` still
-scrapes instead. It takes only those four files, not the release's `documents.jsonl.gz`,
+CSVs and `scrape_meta.json` the GitHub nightly publishes) instead of scraping its own
+copy, which had drifted from what the site shows; `--local-scrape` still scrapes instead.
+It waits up to three hours for that release, trying every ten minutes: in Nov 2026 GitHub
+was starting the nightly 6-8 hours late, so the release landed between about 04:20 and
+05:45 Central, and on 6, 8 and 9 Nov the job, which then tried once, ran every step on
+the night before's data. It takes only those four files, not the release's `documents.jsonl.gz`,
 so the Mac's own build calls the document count of newer records unknown, which nothing
 it feeds depends on. Then come
 `build_site.py`, a prune of every `d/` build but the current one, `extract_text.py`,

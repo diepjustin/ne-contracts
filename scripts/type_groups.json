@@ -13,7 +13,10 @@
     "own DocType filter is authoritative. PO's detail page is headed 'Contracts', which is",
     "simply wrong -- a document returned by a Purchase Order search is a purchase order. That",
     "disagreement is also why the headings are treated as a sampled observation rather than a",
-    "published key."
+    "published key.",
+    "",
+    "P4 was added on 5 Nov 2026: one record (116307, a statewide Tyler Technologies agreement),",
+    "whose detail page carries the same 'Contracts' heading as a type 01 page."
   ],
 
   "CN": "Contract",
@@ -37,6 +40,7 @@
   "LS": "Contract",
   "O4": "Contract",
   "OC": "Contract",
+  "P4": "Contract",
   "X3": "Contract",
   "X6": "Contract",
   "Y3": "Contract",

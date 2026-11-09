@@ -23,7 +23,7 @@
 # Exit 0 when up to date or updated, 1 when refused or rolled back, 75 when
 # the OCR job holds the lock.
 set -uo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/.." || exit 1
 export PATH="$PATH:/opt/homebrew/bin"
 
 PY="./venv/bin/python3"

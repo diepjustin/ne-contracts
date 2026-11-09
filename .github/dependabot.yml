@@ -1,7 +1,9 @@
 # Weekly update PRs for the two things this repository pins: the GitHub Actions in
 # .github/workflows (pinned by commit SHA, with the version in a trailing comment that
-# Dependabot keeps in step) and the Python packages in requirements.txt. Every PR it opens
-# runs ci.yml, so a bump is tested before it can merge.
+# Dependabot keeps in step) and the Python packages in requirements.txt and
+# requirements-ocr.txt. Every PR it opens runs ci.yml, but CI installs only
+# requirements.txt: a green check on a requirements-ocr.txt bump tests nothing, and it
+# needs a run on the Mac before it merges.
 version: 2
 updates:
   - package-ecosystem: github-actions
@@ -15,3 +17,10 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    groups:
+      # Each pyobjc framework requires pyobjc-core and the frameworks it builds on at
+      # >= its own version, so a framework bumped alone cannot install: on 6 Nov 2026
+      # Cocoa, CoreML and Vision 13.0 came as three PRs, each against pyobjc-core and
+      # Quartz still at 12.2.2.
+      pyobjc:
+        patterns: ["pyobjc*"]

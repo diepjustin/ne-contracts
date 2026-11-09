@@ -196,9 +196,10 @@ jobs:
           fi
 
           # Absent on releases made before Aug 2026. Missing it is not a build
-          # failure: build_site.py then marks every row's document count
-          # unknown and the page claims nothing, which is the honest outcome
-          # and exactly what a partly-finished backfill looks like anyway.
+          # failure: the build then uses the cached log alone, which holds every
+          # record the backfill does. Only with neither does build_site.py mark
+          # every row's document count unknown, and the page then claims
+          # nothing, which is the honest outcome.
           #
           # Merged with the cached copy rather than replacing it. `--daily`
           # writes an entry for every new record it finds, and data/ round-trips
@@ -207,33 +208,31 @@ jobs:
           # 2,118 of them within a day of shipping, growing nightly, while the
           # site went on reporting 99.7% and looking finished.
           #
-          # Order matters: the cached file goes first so the release wins on any
-          # key both hold, since load_documents folds last-entry-wins and the
-          # release is the authoritative backfill. Records only the nightly has
-          # seen are unique keys and survive either way.
+          # The newest entry per record wins, by its `seen` date, not by which
+          # file it is in. Until Nov 2026 this was `cat cached release`, so the
+          # release won every record both held, as the authoritative backfill.
+          # It stopped being so once --daily began re-reading the document
+          # lists of amended, restored and swept records: release-last put the
+          # 28-30 Aug lists back on 207 records the nightly had re-read since,
+          # hiding 235 documents, usually the amendment itself. Release-first
+          # would fail the other way, discarding a backfill sitting re-uploaded
+          # after the nightly's reads. merge_document_logs.py also drops a torn
+          # last line from either file, which glued to the next file would stop
+          # load_documents, and with it every build.
           fetch --asset documents.jsonl.gz
           cached=data/documents.jsonl
           if [ -f data/documents.jsonl.gz ]; then
-            keep=""
+            release=data/documents.release.jsonl
+            gunzip -c data/documents.jsonl.gz > "$release"
+            rm -f data/documents.jsonl.gz
             if [ -f "$cached" ]; then
-              keep=data/documents.cached.jsonl
-              mv "$cached" "$keep"
-              # A CI run killed mid-write leaves a partial last line. Glued to
-              # the release's first line it becomes a broken line in the middle
-              # of the file, which load_documents refuses to read past --
-              # correctly, but it would fail every build from then on.
-              if [ -s "$keep" ] && [ -n "$(tail -c1 "$keep")" ]; then
-                echo "cached document log ends mid-write; dropping its last line"
-                sed -i '$d' "$keep"
-              fi
-            fi
-            gunzip -f data/documents.jsonl.gz
-            if [ -n "$keep" ]; then
-              cat "$keep" "$cached" > data/documents.merged.jsonl
+              python3 scripts/merge_document_logs.py "$release" "$cached" data/documents.merged.jsonl
               mv data/documents.merged.jsonl "$cached"
-              rm -f "$keep"
+              rm -f "$release"
+            else
+              mv "$release" "$cached"
             fi
-            echo "document lists: $(wc -l < "$cached") records after merge"
+            echo "document lists: $(wc -l < "$cached") log lines after merge"
           elif [ -f "$cached" ]; then
             # Nothing published: keep whatever the nightly accumulated.
             echo "building document lists from the cached log alone"

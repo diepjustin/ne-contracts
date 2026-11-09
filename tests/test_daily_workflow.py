@@ -109,6 +109,9 @@ def test_every_scrape_step_has_a_time_budget_that_fits_the_job():
     sweep = re.search(r"--sweep-expired .*--hours ([\d.]+)", step("Sweep newly Expired"))
     assert sweep, "the Expired sweep has no --hours budget"
     budgets.append(float(sweep.group(1)) * 60)
+    second = re.search(r'scrape.py "\$dataset" --daily --hours ([\d.]+)', step("Second pass"))
+    assert second, "the second pass has no --hours budget"
+    budgets.append(float(second.group(1)) * 60 * 3)
     assert sum(budgets) <= timeout - 30, "the scrape budgets leave no room for the publish leg"
 
 
@@ -123,6 +126,23 @@ def test_a_scrape_step_skips_a_dataset_already_finished_tonight(dataset):
     assert run.index(gate) < run.index("else") < run.index("python3 scripts/scrape.py %s --daily" % dataset)
     assert "RUN_STARTED: ${{ steps.gate.outputs.started }}" in s
     assert "${{" not in run, "an expression inside run: is command injection"
+
+
+def test_the_second_pass_rereads_only_unfinished_datasets_before_the_guard_rail():
+    """7 Nov 2026: one empty answer for Chadron State College left contract unfinished
+    and turned the run red, though the state answered normally minutes later."""
+    s = step("Second pass for any dataset not finished tonight")
+    run = s.split("run: |", 1)[1]
+    assert "if: steps.gate.outputs.proceed == 'true'" in s
+    assert "RUN_STARTED: ${{ steps.gate.outputs.started }}" in s
+    assert "for dataset in contract purchase-order state; do" in run
+    gate = ('if python3 scripts/nightly_gate.py --meta data/scrape_meta.json --dataset "$dataset" '
+            '--now "$RUN_STARTED"; then')
+    assert gate in run
+    assert run.index(gate) < run.index("continue") < run.index('python3 scripts/scrape.py "$dataset" --daily')
+    assert "${{" not in run
+    assert index("Sweep newly Expired purchase orders") < index("Second pass") < index("Guard rail on tonight's diff")
+    assert index("Second pass") < index("Check that every dataset finished tonight")
 
 
 # --- the Expired purchase-order sweep (n13) ----------------------------------------------
@@ -196,6 +216,7 @@ def test_verify_deploy_waits_on_the_dispatched_run_and_reads_the_live_site():
     assert "Check the live site is tonight's build" in live.splitlines()[0]
     assert "if: always()" in live
     assert 'run: python3 scripts/check_live_site.py --since "$DISPATCHED_AT"' in live
+    assert "PYTHONUNBUFFERED: '1'" in live, "9 Nov 2026: all ten attempts logged at one timestamp"
 
 
 def test_verify_deploy_can_only_read():

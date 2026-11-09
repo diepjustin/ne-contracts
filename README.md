@@ -1152,9 +1152,13 @@ dispatch skips them the same way, so it cannot re-read a dataset that already fi
 tonight.
 
 Each scrape step has `--hours 0.75`, so the three stop cleanly, checkpointed, well inside
-the job's 180-minute limit (a normal night is about 16 minutes for all three), and
+the job's 200-minute limit (a normal night is about 16 minutes for all three), and
 `PYTHONUNBUFFERED=1` so progress reaches the log as it happens. A dataset cut short keeps
-its old stamp, so the run goes red and the backup entry resumes it.
+its old stamp, so the run goes red and the backup entry resumes it. After the Expired
+sweep, a second pass (`--hours 0.1` each) re-reads whatever a dataset left unfinished,
+usually an entity the state answered empty for: on 7 Nov 2026 Chadron State College's
+contract search came back empty, the scraper refused to expire its 225 active contracts,
+and the run went red until the backup read it 80 minutes later.
 
 **The scheduler is hours late, not minutes.** This said "30–90 minutes" until 9 Sep 2026,
 which was wrong. Measured across all 28 nights from 13 Aug to 9 Sep, the live cron entry

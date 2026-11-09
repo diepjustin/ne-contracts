@@ -6,7 +6,8 @@ on:
     # below makes the second a backup that skips once tonight's data is
     # complete, and retries the night if it is not. Off the hour on purpose:
     # the top of the hour is when GitHub's scheduler is most loaded, and runs
-    # here already start 4-5 hours late.
+    # here already start hours late: 4-5 in Oct 2026, and in early Nov the
+    # night's first run came 6.7-8.1 hours after the first entry's time.
     - cron: '17 3 * * *'   # 10:17pm CDT / 9:17pm CST
     - cron: '47 4 * * *'   # backup: 11:47pm CDT / 10:47pm CST
   workflow_dispatch:
@@ -50,7 +51,7 @@ jobs:
       contents: write   # gh release create/upload/delete, and deleting orphaned hub-data tags;
                         # this job no longer commits to the tree
       actions: write    # gh cache delete, and gh workflow run pages.yml
-    timeout-minutes: 180
+    timeout-minutes: 200
     outputs:
       dispatched_at: ${{ steps.dispatch.outputs.dispatched_at }}
     env:
@@ -169,7 +170,8 @@ jobs:
         run: ls -la data/*.csv 2>&1 || echo "no CSVs restored -- scrape.py --daily will refuse to run and fail this job"
 
       # --hours: each dataset stops cleanly, checkpointed, after 45 minutes,
-      # so three of them can never reach the job's 180-minute hard kill. A
+      # so three of them, the sweep and the second pass can never reach the
+      # job's 200-minute hard kill. A
       # normal night is about 16 minutes for all three. A dataset cut short
       # keeps its old stamp, so the last step turns the run red, and the
       # backup entry (or tomorrow) resumes where it stopped.
@@ -243,6 +245,27 @@ jobs:
         env:
           SINCE: ${{ github.event.inputs.sweep_since }}
         run: python3 scripts/scrape.py purchase-order --sweep-expired ${SINCE:+"$SINCE"} --hours 0.25
+
+      # One more pass for any dataset the steps above left unfinished, after the sweep has
+      # given the state six or so minutes. --daily keeps tonight's finished entities in its
+      # progress file, so this re-reads only the ones it refused or did not reach. On 7 Nov
+      # 2026 the state answered empty for Chadron State College's 225 active contracts, the
+      # scraper rightly refused to expire them, and the run went red; the backup entry read
+      # Chadron normally 80 minutes later, in 5 seconds. This catches that in the same run.
+      # Six minutes each: enough for a few refused entities, and a dataset cut short again
+      # still keeps its old stamp, so the last step turns the run red as before.
+      - name: Second pass for any dataset not finished tonight
+        if: steps.gate.outputs.proceed == 'true'
+        env:
+          RUN_STARTED: ${{ steps.gate.outputs.started }}
+        run: |
+          for dataset in contract purchase-order state; do
+            if python3 scripts/nightly_gate.py --meta data/scrape_meta.json --dataset "$dataset" --now "$RUN_STARTED"; then
+              continue
+            fi
+            echo "$dataset is not finished tonight -- one more pass"
+            python3 scripts/scrape.py "$dataset" --daily --hours 0.1
+          done
 
       # --- Publish leg: every night the scrape ran ---
       #
@@ -561,4 +584,5 @@ jobs:
         if: always()
         env:
           DISPATCHED_AT: ${{ needs.daily.outputs.dispatched_at }}
+          PYTHONUNBUFFERED: '1'   # each attempt's line gets its own timestamp
         run: python3 scripts/check_live_site.py --since "$DISPATCHED_AT"

@@ -18,8 +18,9 @@ updates:
     schedule:
       interval: weekly
     groups:
-      # pyobjc's packages require each other at the same version, so one bumped alone
-      # cannot install: on 6 Nov 2026 Cocoa, CoreML and Vision 13.0 came as three PRs,
-      # each against pyobjc-core and Quartz still at 12.2.2.
+      # Each pyobjc framework requires pyobjc-core and the frameworks it builds on at
+      # >= its own version, so a framework bumped alone cannot install: on 6 Nov 2026
+      # Cocoa, CoreML and Vision 13.0 came as three PRs, each against pyobjc-core and
+      # Quartz still at 12.2.2.
       pyobjc:
         patterns: ["pyobjc*"]

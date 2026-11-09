@@ -14,9 +14,10 @@ file missing or unreadable, or this check failing in any way. Running twice is h
 project keeps having, so every doubt resolves to "run".
 
 A night starts at **noon America/Chicago**, and lasts until the next noon. The entries are
-set for the evening, and the scheduler starts them hours late (4-5 h most nights in Oct
-2026, 11.8 h at worst), so a night's scrape lands anywhere from about 9 pm to the next
-morning -- always inside one noon-to-noon window, and never near its edges. Two things
+set for the evening, and the scheduler starts them hours late (the night's first run
+4.3-6.9 h after the first entry's time in Oct 2026, 6.7-8.1 h in early Nov, 11.8 h at
+worst), so a night's scrape lands anywhere from about 9 pm to the next morning --
+always inside one noon-to-noon window, and never near its edges. Two things
 that look simpler both lose real nights:
 
 - "Which cron entry fired" (what this replaced, ci-07/sc-03): at today's delays the

@@ -6,8 +6,9 @@ on:
     # below makes the second a backup that skips once tonight's data is
     # complete, and retries the night if it is not. Off the hour on purpose:
     # the top of the hour is when GitHub's scheduler is most loaded, and runs
-    # here already start hours late: 4-5 in Oct 2026, and in early Nov the
-    # night's first run came 6.7-8.1 hours after the first entry's time.
+    # here already start hours late: the night's first run came 4.3-6.9 hours
+    # (median 5.9) after the first entry's time in Oct 2026, and 6.7-8.1 in
+    # early Nov.
     - cron: '17 3 * * *'   # 10:17pm CDT / 9:17pm CST
     - cron: '47 4 * * *'   # backup: 11:47pm CDT / 10:47pm CST
   workflow_dispatch:
@@ -247,13 +248,17 @@ jobs:
         run: python3 scripts/scrape.py purchase-order --sweep-expired ${SINCE:+"$SINCE"} --hours 0.25
 
       # One more pass for any dataset the steps above left unfinished, after the sweep has
-      # given the state six or so minutes. --daily keeps tonight's finished entities in its
-      # progress file, so this re-reads only the ones it refused or did not reach. On 7 Nov
+      # given the state six or so minutes. --daily keeps the entities it finished today in its
+      # progress file, so this re-reads only the ones it refused or did not reach. "Today" is
+      # the runner's UTC date: a manual run that crosses 00:00 UTC (6 pm CST) starts the
+      # dataset over here, and a scheduled run, which starts after 03:17 UTC, never does. On 7 Nov
       # 2026 the state answered empty for Chadron State College's 225 active contracts, the
       # scraper rightly refused to expire them, and the run went red; the backup entry read
       # Chadron normally 80 minutes later, in 5 seconds. This catches that in the same run.
       # Six minutes each: enough for a few refused entities, and a dataset cut short again
-      # still keeps its old stamp, so the last step turns the run red as before.
+      # still keeps its old stamp, so the last step turns the run red as before. A pass that
+      # fails is a warning here, never the end of the step: what the first pass finished
+      # still publishes, and the other datasets still get their pass.
       - name: Second pass for any dataset not finished tonight
         if: steps.gate.outputs.proceed == 'true'
         env:
@@ -264,7 +269,8 @@ jobs:
               continue
             fi
             echo "$dataset is not finished tonight -- one more pass"
-            python3 scripts/scrape.py "$dataset" --daily --hours 0.1
+            python3 scripts/scrape.py "$dataset" --daily --hours 0.1 \
+              || echo "::warning title=Second pass failed::$dataset: scrape.py exited $? on its second pass. What the first pass finished still publishes; the stamp check at the end turns the run red."
           done
 
       # --- Publish leg: every night the scrape ran ---

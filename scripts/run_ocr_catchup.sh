@@ -204,28 +204,51 @@ try_hub_release() {
 # The release dated the day before (Central), if it holds tonight's scrape. The
 # tag is the date the nightly published on, and its first cron entry is set for
 # 9:17 pm CST: a run GitHub starts on time, or nearly, publishes before
-# midnight, and today's tag never comes. Its scrape_meta.json goes
-# through nightly_gate.py, the test daily.yml's own gate makes: every dataset
-# stamped since noon yesterday. A release from the small hours of yesterday --
-# the usual late run, the night before's data -- fails it. 0: installed it;
-# anything else: not usable, and the caller waits for today's.
+# midnight, and today's tag never comes. Its scrape_meta.json goes through
+# nightly_gate.py, the test daily.yml's own gate makes: every dataset stamped
+# since noon the day before. A release from the small hours of that day -- the
+# usual late run, the night before's data -- fails it.
+#
+# $1 is the date fetch_hub_release fixed when the step began, and both the day
+# before and the gate's clock come from it: --now is 06:00 Central on that date
+# (07:00 in summer), so a run launchd starts after noon, on waking from a missed
+# 04:30, still judges by the night it is fetching for, and midnight passing
+# between two clock reads cannot make "the day before" today.
+#
+# 0: installed it. 3: a final no -- not published, or not tonight's. 4: no
+# answer this time (the network, a half-replaced release), so the caller asks
+# again at its next try. 1: data/ could not be written.
 try_yesterdays_release() {
-    local day tag tmp
-    day=$(TZ=America/Chicago date -v-1d +%Y-%m-%d 2>/dev/null \
-          || TZ=America/Chicago date -d yesterday +%Y-%m-%d) || return 3
+    local today="$1" day tag tmp err
+    day=$("$PY" -c 'import datetime, sys; print(datetime.date.fromisoformat(sys.argv[1]) - datetime.timedelta(days=1))' "$today") \
+        || return 3
     tag="ne-contracts-hub-data-$day"
     tmp="data/.hub-probe"
-    rm -rf "$tmp" && mkdir -p "$tmp" || return 3
-    if ! gh release download "$tag" --repo "$REPO" --dir "$tmp" \
-            --pattern 'scrape_meta.json.gz' >/dev/null 2>&1 \
-        || ! gunzip -c "$tmp/scrape_meta.json.gz" > "$tmp/scrape_meta.json" 2>/dev/null \
-        || ! "$PY" scripts/nightly_gate.py --meta "$tmp/scrape_meta.json" >/dev/null 2>&1; then
+    rm -rf "$tmp" && mkdir -p "$tmp" || return 1
+    if ! err=$(gh release download "$tag" --repo "$REPO" --dir "$tmp" \
+            --pattern 'scrape_meta.json.gz' 2>&1 >/dev/null); then
+        rm -rf "$tmp"
+        case "$err" in
+            *"release not found"*|*"Not Found"*|*"HTTP 404"*|*"no assets"*)
+                return 3 ;;
+        esac
+        echo "could not check $tag; asking again at the next try: $err"
+        return 4
+    fi
+    if ! gunzip -c "$tmp/scrape_meta.json.gz" > "$tmp/scrape_meta.json" 2>/dev/null \
+        || ! "$PY" scripts/nightly_gate.py --meta "$tmp/scrape_meta.json" \
+                --now "${today}T12:00:00+00:00" >/dev/null 2>&1; then
         rm -rf "$tmp"
         return 3
     fi
     rm -rf "$tmp"
     echo "$tag holds tonight's scrape (published before midnight Central); using it"
     try_hub_release "$tag"
+    case $? in
+        0) return 0 ;;
+        1) return 1 ;;
+        *) return 4 ;;
+    esac
 }
 
 # Today's release, waiting for it: the nightly that makes it starts hours late
@@ -234,10 +257,12 @@ try_yesterdays_release() {
 # not usable yet (4) is retried too: a same-day re-run of the nightly replaces
 # its assets one at a time, and a Mac just woken may not have its network back.
 # gh missing or signed out (5) is not: it reports 4 at once instead of after
-# three hours. The day before's release is checked once, the first time today's
-# is missing, and only when NE_OCR_HUB_TAG has not named one.
+# three hours. While today's is missing, the day before's is asked about at
+# each try until it gives a final answer (see try_yesterdays_release), and
+# never when NE_OCR_HUB_TAG names a release. A wait that runs out while the
+# day before's could not be fetched reports 4, not "not published".
 fetch_hub_release() {
-    local day tag code deadline yesterday_checked=0
+    local day tag code deadline yesterday_settled=0
     day=$(TZ=America/Chicago date +%Y-%m-%d)
     tag="${NE_OCR_HUB_TAG:-ne-contracts-hub-data-$day}"
     deadline=$(( $(date +%s) + HUB_WAIT ))
@@ -246,9 +271,14 @@ fetch_hub_release() {
         code=$?
         case "$code" in
             3)
-                if [ "$yesterday_checked" -eq 0 ] && [ -z "${NE_OCR_HUB_TAG:-}" ]; then
-                    yesterday_checked=1
-                    try_yesterdays_release && return 0
+                if [ "$yesterday_settled" -eq 0 ] && [ -z "${NE_OCR_HUB_TAG:-}" ]; then
+                    try_yesterdays_release "$day"
+                    case $? in
+                        0) return 0 ;;
+                        3) yesterday_settled=1 ;;
+                        4) code=4 ;;
+                        *) return 1 ;;
+                    esac
                 fi ;;
             4) ;;
             5) return 4 ;;
@@ -258,6 +288,9 @@ fetch_hub_release() {
             if [ "$code" -eq 3 ]; then
                 echo "still not published after waiting ${HUB_WAIT}s; carrying on with" \
                      "the data already in data/"
+            else
+                echo "still no release it could download after waiting ${HUB_WAIT}s;" \
+                     "carrying on with the data already in data/"
             fi
             return "$code"
         fi

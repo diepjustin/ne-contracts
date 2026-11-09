@@ -61,9 +61,16 @@ if [ -n "${FAKE_GH_LATE:-}" ]; then
   calls=$(grep -c '^gh ' "$FAKE_LOG")
   if [ "$calls" -le "$FAKE_GH_LATE" ]; then mode="${FAKE_GH_LATE_MODE:-missing}"; fi
 fi
+# only-older: the first tag asked for is not published, and any other is -- the
+# way an on-time nightly dates its release the day before.
+if [ "$mode" = "only-older" ]; then
+  first=$(grep -m1 '^gh ' "$FAKE_LOG" | cut -d' ' -f4)
+  if [ "$3" = "$first" ]; then mode=missing; else mode=ok; fi
+fi
 case "$mode" in
   missing) echo "release not found" >&2; exit 1 ;;
   network) echo "error connecting to api.github.com" >&2; exit 1 ;;
+  auth) printf 'To get started with GitHub CLI, please run:  gh auth login\n' >&2; exit 4 ;;
 esac
 dir=""
 while [ $# -gt 0 ]; do
@@ -117,7 +124,7 @@ def job(tmp_path):
     (root / "venv" / "bin").mkdir(parents=True)
     (root / "data").mkdir()
     (root / "logs").mkdir()
-    for name in ("run_ocr_catchup.sh", "ocr_io.py"):
+    for name in ("run_ocr_catchup.sh", "ocr_io.py", "nightly_gate.py", "check_scrape_stamps.py"):
         shutil.copy(os.path.join(SCRIPTS, name), root / "scripts" / name)
     executable(root / "venv" / "bin" / "python3", FAKE_PYTHON)
 
@@ -225,10 +232,14 @@ def test_a_release_that_appears_during_the_wait_is_installed(job):
     """6, 8 and 9 Nov 2026: the nightly's release landed at about 05:10, 04:37 and 05:45
     Central, after this started at 04:30, and the whole run used the night
     before's data. Now it waits, and every try asks for the same night."""
-    out = job.run(FAKE_GH_LATE="2", NE_OCR_HUB_WAIT="60", NE_OCR_HUB_POLL="0")
+    # Calls 1-3 find nothing: today's, the day before's (once), today's again.
+    out = job.run(FAKE_GH_LATE="3", NE_OCR_HUB_WAIT="60", NE_OCR_HUB_POLL="0")
     assert out.returncode == 0, out.stdout + out.stderr
     gh = [c for c in job.calls if c.startswith("gh ")]
-    assert len(gh) == 3 and len(set(gh)) == 1
+    assert len(gh) == 4
+    today = gh[0]
+    assert gh[2] == today and gh[3] == today
+    assert gh[1] != today and "--pattern scrape_meta.json.gz" in gh[1]
     assert out.stdout.count("not published yet") == 2
     assert steps(job.status())["fetch"] == 0
     for name in HUB_FILES:
@@ -243,10 +254,13 @@ def test_a_download_that_fails_then_works_during_the_wait_is_installed(job):
 
 
 def test_when_the_wait_runs_out_it_carries_on_with_the_old_data_and_exits_3(job):
-    out = job.run(FAKE_GH_MODE="missing", NE_OCR_HUB_WAIT="1", NE_OCR_HUB_POLL="1")
+    # Two seconds, not one: the deadline is in whole seconds, and a first try that
+    # straddled a tick would otherwise use up a one-second wait on its own.
+    out = job.run(FAKE_GH_MODE="missing", NE_OCR_HUB_WAIT="2", NE_OCR_HUB_POLL="1")
     assert out.returncode == 3
-    assert len([c for c in job.calls if c.startswith("gh ")]) >= 2
-    assert "still not published after waiting 1s" in out.stdout
+    gh = [c for c in job.calls if c.startswith("gh ")]
+    assert gh.count(gh[0]) >= 2, "today's release is asked for again after a wait"
+    assert "still not published after waiting 2s" in out.stdout
     assert steps(job.status())["summaries"] == 0, "the steps after it still run"
     for name in HUB_FILES:
         assert (job.root / "data" / name).read_text() == "old " + name + "\n"
@@ -254,6 +268,72 @@ def test_when_the_wait_runs_out_it_carries_on_with_the_old_data_and_exits_3(job)
 
 def test_a_download_failure_is_not_mistaken_for_a_missing_release(job):
     assert job.run(FAKE_GH_MODE="network").returncode == 4
+
+
+def test_gh_signed_out_gives_up_at_once_instead_of_waiting(job):
+    """Signing in again is the only fix, so three hours of retries would only
+    hold the OCR back."""
+    out = job.run(FAKE_GH_MODE="auth", NE_OCR_HUB_WAIT="60", NE_OCR_HUB_POLL="0")
+    assert out.returncode == 4
+    assert len([c for c in job.calls if c.startswith("gh ")]) == 1
+    assert "waiting will not fix it" in out.stdout
+    assert steps(job.status())["summaries"] == 0, "the steps after it still run"
+    for name in HUB_FILES:
+        assert (job.root / "data" / name).read_text() == "old " + name + "\n"
+
+
+def stamps_release(job, when):
+    """Makes the release's scrape_meta.json real stamps, every dataset at `when`."""
+    stamp = when.isoformat(timespec="seconds")
+    meta = json.dumps({d: stamp for d in ("contract", "purchase-order", "state")})
+    with gzip.open(job.release / "scrape_meta.json.gz", "wt") as f:
+        f.write(meta)
+    return meta
+
+
+def tag_day(call):
+    return datetime.date.fromisoformat(call.split("ne-contracts-hub-data-")[1].split()[0])
+
+
+def test_tonights_release_dated_the_day_before_is_used(job):
+    """A nightly that runs on time publishes before midnight Central, so its
+    release carries the day before's date and today's never appears."""
+    meta = stamps_release(job, datetime.datetime.now(datetime.timezone.utc))
+    out = job.run(FAKE_GH_MODE="only-older", NE_OCR_HUB_WAIT="60", NE_OCR_HUB_POLL="0")
+    assert out.returncode == 0, out.stdout + out.stderr
+    gh = [c for c in job.calls if c.startswith("gh ")]
+    # Today's, the day before's stamps alone, then the day before's in full.
+    assert len(gh) == 3
+    assert tag_day(gh[1]) == tag_day(gh[0]) - datetime.timedelta(days=1)
+    assert "--pattern scrape_meta.json.gz" in gh[1]
+    assert tag_day(gh[2]) == tag_day(gh[1]) and "--pattern *.gz" in gh[2]
+    assert any(c.startswith("python scripts/nightly_gate.py --meta") for c in job.calls)
+    assert "published before midnight Central" in out.stdout
+    assert steps(job.status())["fetch"] == 0
+    assert (job.root / "data" / "scrape_meta.json").read_text() == meta
+    assert (job.root / "data" / "nu_contracts.csv").read_text() == "fresh nu_contracts.csv\n"
+    assert not (job.root / "data" / ".hub-probe").exists()
+
+
+def test_the_night_befores_release_dated_the_day_before_is_not_used(job):
+    """The usual case: the day before's release is from a late run in its small
+    hours, the night before's data. It fails the gate, and the wait goes on."""
+    stamps_release(job, datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=2))
+    out = job.run(FAKE_GH_MODE="only-older")
+    assert out.returncode == 3
+    gh = [c for c in job.calls if c.startswith("gh ")]
+    assert len(gh) == 2, "only its stamps were downloaded"
+    assert any(c.startswith("python scripts/nightly_gate.py --meta") for c in job.calls)
+    for name in HUB_FILES:
+        assert (job.root / "data" / name).read_text() == "old " + name + "\n"
+    assert not (job.root / "data" / ".hub-probe").exists()
+
+
+def test_a_named_tag_is_never_swapped_for_the_day_before(job):
+    out = job.run(FAKE_GH_MODE="missing", NE_OCR_HUB_TAG="ne-contracts-hub-data-2026-11-01")
+    assert out.returncode == 3
+    gh = [c for c in job.calls if c.startswith("gh ")]
+    assert len(gh) == 1 and "ne-contracts-hub-data-2026-11-01" in gh[0]
 
 
 def test_an_incomplete_release_replaces_nothing(job):

@@ -24,7 +24,10 @@
 #                        waits up to 3 hours for the release to appear
 #                        (NE_OCR_HUB_WAIT, seconds; NE_OCR_HUB_POLL between
 #                        tries). Until Nov 2026 it tried once, and on 6, 8 and
-#                        9 Nov ran every step on the night before's data. This
+#                        9 Nov ran every step on the night before's data. A
+#                        nightly that ran on time, before midnight Central,
+#                        dates its release the day before; that one is used
+#                        when its stamps say it is tonight's. This
 #                        Mac used to scrape its own copy, which drifted from
 #                        what the site shows (6,343 records only in CI's copy
 #                        on 22 Oct 2026) and kept the state's server busy for
@@ -60,7 +63,8 @@
 #     3   today's hub-data release was still not published when the wait ran
 #         out; the other steps ran on the data already here
 #     4   the release exists but could not be downloaded or is incomplete,
-#         still so when the wait ran out; nothing in data/ was replaced
+#         still so when the wait ran out, or gh is missing or signed out
+#         (that one at once, without waiting); nothing in data/ was replaced
 #    75   another run holds data/.ocr.lock; this one did nothing at all
 #
 #     scripts/run_ocr_catchup.sh                 # what launchd runs
@@ -86,7 +90,7 @@ for arg in "$@"; do
     case "$arg" in
         --local-scrape) LOCAL_SCRAPE=1 ;;
         --dry-run) DRY_RUN=1 ;;
-        -h|--help) sed -n '2,68p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,72p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "unknown argument: $arg (try --help)" >&2; exit 64 ;;
     esac
 done
@@ -151,7 +155,8 @@ run_step() {
 }
 
 # Tries once to install release $1. 0: installed; 3: not published yet; 4: it
-# exists but could not be downloaded or is incomplete; 1: data/ could not be
+# exists but could not be downloaded or is incomplete; 5: gh is not installed
+# or not signed in, which no amount of waiting fixes; 1: data/ could not be
 # written.
 try_hub_release() {
     local tag="$1" tmp err f
@@ -162,8 +167,11 @@ try_hub_release() {
         rm -rf "$tmp"
         case "$err" in
             *"release not found"*|*"Not Found"*|*"HTTP 404"*)
-                echo "today's release $tag is not published yet"
+                echo "release $tag is not published yet"
                 return 3 ;;
+            *"gh auth login"*|*"HTTP 401"*|*"command not found"*)
+                echo "could not download $tag, and waiting will not fix it: $err"
+                return 5 ;;
         esac
         echo "could not download $tag; nothing in data/ was replaced: $err"
         return 4
@@ -193,13 +201,43 @@ try_hub_release() {
     return 0
 }
 
+# The release dated the day before (Central), if it holds tonight's scrape. The
+# tag is the date the nightly published on, and its first cron entry is set for
+# 9:17 pm CST: a run GitHub starts on time, or nearly, publishes before
+# midnight, and today's tag never comes. Its scrape_meta.json goes
+# through nightly_gate.py, the test daily.yml's own gate makes: every dataset
+# stamped since noon yesterday. A release from the small hours of yesterday --
+# the usual late run, the night before's data -- fails it. 0: installed it;
+# anything else: not usable, and the caller waits for today's.
+try_yesterdays_release() {
+    local day tag tmp
+    day=$(TZ=America/Chicago date -v-1d +%Y-%m-%d 2>/dev/null \
+          || TZ=America/Chicago date -d yesterday +%Y-%m-%d) || return 3
+    tag="ne-contracts-hub-data-$day"
+    tmp="data/.hub-probe"
+    rm -rf "$tmp" && mkdir -p "$tmp" || return 3
+    if ! gh release download "$tag" --repo "$REPO" --dir "$tmp" \
+            --pattern 'scrape_meta.json.gz' >/dev/null 2>&1 \
+        || ! gunzip -c "$tmp/scrape_meta.json.gz" > "$tmp/scrape_meta.json" 2>/dev/null \
+        || ! "$PY" scripts/nightly_gate.py --meta "$tmp/scrape_meta.json" >/dev/null 2>&1; then
+        rm -rf "$tmp"
+        return 3
+    fi
+    rm -rf "$tmp"
+    echo "$tag holds tonight's scrape (published before midnight Central); using it"
+    try_hub_release "$tag"
+}
+
 # Today's release, waiting for it: the nightly that makes it starts hours late
 # (see the top). The date is fixed when the step starts, so a wait that crosses
 # midnight still asks for the night it began in. A release that exists but is
 # not usable yet (4) is retried too: a same-day re-run of the nightly replaces
 # its assets one at a time, and a Mac just woken may not have its network back.
+# gh missing or signed out (5) is not: it reports 4 at once instead of after
+# three hours. The day before's release is checked once, the first time today's
+# is missing, and only when NE_OCR_HUB_TAG has not named one.
 fetch_hub_release() {
-    local day tag code deadline
+    local day tag code deadline yesterday_checked=0
     day=$(TZ=America/Chicago date +%Y-%m-%d)
     tag="${NE_OCR_HUB_TAG:-ne-contracts-hub-data-$day}"
     deadline=$(( $(date +%s) + HUB_WAIT ))
@@ -207,7 +245,13 @@ fetch_hub_release() {
         try_hub_release "$tag"
         code=$?
         case "$code" in
-            3|4) ;;
+            3)
+                if [ "$yesterday_checked" -eq 0 ] && [ -z "${NE_OCR_HUB_TAG:-}" ]; then
+                    yesterday_checked=1
+                    try_yesterdays_release && return 0
+                fi ;;
+            4) ;;
+            5) return 4 ;;
             *) return "$code" ;;
         esac
         if [ "$(date +%s)" -ge "$deadline" ]; then

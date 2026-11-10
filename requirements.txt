@@ -17,4 +17,4 @@ pdfminer.six==20260107
 
 # Test suite (scripts/../tests). No network, no data/ -- runs in CI before
 # the scrape so a broken parser stops the run early.
-pytest==9.1.1
+pytest==9.2.0

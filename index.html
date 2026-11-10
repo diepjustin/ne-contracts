@@ -145,7 +145,9 @@
      maximized -- loses the pinned bar, even where the bar would have fit.
      Little is lost: at 1366x657 the bar only stuck after 210px of page
      scroll, which the page only has once a row's document list is open, and
-     a static bar can never cover the table. */
+     a static bar can never cover the table.
+     (Nov 2026: "Began or ends" made the bar one row taller on a phone and no
+     taller above 720px, where it was measured before and after.) */
   @media (max-width: 720px), (max-height: 700px) {
     .controls { position: static; }
   }
@@ -181,13 +183,18 @@
     /* Wide enough for the longest name rather than the input: the agencies
        share long prefixes ("University of Nebraska ..."), so a list clipped to
        the box shows five rows that all read the same. */
-    min-width: 100%; width: max-content; max-width: 420px;
+    min-width: 100%; width: max-content; max-width: min(420px, calc(100vw - 16px));
     margin: 0; padding: 4px 0; list-style: none; max-height: 260px; overflow-y: auto;
     background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
     box-shadow: var(--shadow);
   }
-  #entity-list li { padding: 5px 9px; cursor: pointer; white-space: nowrap; }
+  /* One line each while they fit. A name with its alias after it can be
+     wider than the list is allowed to be, and that wraps rather than giving
+     the list a sideways scrollbar. */
+  #entity-list li { padding: 5px 9px; cursor: pointer; }
   #entity-list li[aria-selected="true"], #entity-list li:hover { background: var(--accent); color: #fff; }
+  #entity-list .aka { color: var(--muted); }
+  #entity-list li[aria-selected="true"] .aka, #entity-list li:hover .aka { color: inherit; }
   #entity-list .none { color: var(--muted); cursor: default; }
   #entity-list .none:hover { background: none; color: var(--muted); }
   .check {
@@ -452,6 +459,15 @@
             filing and never rewritten. Not every record has one; the Description filter shows which do.
           </p>
           <p>
+            The search box looks in vendor names and document numbers. Punctuation, spacing and
+            word order do not matter: <i>je dunn</i> also finds J.E. DUNN, and <i>john smith</i>
+            finds SMITH, JOHN W. Spellings are found together, not merged — each stays its own
+            vendor in the table and the export. The Agency box also answers to names in everyday
+            use, such as DOT, DHHS and UNL, and fills in the state's own. <i>Began or ends</i>
+            counts its days from the date this data was last updated, not from today, and leaves
+            out records with no date to count.
+          </p>
+          <p>
             Document numbers link to the original PDF on the state's servers at
             statecontracts.nebraska.gov. Some records publish several documents — amendments,
             renewals, the signed contract — and clicking the row lists all of them. Those files
@@ -515,6 +531,20 @@
       <select id="entity" hidden><option value="">All</option></select>
     </div>
   </div>
+  <!-- Amounts ahead of dates, and each its own group, for the wrap: the bar is
+       two rows at 1366px wide only if this short group can finish the first
+       row. As one group of five the "Began or ends" box pushed the buttons to
+       a third row, 76px taken from the table on the commonest laptop. -->
+  <div class="control-group">
+    <div class="field">
+      <label for="min">Min $</label>
+      <input id="min" class="num" type="number" placeholder="0" inputmode="numeric">
+    </div>
+    <div class="field">
+      <label for="max">Max $</label>
+      <input id="max" class="num" type="number" placeholder="any" inputmode="numeric">
+    </div>
+  </div>
   <div class="control-group">
     <div class="field">
       <label for="y0">Begins from</label>
@@ -530,12 +560,16 @@
       <input id="y1" class="yr" type="number" placeholder="2030" inputmode="numeric">
     </div>
     <div class="field">
-      <label for="min">Min $</label>
-      <input id="min" class="num" type="number" placeholder="0" inputmode="numeric">
-    </div>
-    <div class="field">
-      <label for="max">Max $</label>
-      <input id="max" class="num" type="number" placeholder="any" inputmode="numeric">
+      <label for="when">Began or ends</label>
+      <!-- Counted from the day of the data; start() puts that date in the title. -->
+      <select id="when">
+        <option value="">Any time</option>
+        <option value="began30">Began, last 30 days</option>
+        <option value="began90">Began, last 90 days</option>
+        <option value="ends30">Ends, next 30 days</option>
+        <option value="ends90">Ends, next 90 days</option>
+        <option value="ends180">Ends, next 180 days</option>
+      </select>
     </div>
   </div>
   <div class="control-group">
@@ -691,6 +725,7 @@
   // Default to largest-first: it is the most useful landing view, and it avoids
   // opening on the handful of typo dates in the state's own records (e.g. year 2223).
   var sortKey = 2, sortDir = -1, term = "", searchDesc = false;
+  var vplan = null;              // vendorPlan() of the search box, null when it is empty
 
   var $ = function (id) { return document.getElementById(id); };
   var scroller = $("scroller"), tbody = $("rows");
@@ -850,6 +885,21 @@
     var i = s.toLowerCase().indexOf(term);
     if (i < 0) return esc(s);
     return esc(s.slice(0, i)) + "<mark>" + esc(s.slice(i, i + term.length)) + "</mark>" + esc(s.slice(i + term.length));
+  }
+
+  // A string with the given [from, to) stretches marked. They arrive in
+  // order; one that begins before the last ended is clipped to start there, so
+  // no caller can produce a mark inside a mark.
+  function markRanges(s, ranges) {
+    if (!ranges) return esc(s);
+    var html = "", at = 0;
+    for (var i = 0; i < ranges.length; i++) {
+      var from = Math.max(ranges[i][0], at), to = ranges[i][1];
+      if (to <= from) continue;
+      html += esc(s.slice(at, from)) + "<mark>" + esc(s.slice(from, to)) + "</mark>";
+      at = to;
+    }
+    return html + esc(s.slice(at));
   }
 
   // Records carry a document-type code ("O4", "ZP", "CN", ...) rather than a
@@ -1253,6 +1303,131 @@
     return String.fromCharCode.apply(null, docs.subarray(docOff[id], docOff[id + 1]));
   }
 
+  // What the search box means for a vendor name. It was one test: the name
+  // contains the text exactly as typed. The state spells the same company
+  // with and without punctuation and spaces, so that test split them: on the
+  // 9 Nov 2026 data "j.e. dunn" found 3 records and "je dunn" a different 17,
+  // "u.s. bank" found none of the records "us bank" did, "o'neill" found 4
+  // of the 238 under ONEILL, O NEILL and O'NEILL, 1,362 vendor names have no
+  // spaces at all (ROCHEDIAGNOSTICSCORPORATION), and "john smith" could not
+  // find SMITH, JOHN W. A name now matches when any of these holds:
+  //
+  //   1. it contains the text as typed -- the old rule, so nothing that was
+  //      found before stops being found;
+  //   2. it contains the typed letters and digits in order, from the start of
+  //      one of its words to the end of one, whatever punctuation and spaces
+  //      either side puts between them: "je dunn", "j.e. dunn" and "jedunn"
+  //      all find J.E. DUNN and JE DUNN. Whole words, or "3m" finds OPTION 3
+  //      MATERIAL HANDLING and "mcdonald's" finds MCDONALD, STEPHANIE;
+  //   3. for two or more words, every word is a word of the name, in any
+  //      order: "john smith" finds SMITH, JOHN W. A word typed twice has to
+  //      be there twice, and one word at least needs three letters, or
+  //      "d & d" finds every name with a D in it.
+  //
+  // Two allowances, both for several words only. The last word may still be
+  // being typed once it has three letters, so "je dunn const" does not lose
+  // J.E. DUNN CONSTRUCTION on the way to "construction"; shorter than that it
+  // has to be whole, or "at&t" finds AT HOME TILE. And five letters or more
+  // may run on into a longer word, which is how "roche diagnostics" finds the
+  // names with no spaces; fewer, and "at&t" finds every ATTORNEY.
+  //
+  // None of this merges anything. Two spellings stay two vendors in the
+  // table and the export; they are only found by the same search.
+  function vendorPlan(query) {
+    var raw = query.trim().toLowerCase();
+    var parts = raw.split(/[^a-z0-9]+/).filter(function (w) { return w; });
+    var plan = { raw: raw, run: null, parts: null };
+    if (!parts.length) return plan;
+    // Only letters and digits reach a pattern, so nothing needs escaping.
+    function loose(text) { return text.split("").join("[^a-z0-9]*"); }
+    var last = parts.length - 1, joined = parts.join("");
+    var unfinished = last > 0 && parts[last].length > 2;
+    plan.run = new RegExp("(^|[^a-z0-9])(" + loose(joined) + "(?![a-z0-9])" +
+      (unfinished ? "|" + loose(parts.slice(0, last).join("")) + "[^a-z0-9]+" + loose(parts[last]) : "") +
+      (last > 0 && joined.length > 4 ? "|" + joined : "") + ")");
+    if (last > 0 && parts.some(function (w) { return w.length > 2; })) {
+      plan.parts = parts.map(function (w, i) {
+        return new RegExp("(^|[^a-z0-9])(" + w + ")" + (unfinished && i === last ? "" : "(?![a-z0-9])"), "g");
+      });
+    }
+    return plan;
+  }
+
+  // The stretches of a lowercased name that a plan matches, as [from, to)
+  // pairs in order, or null when it does not match. One function for the
+  // filter and the highlight, so what is marked is always why the row is here.
+  function vendorRanges(low, plan) {
+    var at = low.indexOf(plan.raw), m;
+    if (at >= 0) return [[at, at + plan.raw.length]];
+    if (plan.run && (m = plan.run.exec(low))) {
+      at = m.index + m[1].length;
+      return [[at, at + m[2].length]];
+    }
+    if (!plan.parts) return null;
+    var out = [], used = {};
+    for (var i = 0; i < plan.parts.length; i++) {
+      var word = plan.parts[i];
+      // The first word of the name this one fits that no earlier one took.
+      word.lastIndex = 0;
+      for (;;) {
+        m = word.exec(low);
+        if (!m) return null;
+        at = m.index + m[1].length;
+        if (!used[at]) break;
+        word.lastIndex = at + 1;
+      }
+      used[at] = true;
+      out.push([at, at + m[2].length]);
+    }
+    return out.sort(function (x, y) { return x[0] - y[0]; });
+  }
+
+  // The "Began or ends" presets, as the inclusive range of yyyymmdd values a
+  // row's begin or end date must fall in. "What is new" and "what is about to
+  // run out" are the two questions a reporter brings to a list like this, and
+  // the year boxes could answer neither: they filter begin dates by whole
+  // years and nothing filtered on the end date at all.
+  //
+  // Counted from the day of the data, not the reader's clock: on a morning the
+  // nightly scrape has not landed, "the last 30 days" of what is on screen
+  // ends at the last scrape. A row with no date in the column is left out --
+  // unlike the year boxes, which keep it -- because "ends in the next 30
+  // days" is a claim about a date the row does not have. The state's
+  // open-ended placeholders (2099, 9999) fall outside every window by
+  // themselves.
+  var WHEN = ["began30", "began90", "ends30", "ends90", "ends180"];
+
+  // Through UTC, so no clock change can make a day 23 hours long.
+  function addDays(ymd, days) {
+    var d = new Date(Date.UTC(Math.floor(ymd / 10000), Math.floor(ymd / 100) % 100 - 1, ymd % 100 + days));
+    return d.getUTCFullYear() * 10000 + (d.getUTCMonth() + 1) * 100 + d.getUTCDate();
+  }
+
+  function whenRange(name, day) {
+    if (WHEN.indexOf(name) < 0) return null;
+    var days = parseInt(name.replace(/\D+/, ""), 10);
+    return name.charAt(0) === "b" ? { ends: false, from: addDays(day, -days), to: day }
+                                  : { ends: true, from: day, to: addDays(day, days) };
+  }
+
+  // The day the data is from, in Nebraska: the scrape's timestamp read in
+  // Central time, since a run a little after midnight UTC is still the evening
+  // before in Lincoln. Today's date only if the payload carries no date.
+  function dataDay() {
+    var stamp = asOf(), when = new Date(stamp), got = {};
+    if (stamp.length > 10 && !isNaN(when)) {
+      new Intl.DateTimeFormat("en-US", { timeZone: "America/Chicago", year: "numeric",
+                                         month: "2-digit", day: "2-digit" })
+        .formatToParts(when).forEach(function (part) { got[part.type] = +part.value; });
+      return got.year * 10000 + got.month * 100 + got.day;
+    }
+    // A payload built before scrape times were recorded carries only a date.
+    var p = /^(\d{4})-(\d{2})-(\d{2})$/.exec(stamp);
+    if (p) return +p[1] * 10000 + +p[2] * 100 + +p[3];
+    when = new Date();
+    return when.getFullYear() * 10000 + (when.getMonth() + 1) * 100 + when.getDate();
+  }
+
   // The two filter boxes that hold numbers rather than text, read out as the
   // bounds the row loop compares against. Named rather than inline in apply()
   // so they can be exercised on their own: everything else about a filter is
@@ -1295,6 +1470,7 @@
   function apply() {
     var q = $("q").value.trim().toLowerCase();
     term = q;
+    vplan = q ? vendorPlan(q) : null;
     var ti = $("type").value, si = $("status").value, ei = $("entity").value;
     var mn = amountBound($("min").value), mx = amountBound($("max").value);
     var i;
@@ -1304,12 +1480,12 @@
     var vhit = null, dq = null, dhit = null;
     if (q) {
       vhit = new Uint8Array(vendors.length);
-      for (i = 0; i < vlow.length; i++) if (vlow[i].indexOf(q) >= 0) vhit[i] = 1;
+      for (i = 0; i < vlow.length; i++) if (vendorRanges(vlow[i], vplan)) vhit[i] = 1;
       // "hausmann" should find all 26 recorded spellings, including the ones
       // carrying a contract number that the plain string match misses.
       if (vgroup) {
         for (i = 0; i < groupNames.length; i++) {
-          if (groupNames[i].toLowerCase().indexOf(q) < 0) continue;
+          if (!vendorRanges(groupNames[i].toLowerCase(), vplan)) continue;
           for (var v = 0; v < vgroup.length; v++) if (vgroup[v] === i) vhit[v] = 1;
         }
       }
@@ -1341,6 +1517,8 @@
     var sIdx = si === "" ? -1 : +si, eIdx = ei === "" ? -1 : +ei;
     var d0 = yearFloor($("y0").value), d1 = yearCeil($("y1").value);
     var hasMn = !isNaN(mn), hasMx = !isNaN(mx);
+    var wn = whenRange($("when").value, dataDay());
+    var wcol = wn ? (wn.ends ? end : begin) : null, w0 = wn ? wn.from : 0, w1 = wn ? wn.to : 0;
 
     var order = orderFor(sortKey), out = viewBuf, count = 0, total = 0, odd = 0;
     var p = sortDir > 0 ? 0 : N - 1, stop = sortDir > 0 ? N : -1;
@@ -1354,6 +1532,8 @@
       if (descWant === "0" && descSrc[j]) continue;
       if (d0 && begin[j] && begin[j] < d0) continue;
       if (d1 && begin[j] && begin[j] > d1) continue;
+      // No date is 0, which is below every window, so such a row drops out.
+      if (wcol && (wcol[j] < w0 || wcol[j] > w1)) continue;
       if (hasMn && amount[j] < mn) continue;
       if (hasMx && amount[j] > mx) continue;
       if (q && !vhit[vendorIdx[j]] && !(dq && docHas(j, dq)) &&
@@ -1445,7 +1625,8 @@
             esc(oddityText(oddCol[id], begin[id], end[id])) + '">⚠\uFE0E</span>' : "") + "</td>" +
         '<td class="ty" title="' + esc(meta.types[t]) + '">' +
           esc(shortType(meta.typeGroups[t])) + "</td>" +
-        '<td class="vendor">' + highlight(vname[vendorIdx[id]]) + "</td>" +
+        '<td class="vendor">' + markRanges(vname[vendorIdx[id]],
+          vplan ? vendorRanges(vlow[vendorIdx[id]], vplan) : null) + "</td>" +
         '<td class="amt">' + fmtMoney.format(amount[id]) + "</td>" +
         '<td class="dt begin">' + fmtDate(begin[id]) + "</td>" +
         '<td class="dt end"' + (isOpenEnded(end[id]) ? ' title="' + esc(endTitle(end[id])) + '"' : "") +
@@ -2221,15 +2402,114 @@
     $("entity-q").removeAttribute("aria-activedescendant");
   }
 
-  // Substring, not prefix: someone looking for the Department of Roads is far
-  // likelier to type "roads" than "department". The description index answers
-  // a different question and is deliberately prefix-only; this list is under
-  // a hundred strings in memory, so it can afford to be generous.
+  // What people call an agency when it is not what the state's list calls it.
+  // The list keeps names the agencies themselves have dropped: "Roads,
+  // Department of" has been the Department of Transportation since 2017, and
+  // on 9 Nov 2026 typing transportation, dot, dhhs, unl or unmc into the box
+  // found nothing, with 39,854 Roads records ($11.2B) behind the first two.
+  // Each key is an agency exactly as meta.entities spells it; a key this build
+  // does not have is simply never asked for. Finding only: the box still fills
+  // in, the table still shows and a link still carries the state's own name.
+  //
+  // Kept as plain JSON so tests/test_agency_aliases.py can read it and refuse
+  // a key that is not one of the scraper's agencies. Add a name only when it
+  // is in everyday use for that agency, and to every agency it means.
+  var AGENCY_ALIASES = {
+    "Accountability and Disclosure Commission": ["NADC"],
+    "Administrative Services, Department of": ["DAS"],
+    "Aeronautics, Department of": ["NDOT Division of Aeronautics"],
+    "Agriculture, Department of": ["NDA"],
+    "Attorney General": ["AG"],
+    "Auditor of Public Accounts": ["State Auditor", "APA"],
+    "Banking, Department of": ["Banking and Finance", "NDBF"],
+    "Blind & Visually Impaired, Commission for the": ["NCBVI"],
+    "Chadron State College": ["CSC"],
+    "Correctional Services, Department of": ["Corrections", "Prisons", "NDCS", "DCS"],
+    "Deaf & Hard of Dearing, Commission for the": ["Hard of Hearing", "NCDHH"],
+    "Economic Development, Department of": ["DED"],
+    "Education, Department of": ["NDE"],
+    "Educational Telecommunications Commission": ["Nebraska Public Media", "NET"],
+    "Energy Office": ["Environment and Energy", "NDEE"],
+    "Environmental Quality, Department of": ["Environment and Energy", "NDEE", "DEQ", "NDEQ"],
+    "Equal Opportunity Commission": ["NEOC"],
+    "Fire Marshal": ["State Fire Marshal", "SFM"],
+    "Foster Care Review Office": ["FCRO"],
+    "Game & Parks Commission": ["NGPC"],
+    "Health & Human Services, Department of": ["DHHS", "HHS"],
+    "Historical Society": ["History Nebraska"],
+    "Insurance, Department of": ["DOI", "NDOI"],
+    "Labor, Department of": ["NDOL", "DOL"],
+    "Law Enforcement & Criminal Justice, Commission On": ["Crime Commission"],
+    "Legislative Council": ["Legislature", "Unicameral"],
+    "Liquor Control Commission": ["NLCC"],
+    "Military Department": ["National Guard", "Emergency Management", "NEMA"],
+    "Motor Vehicles, Department of": ["DMV"],
+    "NE Ed Health & Social Serv. FA": ["Nebraska Educational, Health and Social Services Finance Authority"],
+    "NE Elementary & Secondary SFA": ["Nebraska Elementary and Secondary School Finance Authority"],
+    "NE Investment Finance Auth.": ["Nebraska Investment Finance Authority", "NIFA"],
+    "Natural Resources, Department of": ["DNR", "NeDNR"],
+    "Nebraska State College System": ["NSCS"],
+    "Peru State College": ["PSC"],
+    "Postsecondary Education, Coordinating Commission for": ["CCPE"],
+    "Public Employees Retirement System": ["NPERS"],
+    "Public Service Commission": ["PSC"],
+    "Racing Commission": ["Racing and Gaming Commission"],
+    "Revenue, Department of": ["DOR"],
+    "Roads, Department of": ["Transportation, Department of", "NDOT", "DOT", "NDOR"],
+    "Secretary of State": ["SOS"],
+    "State Patrol": ["NSP"],
+    "Supreme Court": ["Courts", "Judicial Branch"],
+    "Tax Equalization & Review Commission": ["TERC"],
+    "Treasurer": ["State Treasurer"],
+    "University of Nebraska Central Administration": ["NU"],
+    "University of Nebraska Kearney": ["UNK"],
+    "University of Nebraska Lincoln": ["UNL"],
+    "University of Nebraska Medical Center": ["UNMC"],
+    "University of Nebraska Omaha": ["UNO"],
+    "Veterans' Affairs, Department of": ["NDVA", "VA"],
+    "Wayne State College": ["WSC"]
+  };
+
+  // Lowercase words with single spaces: "&" reads as "and", and any other
+  // punctuation is a gap, so "game and parks" and "workers comp" find the
+  // names the state writes with "&" and an apostrophe.
+  function plainWords(s) {
+    return s.toLowerCase().replace(/&/g, " and ").replace(/[^a-z0-9]+/g, " ").trim();
+  }
+
+  // How an agency answers to what was typed: "" when its own name does, the
+  // alias when only one of those does, null when nothing does.
+  //
+  // The name matches the text as typed anywhere in it, as it always has, or
+  // every typed word anywhere in it. Substring, not prefix: someone looking
+  // for the Department of Roads is far likelier to type "roads" than
+  // "department", and this list is under a hundred strings in memory, so it
+  // can afford to be generous. An alias has to earn it: every typed word must
+  // start one of its words, or "ag" would call up every alias with those two
+  // letters inside it.
+  function agencyMatch(name, query) {
+    var raw = query.trim().toLowerCase();
+    if (!raw || name.toLowerCase().indexOf(raw) !== -1) return "";
+    var typed = plainWords(raw);
+    if (!typed) return null;
+    var parts = typed.split(" "), plain = plainWords(name);
+    function all(test) {
+      for (var i = 0; i < parts.length; i++) if (!test(parts[i])) return false;
+      return true;
+    }
+    if (all(function (w) { return plain.indexOf(w) !== -1; })) return "";
+    var also = Object.prototype.hasOwnProperty.call(AGENCY_ALIASES, name) ? AGENCY_ALIASES[name] : [];
+    for (var a = 0; a < also.length; a++) {
+      var starts = " " + plainWords(also[a]);
+      if (all(function (w) { return starts.indexOf(" " + w) !== -1; })) return also[a];
+    }
+    return null;
+  }
+
   function comboFilter(query) {
-    var q = query.trim().toLowerCase();
     var out = [];
     for (var i = 0; i < meta.entities.length; i++) {
-      if (!q || meta.entities[i].toLowerCase().indexOf(q) !== -1) out.push(i);
+      if (agencyMatch(meta.entities[i], query) !== null) out.push(i);
     }
     return out;
   }
@@ -2244,8 +2524,12 @@
       html = '<li class="none">No agency matches that</li>';
     } else {
       html += comboMatches.map(function (i, k) {
+        // Found by another name: say which, or "dot" answered with "Roads,
+        // Department of" reads as the box having misheard.
+        var aka = agencyMatch(meta.entities[i], query);
         return '<li role="option" id="entity-opt-' + k + '" data-i="' + i + '">' +
-               esc(meta.entities[i]) + "</li>";
+               esc(meta.entities[i]) +
+               (aka ? ' <span class="aka">(' + esc(aka) + ")</span>" : "") + "</li>";
       }).join("");
     }
     list.innerHTML = html;
@@ -2263,6 +2547,12 @@
     if (list.getBoundingClientRect().right > document.documentElement.clientWidth - 8) {
       list.style.left = "auto";
       list.style.right = "0";
+      // On a phone there is no more room to the left than to the right: the
+      // box sits 19px in, the list is wider than the box, and hung off the
+      // right edge it ran 135px off the left of a 390px screen, cutting the
+      // start off every name. Slide it back until it is all on screen.
+      var cut = 8 - list.getBoundingClientRect().left;
+      if (cut > 0) list.style.right = -cut + "px";
     }
   }
 
@@ -2961,6 +3251,7 @@
       agency: ei === "" ? "" : meta.entities[+ei],
       from: $("y0").value,
       through: $("y1").value,
+      when: $("when").value,
       min: $("min").value,
       max: $("max").value,
       desc: dv === "1" ? "has" : dv === "0" ? "none" : "",
@@ -2981,6 +3272,7 @@
     if (s.agency) p.set("agency", s.agency);
     if (s.from) p.set("from", s.from);
     if (s.through) p.set("through", s.through);
+    if (s.when) p.set("when", s.when);
     if (s.min) p.set("min", s.min);
     if (s.max) p.set("max", s.max);
     if (s.desc) p.set("desc", s.desc);
@@ -3001,6 +3293,7 @@
     var s = { q: params.get("q") || "", indesc: params.get("indesc") === "1",
               type: "", status: "", agency: "",
               from: params.get("from") || "", through: params.get("through") || "",
+              when: "",
               min: params.get("min") || "", max: params.get("max") || "",
               desc: "", baddates: params.get("baddates") === "1",
               sort: DEFAULT_SORT, dir: DEFAULT_DIR };
@@ -3019,6 +3312,8 @@
     take("agency", agency, meta.entities.indexOf(agency) >= 0);
     var desc = params.get("desc");
     take("desc", desc, desc === "has" || desc === "none");
+    var when = params.get("when");
+    take("when", when, WHEN.indexOf(when) >= 0);
     var sort = params.get("sort"), way = params.get("dir");
     if (sort !== null || way !== null) {
       var k = SORT_NAMES.indexOf(sort);
@@ -3044,6 +3339,7 @@
     syncEntityInput();
     $("y0").value = s.from;
     $("y1").value = s.through;
+    $("when").value = s.when || "";
     $("min").value = s.min;
     $("max").value = s.max;
     // Offered only once descsrc.bin has loaded, and apply() reads it through
@@ -3120,20 +3416,29 @@
     ["q", "y0", "y1", "min", "max"].forEach(function (id) {
       $(id).addEventListener("input", debounced);
     });
-    ["type", "status", "entity", "baddates", "desc"].forEach(function (id) {
+    ["type", "status", "entity", "baddates", "desc", "when"].forEach(function (id) {
       $(id).addEventListener("change", apply);
     });
+    $("when").title = "Counted from " + fmtDate(dataDay()) + ", the day this data is from";
     $("indesc").addEventListener("change", function () { setSearchDesc($("indesc").checked); });
     $("csv").addEventListener("click", exportPermalinks);
     $("csv-src").addEventListener("click", exportWithSources);
     $("reset").addEventListener("click", function () {
       ["q", "y0", "y1", "min", "max"].forEach(function (id) { $(id).value = ""; });
-      ["type", "status", "entity", "desc"].forEach(function (id) { $(id).value = ""; });
+      ["type", "status", "entity", "desc", "when"].forEach(function (id) { $(id).value = ""; });
       syncEntityInput();
       $("indesc").checked = false;
       $("baddates").checked = false;
       searchDesc = false;
+      // The sort too. Reset left it alone, so after sorting by Begins, newest
+      // first, the "everything" it went back to opened on the state's typo
+      // years rather than the largest amounts the page starts with, and the
+      // address kept ?sort= when every filter was gone.
+      sortKey = DEFAULT_SORT;
+      sortDir = DEFAULT_DIR;
+      showSortIndicator();
       apply();
+      scroller.scrollTop = 0;
     });
 
     scroller.addEventListener("scroll", render, { passive: true });
@@ -3218,6 +3523,12 @@
       queryFor: queryFor,
       stateFrom: stateFrom,
       comboFilter: comboFilter,
+      agencyMatch: agencyMatch,
+      vendorPlan: vendorPlan,
+      vendorRanges: vendorRanges,
+      markRanges: markRanges,
+      whenRange: whenRange,
+      addDays: addDays,
       isOpenEnded: isOpenEnded,
       endShown: endShown,
       oddity: oddity,

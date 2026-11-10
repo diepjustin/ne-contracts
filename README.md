@@ -66,14 +66,19 @@ The scraper reproduces the state's records faithfully, including their errors.
   largest agencies here, so their totals understate what they actually spend. **Do not
   read an agency's total as its budget.**
 - **A handful of records carry billion-dollar values and will dominate any total.** The
-  largest is `95601`, HHS / "CREIGHTON UNIVERSITY - ALL PAYMENTS", at $38,025,000,000,
-  then three Medicaid managed-care contracts at $6,650,000,000 each and `58-1-1451`
-  (EBSCO, UNL) at $4,000,000,000. Some are plausibly real not-to-exceed ceilings on
-  multi-year statewide programs rather than errors — the state's FAQ says service
-  contracts are valued at the estimated cost of the whole contract including renewals.
-  Treat the top of the amount column as ceilings, not money spent. The status bar's
-  total is the sum of the recorded amounts for the rows shown, and inherits every
+  largest are three Medicaid managed-care contracts at $6,650,000,000 each, then
+  `58-1-1451` (EBSCO, UNL) at $4,000,000,000. Some are plausibly real not-to-exceed
+  ceilings on multi-year statewide programs rather than errors — the state's FAQ says
+  service contracts are valued at the estimated cost of the whole contract including
+  renewals. Treat the top of the amount column as ceilings, not money spent. The status
+  bar's total is the sum of the recorded amounts for the rows shown, and inherits every
   caveat in this list.
+- **One edit by the state can move every total.** Until 8 Nov 2026 the largest record
+  was `95601`, HHS / "CREIGHTON UNIVERSITY - ALL PAYMENTS", at $38,025,000,000. That
+  night the state changed it to $195,000, and the sum of every record here fell from
+  about $109 B to $71.0 B. A total quoted from this page is the total on the day it was
+  read; `data/changes.jsonl` records each such change, and the page does not yet show
+  them.
 - **Vendor names are fragmented, and the site only partly repairs it.** The state
   records one firm many ways: 26 spellings of Hausmann Construction total $1.40 B where
   the largest single spelling shows $903 M. About 9,000 vendor strings sit in a cluster
@@ -500,7 +505,11 @@ The lint reads the code; `scripts/check_page.cjs` runs it. It serves a built sit
 passed", if the page throws or asks for anything off that server, if a search does not
 narrow the count, if Tab through the rows or Enter on one drops focus on the body, or if
 axe-core finds a WCAG 2.1 A or AA violation with a row open — on a 1366×900 desktop and
-a 390×844 phone. Until Oct 2026 only a person ran the selftest, and the keyboard and
+a 390×844 phone. Since Nov 2026 it also holds [the search](#how-the-search-matches) to 37
+known answers, looks up a vendor from the table with its name run together and with its
+words reversed, types "dot" into the Agency box, checks that a "Began or ends" preset
+narrows the table, reaches the address and leaves it again with Reset, and that the list
+of agencies opens inside the screen on both viewports. Until Oct 2026 only a person ran the selftest, and the keyboard and
 screen-reader paths had never been checked at all: every scroll re-rendered the focused
 row away, and `role=button` on each row hid its document link from screen readers.
 
@@ -891,6 +900,72 @@ sort takes 56–199 ms and is cached after, and peak heap is **~90 MB** (against
 for the old payload at 40% of the size). Sorting happens once per column rather than once
 per keystroke: the page caches an ordering and filtering walks it.
 
+### How the search matches
+
+The search box was one test: the vendor name contains the text exactly as typed. The
+state spells one company with and without punctuation and spaces, so that test split
+them. On the 9 Nov 2026 data:
+
+| Typed | Found before | Found now |
+| --- | ---: | ---: |
+| `j.e. dunn` | 3 records | 21 |
+| `je dunn` | 17 | 21 |
+| `o'neill` | 4 | 238 |
+| `oneill` | 232 | 238 |
+| `hy-vee` | 250 | 493 |
+| `hy vee` | 160 | 493 |
+| `u.s. bank` | 0 | 5 |
+| `john smith` | 0 | 1 (SMITH, JOHN W) |
+| `b&h photo` | 0 | 2,485 |
+
+A vendor name now matches when any of these holds (`vendorPlan` and `vendorRanges` in
+`index.html`):
+
+1. it contains the text as typed, which is the old rule, so nothing found before is lost;
+2. it contains the typed letters and digits in order, from the start of one of its words
+   to the end of one, whatever punctuation and spaces either side puts between them;
+3. for two or more words, at least one of them three letters long, every word is a word
+   of the name, in any order.
+
+Two allowances apply to several words only: the last word may be unfinished once it has
+three letters (`je dunn const`), and five letters or more may run on into a longer word,
+which is how `roche diagnostics` finds ROCHEDIAGNOSTICSCORPORATION, one of 1,362 vendor
+names with no spaces at all. The limits are there because each looser draft found things
+it should not: `3m` found OPTION 3 MATERIAL HANDLING, `mcdonald's` found MCDONALD,
+STEPHANIE, `at&t` found every ATTORNEY, `d & d` found every name with a D in it, and
+`art supply` found MEDSUPPLY PARTNERS. Those are all in `scripts/check_page.cjs` as
+answers the page must not give.
+
+**This finds spellings together; it does not merge them.** Each spelling is still its own
+vendor in the table and the export, and the reviewed groups in `vendor_groups.json` are
+still the only place two spellings are treated as one company. The count and total under
+a search do now include every spelling the search finds, so a total for `je dunn` read
+before this change is smaller than one read after it. The highlight marks the stretch of
+the name that matched, so a row's reason for being there is on screen. Document numbers
+and the description search match as they did.
+
+**The Agency box** answers to other names as well as the state's. The state's list keeps
+names the agencies have dropped: "Roads, Department of" has been the Department of
+Transportation since 2017, and `transportation`, `dot`, `dhhs`, `unl` and `unmc` all found
+nothing. `AGENCY_ALIASES` in `index.html` lists what else each agency is called, the list
+shows the alias that matched in brackets after the state's name, and choosing it filters
+by the state's name as before, so links do not change. `tests/test_agency_aliases.py`
+refuses a key that is not one of the scraper's agencies. Add a name only when it is in
+everyday use for that agency. On a phone the list used to open 135px off the left edge of
+a 390px screen, cutting the start off every name, because it is wider than the box and
+was hung off the box's right side; it now slides back onto the screen, and a name too
+long for it wraps.
+
+**Began or ends** is a short list of presets beside the year boxes: began in the last 30
+or 90 days, ends in the next 30, 90 or 180. The year boxes could not ask either question,
+since they filter begin dates by whole years and nothing filtered on the end date. Days
+are counted from the day the data was scraped, in Central time, not from the reader's
+clock, and a record with no date in the column is left out. On 9 Nov 2026: 7,798 records
+began in the last 30 days and 2,878 end in the next 90.
+
+**Reset** also puts the sort back to largest amount first. It used to leave the sort
+alone, so after sorting by Begins the full list opened on the state's typo years.
+
 ### Filters in the URL
 
 Every filter and the sort are written into the query string as they are applied, so the
@@ -913,6 +988,11 @@ the wrong thing. The value is left unapplied and the status bar says which one.
 
 `queryFor` and `stateFrom` are the two directions. Both are pure and both are published
 under `?selftest=1`.
+
+A "Began or ends" preset travels as `when=began30`, `began90`, `ends30`, `ends90` or
+`ends180`. It is counted from the data's date when the link is opened, not when it was
+made, so the same link shows a later window next month, which is what a link to "ending
+in the next 90 days" should do.
 
 ### What `?selftest=1` checks
 
@@ -968,7 +1048,8 @@ no rendered table to read otherwise — and prints the report below the table.
 `fmtDate`, `shortType`, `csvCell`, `csvParts`, `docStr`, `docCountCell`, `comparator`,
 `permalink`, `yearFloor`, `yearCeil`, `amountBound`, `crc32`, `queryFor`, `stateFrom`,
 `csvUnguard`, `csvHead`, `csvName`, `comboFilter`, `isOpenEnded`, `endShown`, `oddity`,
-`oddityText`, `displayName`, `listedPositions` and `documentName`. Every one of them is a
+`oddityText`, `displayName`, `listedPositions`, `documentName`, `vendorPlan`,
+`vendorRanges`, `markRanges`, `agencyMatch`, `whenRange` and `addDays`. Every one of them is a
 function of its arguments and the loaded payload, and every one was unreachable from
 outside the IIFE, which is most of why this page has never had a unit test.
 

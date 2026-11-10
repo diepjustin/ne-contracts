@@ -26,6 +26,13 @@ PAGE = os.path.join(ROOT, "index.html")
 # Measured 29 Sep 2026 in Chrome on macOS: the bar's height at each width
 # band above the page's 720px breakpoint, with the payload loaded. Re-measure
 # (document.querySelector(".controls").offsetHeight) when the controls change.
+#
+# 10 Nov 2026: "Began or ends" was added, and the amounts and the dates became
+# two groups so that the bar would not gain a row. Not re-measured on macOS.
+# In Chromium on Linux, whose wider fonts make this bar 393, 318, 318 and 166px
+# at these four widths, it measured the same before and after the change, so
+# the figures below were left as they are. Below 720px the bar is one row
+# (75px) taller than it was.
 BAR_HEIGHT_ABOVE_720 = [(721, 391), (768, 318), (1024, 242), (1366, 166)]
 
 
